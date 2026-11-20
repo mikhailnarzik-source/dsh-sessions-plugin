@@ -156,10 +156,22 @@ window.__ModuleLoader__.load({
       try {
         ctx.effect(() => {
           const style = document.createElement('style');
-          style.textContent = '@keyframes dsh-sync-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}';
+          // Общий слой оформления: им пользуются карточка плагина и страница
+          // синхронизации, поэтому кнопки и поля ведут себя одинаково.
+          style.textContent = [
+            '@keyframes dsh-sync-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}',
+            '.dshs-card button{transition:background-color .12s ease,border-color .12s ease,color .12s ease}',
+            '.dshs-card button:hover:not(:disabled){background:rgba(128,128,128,0.16);border-color:rgba(150,150,150,0.65)}',
+            '.dshs-card button:active:not(:disabled){background:rgba(128,128,128,0.24)}',
+            '.dshs-card button:disabled{opacity:.55;cursor:default}',
+            '.dshs-card button:focus-visible{outline:2px solid rgba(80,120,200,0.65);outline-offset:2px}',
+            '.dshs-card input:focus-visible,.dshs-card select:focus-visible{outline:2px solid rgba(80,120,200,0.55);outline-offset:1px}',
+            '.dshs-card select:hover{border-color:rgba(150,150,150,0.65)}',
+            '.dshs-card a{color:inherit}',
+          ].join('\n');
           document.head.appendChild(style);
           return () => style.remove();
-        }, 'dsh-sync: keyframes');
+        }, 'dsh-sync: styles');
       } catch (error) {
         console.error('[dsh-sync] анимация недоступна:', error);
       }
@@ -384,7 +396,7 @@ window.__ModuleLoader__.load({
 
         return h(
           'div',
-          { style: S.page },
+          { style: S.page, className: 'dshs-card' },
 
           h(
             'div',
@@ -746,6 +758,13 @@ window.__ModuleLoader__.load({
             status
               ? h('span', { style: S.hint }, `Сессий локально: ${status.local}, в зеркале: ${status.mirror}. Только локально: ${status.onlyLocal}, только в зеркале: ${status.onlyMirror}.`)
               : null,
+            h(
+              'div',
+              { style: { display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, opacity: 0.8 } },
+              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#2f9e44' } }), 'синхронизировано'),
+              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#e8590c' } }), 'есть изменения'),
+              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#d1242f' } }), 'не отправлялось'),
+            ),
             data?.pending
               ? h('span', { style: S.note }, 'Есть неотправленные изменения — они уйдут при следующей отправке (не чаще раза в 5 минут) или по кнопке.')
               : null,
@@ -864,7 +883,10 @@ window.__ModuleLoader__.load({
 
         return h(
           'div',
-          { style: { display: 'flex', flexDirection: 'column', gap: 18, padding: '32px 28px', maxWidth: 560 } },
+          {
+            className: 'dshs-card',
+            style: { display: 'flex', flexDirection: 'column', gap: 18, padding: '32px 28px', maxWidth: 560 },
+          },
           h('span', { style: { fontSize: 19, fontWeight: 600 } }, 'Синхронизация сессий'),
           h(
             'div',
