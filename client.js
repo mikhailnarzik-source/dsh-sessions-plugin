@@ -194,6 +194,32 @@ window.__ModuleLoader__.load({
         }
       };
 
+
+      // Состояние нужно и в панели, а не только на открытой странице плагина:
+      // опрашиваем его сами, иначе строка в подвале всегда видит пустоту.
+      try {
+        ctx.effect(() => {
+          let stopped = false;
+          let timer;
+
+          const tick = async () => {
+            if (stopped) return;
+            await refresh();
+            if (stopped) return;
+            timer = setTimeout(() => void tick(), 30_000);
+            timer?.unref?.();
+          };
+
+          void tick();
+          return () => {
+            stopped = true;
+            clearTimeout(timer);
+          };
+        }, 'dsh-sync: состояние для панели');
+      } catch (error) {
+        console.error('[dsh-sync] опрос состояния недоступен:', error);
+      }
+
       const save = async (draft) => {
         publish({ busy: 'save', notice: '', error: '' });
         try {
@@ -1149,7 +1175,7 @@ window.__ModuleLoader__.load({
             style: {
               position: 'fixed',
               left: 8,
-              bottom: 84,
+              bottom: 118,
               width: 236,
               display: 'flex',
               alignItems: 'center',
