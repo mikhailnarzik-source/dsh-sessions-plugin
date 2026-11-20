@@ -7,7 +7,7 @@
  * браузер не попадают.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-sync',
+  id: 'dsh-sessions',
   factory: (require) => {
     const module = { exports: {} };
     const exports = module.exports;

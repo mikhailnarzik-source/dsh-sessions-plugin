@@ -15,7 +15,7 @@ globalThis.window = { __ModuleLoader__: { load: (entry) => { loaded = entry } } 
 
 // eslint-disable-next-line no-new-func
 new Function(source)()
-assert.equal(loaded?.id, 'dsh-sync')
+assert.equal(loaded?.id, 'dsh-sessions', 'идентификатор клиента совпадает с именем пакета')
 assert.equal(typeof loaded.factory, 'function')
 
 // Мини-React: ровно то, что использует карточка.
