@@ -64,9 +64,9 @@ const ctx = {
 exported.apply(ctx)
 
 assert.ok(['dshSync', 'sessionDelete'].includes(boundNs), 'пространство имён клиента зарегистрировано')
-assert.equal(registrations.length, 9)
+assert.equal(registrations.length, 10)
 assert.ok(registrations.some(entry => entry.options.name === 'plugins.detail.section'), 'настройки на странице своего плагина')
-assert.ok(registrations.some(entry => entry.options.name === 'main' && entry.options.key === 'dsh-sync'), 'страница плагина в main')
+assert.ok(registrations.some(entry => entry.options.name === 'main' && entry.options.key === 'dsh-sessions'), 'страница плагина в main по имени пакета')
 assert.ok(registrations.some(entry => entry.options.name === 'sidebar.panellist'), 'пункт в левой панели')
 assert.ok(registrations.some(entry => entry.options.name === 'sidebar.session.row.leading'), 'индикатор в строке сессии')
 assert.ok(registrations.some(entry => entry.options.name === 'sidebar.footer.action'), 'строка состояния в подвале панели')

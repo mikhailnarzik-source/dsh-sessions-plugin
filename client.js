@@ -1524,13 +1524,15 @@ function DetailSection(props) {
       // Пункт в левой панели (рядом с «Расходами» и «Плагинами») и его страница:
       // пара slots.main + sidebar.panellist — тот же приём, что у других плагинов.
       try {
-        ctx.slots.inject('main', () => ctx.slots.register({
-          name: 'main',
-          key: 'dsh-sync',
-        }, SyncPanel));
+        ctx.slots.inject('main', () => {
+          // Ключ совпадает с именем пакета: по нему хост открывает страницу
+          // пункта панели. Старый ключ оставляем для совместимости.
+          ctx.slots.register({ name: 'main', key: 'dsh-sessions' }, SyncPanel)
+          ctx.slots.register({ name: 'main', key: 'dsh-sync' }, SyncPanel)
+        });
         ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
-          id: 'dsh-sync',
+          id: 'dsh-sessions',
           order: 6,
           label: () => 'Синхронизация сессий',
           locale: NS,
