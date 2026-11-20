@@ -364,7 +364,10 @@ window.__ModuleLoader__.load({
           subject !== null && typeof subject === 'object'
             ? String(subject.pkg?.name ?? subject.pkg ?? subject.row?.name ?? '')
             : ''
-        if (pkgName !== 'dsh-sessions' && pkgName !== 'dsh-sessions-plugin') return null
+        // Некоторые версии хоста не передают subject: тогда показываем секцию,
+        // иначе страница плагина остаётся пустой без объяснения.
+        const known = pkgName !== ''
+        if (known && pkgName !== 'dsh-sessions' && pkgName !== 'dsh-sessions-plugin') return null
         return h(SyncCard, { view: null })
       }
 
@@ -1568,6 +1571,7 @@ window.__ModuleLoader__.load({
           name: 'plugins.detail.section',
           id: 'dsh-sync-detail',
           order: 50,
+          locale: NS,
         }, DetailSection));
       } catch (error) {
         console.error('[dsh-sync] секция на странице плагина недоступна:', error);
