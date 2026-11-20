@@ -13,6 +13,7 @@ window.__ModuleLoader__.load({
     const exports = module.exports;
     const React = require('react');
     const h = React.createElement;
+    const { createPortal } = require('react-dom');
 
     const NS = 'dshSync';
     const STATE_PATH = '/api/dsh-sync/state';
@@ -987,7 +988,7 @@ window.__ModuleLoader__.load({
             h('span', null, label),
           );
 
-        return h(
+        const overlay = h(
           'div',
           {
             style: {
@@ -1061,6 +1062,14 @@ window.__ModuleLoader__.load({
             ),
           ),
         );
+
+        // Окно рисуем в body: внутри строки боковой панели position:fixed
+        // обрезается контейнером, и окно становится невидимым.
+        try {
+          return createPortal(overlay, document.body);
+        } catch {
+          return overlay;
+        }
       }
 
       function SyncToasts() {
@@ -1149,7 +1158,14 @@ window.__ModuleLoader__.load({
 
         const from = snapshot.data?.updatedFrom;
         const current = snapshot.data?.version;
-        return h(React.Fragment, null, toasts, from && current ? h(UpdateDialog, { from, version: current }) : null);
+        // Тосты и окно живут в body, а не внутри строки панели: иначе их
+        // обрезает контейнер бокового меню.
+        const layer = h(React.Fragment, null, toasts, from && current ? h(UpdateDialog, { from, version: current }) : null);
+        try {
+          return createPortal(layer, document.body);
+        } catch {
+          return layer;
+        }
       }
 
       function SyncSidebarIcon(props) {
