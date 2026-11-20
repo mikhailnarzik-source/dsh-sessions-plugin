@@ -935,8 +935,135 @@ window.__ModuleLoader__.load({
       const TOAST_LIFETIME_MS = 12_000;
       const TOAST_POLL_MS = 20_000;
 
+
+      /** Окно после обновления: показывает, что версия сменилась и всё работает. */
+      function UpdateDialog({ from, version }) {
+        const [closed, setClosed] = React.useState(false);
+        const storageKey = `dsh-sessions-updated-${version}`;
+
+        React.useEffect(() => {
+          try {
+            if (localStorage.getItem(storageKey) === '1') setClosed(true);
+          } catch {
+            // без хранилища окно просто покажется ещё раз
+          }
+        }, [storageKey]);
+
+        if (closed || !version) return null;
+
+        const done = () => {
+          setClosed(true);
+          try {
+            localStorage.setItem(storageKey, '1');
+          } catch {
+            // не критично
+          }
+        };
+
+        const row = (label) =>
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 } },
+            h(
+              'span',
+              {
+                style: {
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 18,
+                  height: 18,
+                  borderRadius: 9,
+                  background: 'rgba(47,158,68,0.18)',
+                  color: '#2f9e44',
+                  fontSize: 11,
+                  flex: '0 0 auto',
+                },
+              },
+              '✓',
+            ),
+            h('span', null, label),
+          );
+
+        return h(
+          'div',
+          {
+            style: {
+              position: 'fixed',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'rgba(0,0,0,0.45)',
+              zIndex: 80,
+            },
+            onClick: done,
+          },
+          h(
+            'div',
+            {
+              onClick: (event) => event.stopPropagation(),
+              style: {
+                width: 420,
+                maxWidth: 'calc(100vw - 32px)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 14,
+                padding: '20px 22px',
+                borderRadius: 14,
+                border: '1px solid rgba(128,128,128,0.28)',
+                background: 'var(--dsw-alias-bg-base, #22242a)',
+                color: 'var(--dsw-alias-label-primary, inherit)',
+                boxShadow: '0 18px 50px rgba(0,0,0,0.45)',
+              },
+            },
+            h('div', { style: { fontSize: 15, fontWeight: 600 } }, 'Обновление dsh-sessions'),
+            h('div', { style: { fontSize: 13, opacity: 0.8 } }, `Версия ${from} → ${version}`),
+            h(
+              'div',
+              {
+                style: {
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                  padding: '10px 12px',
+                  borderRadius: 10,
+                  background: 'rgba(128,128,128,0.08)',
+                },
+              },
+              row('Плагин установлен и запущен.'),
+              row('Настройки, зеркало и резервное хранилище сохранены.'),
+              row('Синхронизация продолжит работу автоматически.'),
+            ),
+            h(
+              'div',
+              { style: { display: 'flex', justifyContent: 'flex-end' } },
+              h(
+                'button',
+                {
+                  onClick: done,
+                  style: {
+                    padding: '7px 16px',
+                    borderRadius: 8,
+                    border: '1px solid rgba(128,128,128,0.35)',
+                    background: 'rgba(80,120,200,0.18)',
+                    color: 'inherit',
+                    font: 'inherit',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  },
+                },
+                'Готово',
+              ),
+            ),
+          ),
+        );
+      }
+
       function SyncToasts() {
         const [items, setItems] = React.useState([]);
+        const snapshot = useSnapshot();
 
         React.useEffect(() => {
           let cursor = 0;
@@ -983,7 +1110,7 @@ window.__ModuleLoader__.load({
         const color = (kind) =>
           kind === 'error' ? '#d1242f' : kind === 'update' ? '#1f6feb' : '#2f9e44';
 
-        return h(
+        const toasts = h(
           'div',
           {
             style: {
@@ -1017,6 +1144,10 @@ window.__ModuleLoader__.load({
             ),
           ),
         );
+
+        const from = snapshot.data?.updatedFrom;
+        const current = snapshot.data?.version;
+        return h(React.Fragment, null, toasts, from && current ? h(UpdateDialog, { from, version: current }) : null);
       }
 
       function SyncSidebarIcon(props) {

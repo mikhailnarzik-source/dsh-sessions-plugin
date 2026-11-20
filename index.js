@@ -85,6 +85,11 @@ const TEXT_OUTPUT = {
 
 const LAST_RUN_FILE = 'last-run.json'
 const PLUGIN_STATUS_FILE = 'plugin-status.json'
+const INSTALLED_VERSION_FILE = 'installed-version.json'
+
+// Версия, с которой плагин обновился при этом запуске (для окна «что нового»).
+let updatedFromVersion
+let packageVersion
 
 /** Состояние фоновой синхронизации (в памяти процесса). */
 const automation = {
@@ -463,6 +468,8 @@ async function readState(ctx) {
     ready: checks.every(check => check.ok),
     status: { local, mirror, onlyLocal, onlyMirror },
     suggestedFolder,
+    version: packageVersion,
+    updatedFrom: updatedFromVersion,
     pending,
     history,
     automation: {
@@ -858,6 +865,27 @@ async function runViaExternal(external, action) {
     }
     await writeLastRun(record)
     return record
+  }
+}
+
+/** Запомнить версию пакета и вернуть предыдущую, если она изменилась. */
+async function noteInstalledVersion() {
+  try {
+    const manifest = fileURLToPath(new URL('./package.json', import.meta.url))
+    const current = JSON.parse(await readFile(manifest, 'utf8')).version
+    packageVersion = current
+    const file = join(dshHome(), 'dsh-sync', INSTALLED_VERSION_FILE)
+    let previous
+    try {
+      previous = JSON.parse(await readFile(file, 'utf8')).version
+    } catch {
+      previous = undefined
+    }
+    await mkdir(join(dshHome(), 'dsh-sync'), { recursive: true })
+    await writeFile(file, `${JSON.stringify({ version: current, at: new Date().toISOString() }, null, 2)}\n`, 'utf8')
+    return typeof previous === 'string' && previous !== current ? previous : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -1410,6 +1438,10 @@ function startUpdateWatch(ctx) {
 }
 
 export function apply(ctx) {
+  void noteInstalledVersion().then((from) => {
+    updatedFromVersion = from
+  })
+
   // Встроенный плагин удаления: свой код, свои маршруты, своя область отказа.
   try {
     applyDeletePlugin(ctx)
