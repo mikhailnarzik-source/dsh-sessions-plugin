@@ -1122,6 +1122,74 @@ window.__ModuleLoader__.load({
         }
       }
 
+
+      /**
+       * Строка состояния у нижнего края боковой панели.
+       *
+       * Слот подвала панели отдаёт место только «действиям» и нашу строку не
+       * рисует, поэтому держим её отдельным слоем поверх приложения: иначе
+       * процент резервной копии просто некуда показать.
+       */
+      function SyncFooterBar() {
+        const state = useSnapshot();
+        const data = state.data;
+        if (data === null || data === undefined) return null;
+
+        const pending = data.pending === true;
+        const backup = data.backup;
+        const percent = backup?.percent;
+        const done = typeof percent === 'number' && percent >= 100;
+
+        return h(
+          'div',
+          {
+            title: backup
+              ? `Резервная копия: ${percent}% (${backup.doneFiles} из ${backup.totalFiles} файлов)`
+              : 'Синхронизация сессий',
+            style: {
+              position: 'fixed',
+              left: 8,
+              bottom: 44,
+              width: 232,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              height: 26,
+              padding: '0 10px',
+              borderRadius: 6,
+              fontSize: 12,
+              color: 'inherit',
+              opacity: 0.85,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              pointerEvents: 'none',
+              zIndex: 55,
+            },
+          },
+          h('span', {
+            style: {
+              width: 7,
+              height: 7,
+              borderRadius: 4,
+              flex: '0 0 auto',
+              background: pending ? '#e8590c' : '#2f9e44',
+            },
+          }),
+          h(
+            'span',
+            { style: { overflow: 'hidden', textOverflow: 'ellipsis' } },
+            pending ? 'есть изменения' : 'синхронизировано',
+          ),
+          typeof percent === 'number'
+            ? h(
+                'span',
+                { style: { marginLeft: 'auto', opacity: 0.75, fontSize: 11 } },
+                done ? 'резерв готов' : `резерв ${percent}%`,
+              )
+            : null,
+        );
+      }
+
       function SyncToasts() {
         const [items, setItems] = React.useState([]);
         const snapshot = useSnapshot();
@@ -1210,7 +1278,13 @@ window.__ModuleLoader__.load({
         const current = snapshot.data?.version;
         // Тосты и окно живут в body, а не внутри строки панели: иначе их
         // обрезает контейнер бокового меню.
-        const layer = h(React.Fragment, null, toasts, from && current ? h(UpdateDialog, { from, version: current }) : null);
+        const layer = h(
+          React.Fragment,
+          null,
+          toasts,
+          h(SyncFooterBar, null),
+          from && current ? h(UpdateDialog, { from, version: current }) : null,
+        );
         try {
           return createPortal(layer, document.body);
         } catch {
