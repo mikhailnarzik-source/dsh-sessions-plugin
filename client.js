@@ -896,6 +896,7 @@ function DetailSection(props) {
             'div',
             { style: S.section },
             h('span', { style: S.title }, h('span', { style: S.accent }), 'Синхронизация'),
+        h('span', { style: { fontSize: 11, opacity: 0.5 } }, 'секция страницы: ' + detailState),
             status
               ? h('span', { style: S.hint }, `Сессий локально: ${status.local}, в зеркале: ${status.mirror}. Только локально: ${status.onlyLocal}, только в зеркале: ${status.onlyMirror}.`)
               : null,
@@ -1572,7 +1573,9 @@ function DetailSection(props) {
           order: 50,
           locale: NS,
         }, DetailSection));
+        detailState = 'зарегистрирована'
       } catch (error) {
+        detailState = 'ошибка: ' + String(error?.message ?? error).slice(0, 120)
         console.error('[dsh-sync] секция на странице плагина недоступна:', error);
       }
 
@@ -2066,6 +2069,8 @@ function DetailSection(props) {
 
     let pluginCtx = null
     let translate = (key) => key
+    // Итог регистрации секции страницы плагина: показываем в карточке списка.
+    let detailState = 'не регистрировали'
 
     const initialState = {
       open: false,
