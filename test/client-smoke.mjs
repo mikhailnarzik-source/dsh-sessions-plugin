@@ -26,6 +26,10 @@ globalThis.document = {
   head: { appendChild() {} },
 }
 const React = {
+  Component: class Component {
+    constructor(props) { this.props = props }
+    setState(next) { this.state = { ...this.state, ...next } }
+  },
   createElement: (type, props, ...children) => ({ type, props, children }),
   useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
   useEffect: () => {},
@@ -89,8 +93,27 @@ assert.equal(page.type, 'div')
 assert.ok(page.children.length >= 3, 'страница карточки содержит проверку, настройки и синхронизацию')
 
 // Страница пункта в левой панели и иконка рендерятся без ошибок.
+// Обёртка-перехватчик ошибок — это класс: разворачиваем его до обычного элемента.
+const unwrap = (node) => {
+  let current = node
+  for (let step = 0; step < 5; step += 1) {
+    if (current === null || typeof current !== 'object') return current
+    const type = current.type
+    if (typeof type === 'function' && type.prototype?.render) {
+      current = new type({ ...current.props, children: current.children?.[0] ?? null }).render()
+      continue
+    }
+    if (typeof type === 'function' && type.name !== '' && step >= 0) {
+      current = type({ ...current.props, children: current.children })
+      continue
+    }
+    return current
+  }
+  return current
+}
+
 const panelRegistration = registrations.find(entry => entry.options.name === 'main')
-const panel = panelRegistration.component({})
+const panel = unwrap(panelRegistration.component({}))
 assert.equal(panel.type, 'div')
 assert.ok(panel.children.length >= 3, 'страница синхронизации содержит статус и кнопку')
 

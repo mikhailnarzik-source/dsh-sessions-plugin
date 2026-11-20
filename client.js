@@ -370,6 +370,34 @@ function DetailSection(props) {
         )
       }
 
+
+      /**
+       * Перехватчик ошибок рендера: вместо пустого экрана показывает причину.
+       * Без него сбой любого компонента оставляет страницу пустой.
+       */
+      class ErrorBoundary extends React.Component {
+        constructor(props) {
+          super(props);
+          this.state = { error: '' };
+        }
+        static getDerivedStateFromError(error) {
+          return { error: String(error?.message ?? error) };
+        }
+        componentDidCatch(error) {
+          console.error('[dsh-sync] сбой рендера:', error);
+        }
+        render() {
+          if (this.state.error !== '') {
+            return h(
+              'div',
+              { style: { padding: 16, fontSize: 12.5, color: '#d1242f', whiteSpace: 'pre-wrap' } },
+              'Ошибка рендера: ' + this.state.error,
+            );
+          }
+          return this.props.children;
+        }
+      }
+
       function SyncCard(props) {
         const view = props?.view;
         const state = useSnapshot();
@@ -1527,8 +1555,9 @@ function DetailSection(props) {
         ctx.slots.inject('main', () => {
           // Ключ совпадает с именем пакета: по нему хост открывает страницу
           // пункта панели. Старый ключ оставляем для совместимости.
-          ctx.slots.register({ name: 'main', key: 'dsh-sessions' }, SyncPanel)
-          ctx.slots.register({ name: 'main', key: 'dsh-sync' }, SyncPanel)
+          const SafePanel = () => h(ErrorBoundary, null, h(SyncPanel))
+          ctx.slots.register({ name: 'main', key: 'dsh-sessions' }, SafePanel)
+          ctx.slots.register({ name: 'main', key: 'dsh-sync' }, SafePanel)
         });
         ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
