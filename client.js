@@ -685,6 +685,7 @@ function DetailSection(props) {
                     placeholder: 'xxxx xxxx xxxx xxxx',
                     onChange: (event) => set({ webdavPassword: event.target.value }),
                   }),
+                  h('span', { style: { fontSize: 11, opacity: 0.6, lineHeight: 1.5 } }, "Пароль приложения: Яндекс ID → Безопасность → Пароли приложений → создать для «Файлы»."),
                   h('span', { style: S.label }, 'Папка на Диске'),
                   h('input', {
                     style: { ...S.input, colorScheme: themeScheme() },
@@ -722,6 +723,7 @@ function DetailSection(props) {
                     placeholder: 'y0_AgAAAA…',
                     onChange: (event) => set({ yandexToken: event.target.value }),
                   }),
+                  h('span', { style: { fontSize: 11, opacity: 0.6, lineHeight: 1.5 } }, "OAuth-токен выдаётся приложению с доступом к диску: oauth.yandex.ru → «Создать приложение» → права на файлы."),
                   h('span', { style: S.label }, 'Папка на Диске'),
                   h('input', {
                     style: { ...S.input, colorScheme: themeScheme() },
