@@ -1157,8 +1157,20 @@ window.__ModuleLoader__.load({
        * процент резервной копии просто некуда показать.
        */
       function SyncFooterBar() {
+        const [hidden, setHidden] = React.useState(false);
         const state = useSnapshot();
         const data = state.data;
+
+        // Если подвал панели уже рисует нашу строку, наложение не нужно:
+        // две полосы на одном месте выглядят как ошибка.
+        React.useEffect(() => {
+          const check = () => setHidden(document.getElementById('dsh-sync-footer-row') !== null);
+          check();
+          const timer = setInterval(check, 1000);
+          return () => clearInterval(timer);
+        }, []);
+
+        if (hidden) return null;
         if (data === null || data === undefined) return null;
 
         const pending = data.pending === true;
@@ -1175,7 +1187,7 @@ window.__ModuleLoader__.load({
             style: {
               position: 'fixed',
               left: 8,
-              bottom: 118,
+              bottom: 150,
               width: 236,
               display: 'flex',
               alignItems: 'center',
@@ -1416,6 +1428,7 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         {
+          id: 'dsh-sync-footer-row',
           title: backup
             ? `Резервная копия: ${percent}% (${backup.doneFiles} из ${backup.totalFiles} файлов)`
             : 'Синхронизация сессий',
@@ -1423,12 +1436,12 @@ window.__ModuleLoader__.load({
             display: 'flex',
             alignItems: 'center',
             gap: 8,
-            padding: '6px 10px',
-            margin: '0 6px 4px',
+            height: 32,
+            padding: '0 10px',
+            margin: '0 2px',
             borderRadius: 8,
-            fontSize: 12,
+            fontSize: 12.5,
             color: 'inherit',
-            opacity: 0.9,
             whiteSpace: 'nowrap',
             overflow: 'hidden',
           },
