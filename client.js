@@ -908,7 +908,7 @@ window.__ModuleLoader__.load({
                 gap: 8,
                 height: 34,
                 padding: '0 16px',
-                borderRadius: 9,
+                borderRadius: 8,
                 border: '1px solid rgba(128,128,128,0.32)',
                 background: 'rgba(128,128,128,0.12)',
                 color: 'inherit',
