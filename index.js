@@ -41,6 +41,7 @@ const CREATE_REPO_PATH = '/api/dsh-sync/create-repo'
 const DIAG_PATH = '/api/dsh-sync/diagnostics'
 const SESSIONS_PATH = '/api/dsh-sync/sessions'
 const NOTIFICATIONS_PATH = '/api/dsh-sync/notifications'
+const ACK_UPDATE_PATH = '/api/dsh-sync/ack-update'
 const YANDEX_CHECK_PATH = '/api/dsh-sync/yandex-check'
 
 // --- уведомления -----------------------------------------------------------
@@ -86,6 +87,7 @@ const TEXT_OUTPUT = {
 const LAST_RUN_FILE = 'last-run.json'
 const PLUGIN_STATUS_FILE = 'plugin-status.json'
 const INSTALLED_VERSION_FILE = 'installed-version.json'
+const PENDING_UPDATE_FILE = 'pending-update.json'
 
 // Версия, с которой плагин обновился при этом запуске (для окна «что нового»).
 let updatedFromVersion
@@ -422,6 +424,7 @@ async function readState(ctx) {
   const preferExternal = config.useExternal !== false
   const mode = external.found && external.callable && preferExternal ? 'external' : 'builtin'
 
+  const pendingUpdate = await readPendingUpdate()
   const currentFingerprint = await computeFingerprint(ctx)
   const pending = automation.fingerprint !== '' && currentFingerprint !== '' && currentFingerprint !== automation.fingerprint
 
@@ -469,7 +472,7 @@ async function readState(ctx) {
     status: { local, mirror, onlyLocal, onlyMirror },
     suggestedFolder,
     version: packageVersion,
-    updatedFrom: updatedFromVersion,
+    updatedFrom: pendingUpdate?.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
     pending,
     history,
     automation: {
@@ -883,9 +886,36 @@ async function noteInstalledVersion() {
     }
     await mkdir(join(dshHome(), 'dsh-sync'), { recursive: true })
     await writeFile(file, `${JSON.stringify({ version: current, at: new Date().toISOString() }, null, 2)}\n`, 'utf8')
-    return typeof previous === 'string' && previous !== current ? previous : undefined
+
+    if (typeof previous !== 'string' || previous === current) return undefined
+    // Отметку об обновлении храним на диске: окно должно появиться и после
+    // перезапуска DSH, а не только в том процессе, где менялась версия.
+    await writeFile(
+      join(dshHome(), 'dsh-sync', PENDING_UPDATE_FILE),
+      `${JSON.stringify({ from: previous, to: current }, null, 2)}\n`,
+      'utf8',
+    )
+    return previous
   } catch {
     return undefined
+  }
+}
+
+/** Незакрытая отметка об обновлении (если окно ещё не подтвердили). */
+async function readPendingUpdate() {
+  try {
+    return JSON.parse(await readFile(join(dshHome(), 'dsh-sync', PENDING_UPDATE_FILE), 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/** Убрать отметку об обновлении: пользователь нажал «Готово». */
+async function clearPendingUpdate() {
+  try {
+    await rm(join(dshHome(), 'dsh-sync', PENDING_UPDATE_FILE), { force: true })
+  } catch {
+    // файла нет — и хорошо
   }
 }
 
@@ -1565,6 +1595,11 @@ export function apply(ctx) {
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
     }
+  })
+
+  route('ack-update', ACK_UPDATE_PATH, async () => {
+    await clearPendingUpdate()
+    return json({ ok: true })
   })
 
   route('notifications', NOTIFICATIONS_PATH, async (request) => {

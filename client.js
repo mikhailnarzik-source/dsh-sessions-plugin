@@ -958,6 +958,8 @@ window.__ModuleLoader__.load({
           } catch {
             // не критично
           }
+          // Говорим host-части, что окно закрыто: отметка об обновлении снимется.
+          void post('/api/dsh-sync/ack-update', { version }).catch(() => {});
         };
 
         const row = (label) =>
