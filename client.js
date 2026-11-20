@@ -1192,85 +1192,6 @@ window.__ModuleLoader__.load({
       }
 
 
-      /**
-       * Строка состояния у нижнего края боковой панели.
-       *
-       * Слот подвала панели отдаёт место только «действиям» и нашу строку не
-       * рисует, поэтому держим её отдельным слоем поверх приложения: иначе
-       * процент резервной копии просто некуда показать.
-       */
-      function SyncFooterBar() {
-        const [hidden, setHidden] = React.useState(false);
-        const state = useSnapshot();
-        const data = state.data;
-
-        // Если подвал панели уже рисует нашу строку, наложение не нужно:
-        // две полосы на одном месте выглядят как ошибка.
-        React.useEffect(() => {
-          const check = () => setHidden(document.getElementById('dsh-sync-footer-row') !== null);
-          check();
-          const timer = setInterval(check, 1000);
-          return () => clearInterval(timer);
-        }, []);
-
-        if (hidden) return null;
-        if (data === null || data === undefined) return null;
-
-        const pending = data.pending === true;
-        const backup = data.backup;
-        const percent = backup?.percent;
-        const done = typeof percent === 'number' && percent >= 100;
-
-        return h(
-          'div',
-          {
-            title: backup
-              ? `Резервная копия: ${percent}% (${backup.doneFiles} из ${backup.totalFiles} файлов)`
-              : 'Синхронизация сессий',
-            style: {
-              position: 'fixed',
-              left: 8,
-              bottom: 150,
-              width: 236,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              height: 26,
-              padding: '0 10px',
-              borderRadius: 6,
-              fontSize: 12,
-              color: 'inherit',
-              opacity: 0.85,
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              pointerEvents: 'none',
-              zIndex: 55,
-            },
-          },
-          h('span', {
-            style: {
-              width: 7,
-              height: 7,
-              borderRadius: 4,
-              flex: '0 0 auto',
-              background: pending ? '#e8590c' : '#2f9e44',
-            },
-          }),
-          h(
-            'span',
-            { style: { overflow: 'hidden', textOverflow: 'ellipsis' } },
-            pending ? 'есть изменения' : 'синхронизировано',
-          ),
-          typeof percent === 'number'
-            ? h(
-                'span',
-                { style: { marginLeft: 'auto', opacity: 0.75, fontSize: 11 } },
-                done ? 'резерв готов' : `резерв ${percent}%`,
-              )
-            : null,
-        );
-      }
-
       function SyncToasts() {
         const [items, setItems] = React.useState([]);
         const snapshot = useSnapshot();
@@ -1361,7 +1282,6 @@ window.__ModuleLoader__.load({
           React.Fragment,
           null,
           toasts,
-          h(SyncFooterBar, null),
           from && current ? h(UpdateDialog, { from, version: current }) : null,
         );
         try {
@@ -1373,9 +1293,23 @@ window.__ModuleLoader__.load({
 
       function SyncSidebarIcon(props) {
         const size = Number(props && props.size) || 16;
+        const state = useSnapshot();
+        const data = state.data;
+        const ready = data !== null && data !== undefined;
+        const pending = ready && data.pending === true;
+        const percent = ready ? data.backup?.percent : undefined;
+        const dotColor = !ready ? 'rgba(128,128,128,0.7)' : pending ? '#e8590c' : '#2f9e44';
+        const hint = !ready
+          ? 'Синхронизация сессий'
+          : typeof percent === 'number'
+            ? `${pending ? 'Есть изменения' : 'Синхронизировано'} · резерв ${percent}%`
+            : pending
+              ? 'Есть изменения'
+              : 'Синхронизировано';
+
         return h(
           'span',
-          { style: { display: 'inline-flex', alignItems: 'center', position: 'relative' } },
+          { title: hint, style: { display: 'inline-flex', alignItems: 'center', position: 'relative' } },
           h(
             'svg',
             { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, focusable: false },
@@ -1393,6 +1327,18 @@ window.__ModuleLoader__.load({
               strokeLinejoin: 'round',
             }),
           ),
+          h('span', {
+            style: {
+              position: 'absolute',
+              top: -1,
+              right: -2,
+              width: 6,
+              height: 6,
+              borderRadius: 3,
+              background: dotColor,
+              boxShadow: '0 0 0 2px var(--dsw-alias-bg-base, #1c1d22)',
+            },
+          }),
           h(SyncToasts, null),
         );
       }
