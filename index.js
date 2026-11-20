@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { PLACEHOLDER, WEBDAV_SECRET, hasSecret, readSecret, writeSecret } from './lib/secrets.mjs'
 import { mkdtemp, open, rm } from 'node:fs/promises'
 import { readFile as readFileText } from 'node:fs/promises'
 
@@ -480,6 +481,8 @@ async function readState(ctx) {
     backupStatus,
     // Тип резервного хранилища без секретов: по нему карточка подписывает полосу.
     secondaryBackend: config?.secondary?.backend ?? 'none',
+    // Пароль в настройках не хранится: карточка показывает только факт.
+    secondaryPasswordStored: await hasSecret(ctx),
     pending,
     history,
     automation: {
@@ -597,7 +600,15 @@ async function saveSettings(ctx, payload) {
     const login = typeof payload.webdavLogin === 'string' ? payload.webdavLogin.trim() : ''
     if (login !== '') config.webdavLogin = login
     const pass = typeof payload.webdavPassword === 'string' ? payload.webdavPassword.trim() : ''
-    if (pass !== '') config.webdavPassword = pass
+    if (pass !== '' && pass !== PLACEHOLDER) {
+      // Пароль в файл не пишем: только в хранилище секретов профиля.
+      const saved = await writeSecret(ctx, pass)
+      if (saved) delete config.webdavPassword
+      else config.webdavPassword = pass
+    } else {
+      delete config.webdavPassword
+    }
+    config.webdavPasswordStored = await hasSecret(ctx)
     const wpath = typeof payload.webdavPath === 'string' ? payload.webdavPath.trim() : ''
     if (wpath !== '') config.webdavPath = wpath
   } else if (remote !== '') {
@@ -615,7 +626,8 @@ async function saveSettings(ctx, payload) {
       const secondary = {
         enabled: true,
         backend: kind,
-        repoDir: join(home, 'dsh-sync', `replica-${kind}`),
+        // Сохраняем уже накопленный кеш: иначе прогресс обнуляется.
+        repoDir: config.secondary?.repoDir ?? join(home, 'dsh-sync', `replica-${kind}`),
       }
       if (kind === 'git') {
         secondary.remote = typeof payload.secondaryRemote === 'string' ? payload.secondaryRemote.trim() : config.secondary?.remote
@@ -625,8 +637,19 @@ async function saveSettings(ctx, payload) {
         const password = typeof payload.secondaryPassword === 'string' ? payload.secondaryPassword.trim() : ''
         if (login !== '') secondary.webdavLogin = login
         else if (config.secondary?.webdavLogin) secondary.webdavLogin = config.secondary.webdavLogin
-        if (password !== '') secondary.webdavPassword = password
-        else if (config.secondary?.webdavPassword) secondary.webdavPassword = config.secondary.webdavPassword
+        if (password !== '' && password !== PLACEHOLDER) {
+          const saved = await writeSecret(ctx, password)
+          if (saved === false) secondary.webdavPassword = password
+          secondary.passwordStored = saved
+        } else {
+          secondary.passwordStored = await hasSecret(ctx)
+        }
+        if (config.secondary?.webdavPassword !== undefined && secondary.webdavPassword === undefined) {
+          // Старое значение из файла переносим в хранилище и убираем из файла.
+          const savedOld = await writeSecret(ctx, config.secondary.webdavPassword)
+          if (savedOld) secondary.passwordStored = true
+          else secondary.webdavPassword = config.secondary.webdavPassword
+        }
         secondary.webdavPath = typeof payload.secondaryPath === 'string' && payload.secondaryPath.trim() !== ''
           ? payload.secondaryPath.trim()
           : config.secondary?.webdavPath ?? 'dsh-sync'
@@ -725,9 +748,64 @@ async function runViaChild(action) {
 }
 
 /** Запустить синхронизацию: pull → push (или что-то одно). */
+/**
+ * Подставить пароль WebDAV из хранилища секретов.
+ *
+ * В файле настроек пароля больше нет — он приходит из хранилища. Дочерние
+ * процессы получают его через переменную окружения, поэтому на диск секрет
+ * не попадает.
+ */
+/**
+ * Один раз перенести пароль из файла настроек в хранилище секретов.
+ *
+ * Нужно для профилей, где пароль ещё лежит открытым текстом: после переноса
+ * файл перезаписывается без него.
+ */
+async function migrateSecret(ctx) {
+  try {
+    const home = dshHome()
+    const configPath = join(home, 'dsh-sync.json')
+    if (!existsSync(configPath)) return
+    const config = await loadConfig(home)
+    const values = [config.webdavPassword, config.secondary?.webdavPassword]
+      .filter((value) => typeof value === 'string' && value !== '')
+    if (values.length === 0) return
+    for (const value of values) {
+      if ((await writeSecret(ctx, value)) === false) return
+    }
+    if (config.webdavPassword !== undefined) {
+      delete config.webdavPassword
+      config.webdavPasswordStored = true
+    }
+    if (config.secondary?.webdavPassword !== undefined) {
+      const { webdavPassword, ...rest } = config.secondary
+      config.secondary = { ...rest, passwordStored: true }
+    }
+    await saveConfig(home, config)
+    console.log('[dsh-sync] пароль перенесён в хранилище секретов')
+  } catch (error) {
+    console.warn('[dsh-sync] не удалось перенести пароль:', error)
+  }
+}
+
+async function applySecret(ctx, config) {
+  const stored = await readSecret(ctx)
+  if (stored === undefined) return config
+  try {
+    process.env.DSH_SYNC_WEBDAV_PASSWORD = stored
+  } catch {
+    // окружение менять нельзя — останется только конфиг в памяти
+  }
+  if (config.secondary !== undefined) {
+    config.secondary = { ...config.secondary, webdavPassword: stored }
+  }
+  if (config.backend === 'webdav') config.webdavPassword = stored
+  return config
+}
+
 async function runSync(ctx, action) {
   const home = dshHome()
-  const config = await loadConfig(home)
+  const config = await applySecret(ctx, await loadConfig(home))
   const projectEntries = Object.keys(config.projects ?? {})
   if (projectEntries.length === 0) {
     return { ok: false, message: 'Сначала укажите проект в настройках плагина.' }
@@ -1513,6 +1591,8 @@ function startUpdateWatch(ctx) {
 }
 
 export function apply(ctx) {
+  void migrateSecret(ctx)
+
   void noteInstalledVersion().then((from) => {
     updatedFromVersion = from
   })

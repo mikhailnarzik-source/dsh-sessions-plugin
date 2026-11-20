@@ -832,7 +832,7 @@ function DetailSection(props) {
                       style: { ...S.input, colorScheme: themeScheme() },
                       type: 'password',
                       value: draft.secondaryPassword,
-                      placeholder: 'пароль приложения',
+                      placeholder: data?.secondaryPasswordStored === true ? 'пароль сохранён в хранилище' : 'пароль приложения',
                       onChange: (event) => set({ secondaryPassword: event.target.value }),
                     }),
                     h('input', {
