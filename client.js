@@ -168,6 +168,9 @@ window.__ModuleLoader__.load({
             '.dshs-card button:focus-visible{outline:2px solid rgba(80,120,200,0.65);outline-offset:2px}',
             '.dshs-card input:focus-visible,.dshs-card select:focus-visible{outline:2px solid rgba(80,120,200,0.55);outline-offset:1px}',
             '.dshs-card select:hover{border-color:rgba(150,150,150,0.65)}',
+            '.dshs-card select,.dshs-card select option{color-scheme:inherit;background-color:transparent;color:inherit}',
+            '.dshs-card select option{background:#22242a;color:#f2f2f2}',
+            '.dshs-card select option:checked{background:#3a3f4b;color:#ffffff}',
             '.dshs-card a{color:inherit}',
           ].join('\n');
           document.head.appendChild(style);
@@ -626,7 +629,7 @@ function DetailSection(props) {
               h(
                 'select',
                 {
-                  style: S.input,
+                  style: { ...S.input, colorScheme: themeScheme() },
                   value: draft.backend,
                   onChange: (event) => set({ backend: event.target.value }),
                 },
@@ -642,7 +645,7 @@ function DetailSection(props) {
                   { style: S.field },
                   h('span', { style: S.label }, 'Папка Яндекс.Диска'),
                   h('input', {
-                    style: S.input,
+                    style: { ...S.input, colorScheme: themeScheme() },
                     value: draft.repoDir,
                     placeholder: data?.suggestedFolder || 'C:\\Users\\me\\YandexDisk\\dsh-sync',
                     onChange: (event) => set({ repoDir: event.target.value }),
@@ -669,14 +672,14 @@ function DetailSection(props) {
                   { style: S.field },
                   h('span', { style: S.label }, 'Логин Яндекс.Диска'),
                   h('input', {
-                    style: S.input,
+                    style: { ...S.input, colorScheme: themeScheme() },
                     value: draft.webdavLogin,
                     placeholder: 'narzik',
                     onChange: (event) => set({ webdavLogin: event.target.value }),
                   }),
                   h('span', { style: S.label }, 'Пароль приложения'),
                   h('input', {
-                    style: S.input,
+                    style: { ...S.input, colorScheme: themeScheme() },
                     type: 'password',
                     value: draft.webdavPassword,
                     placeholder: 'xxxx xxxx xxxx xxxx',
@@ -684,7 +687,7 @@ function DetailSection(props) {
                   }),
                   h('span', { style: S.label }, 'Папка на Диске'),
                   h('input', {
-                    style: S.input,
+                    style: { ...S.input, colorScheme: themeScheme() },
                     value: draft.webdavPath,
                     placeholder: 'dsh-sync',
                     onChange: (event) => set({ webdavPath: event.target.value }),
@@ -713,7 +716,7 @@ function DetailSection(props) {
                   { style: S.field },
                   h('span', { style: S.label }, 'OAuth-токен Яндекс.Диска'),
                   h('input', {
-                    style: S.input,
+                    style: { ...S.input, colorScheme: themeScheme() },
                     type: 'password',
                     value: draft.yandexToken,
                     placeholder: 'y0_AgAAAA…',
@@ -721,7 +724,7 @@ function DetailSection(props) {
                   }),
                   h('span', { style: S.label }, 'Папка на Диске'),
                   h('input', {
-                    style: S.input,
+                    style: { ...S.input, colorScheme: themeScheme() },
                     value: draft.yandexPath,
                     placeholder: 'dsh-sync',
                     onChange: (event) => set({ yandexPath: event.target.value }),
@@ -749,7 +752,7 @@ function DetailSection(props) {
                   { style: S.field },
                   h('span', { style: S.label }, 'Адрес репозитория с сессиями (приватный)'),
                   h('input', {
-                    style: S.input,
+                    style: { ...S.input, colorScheme: themeScheme() },
                     value: draft.remote,
                     placeholder: 'https://github.com/user/dsh-sessions.git',
                     onChange: (event) => set({ remote: event.target.value }),
@@ -760,7 +763,7 @@ function DetailSection(props) {
               { style: S.field },
               h('span', { style: S.label }, 'Путь к проекту на этом компьютере'),
               h('input', {
-                style: S.input,
+                style: { ...S.input, colorScheme: themeScheme() },
                 value: draft.projectPath,
                 placeholder: 'C:\\work\\my-project',
                 onChange: (event) => set({ projectPath: event.target.value }),
@@ -771,7 +774,7 @@ function DetailSection(props) {
               { style: S.field },
               h('span', { style: S.label }, 'Идентификатор проекта (одинаковый на всех устройствах)'),
               h('input', {
-                style: S.input,
+                style: { ...S.input, colorScheme: themeScheme() },
                 value: draft.projectId,
                 placeholder: 'harness',
                 onChange: (event) => set({ projectId: event.target.value }),
@@ -799,7 +802,7 @@ function DetailSection(props) {
               h(
                 'select',
                 {
-                  style: S.input,
+                  style: { ...S.input, colorScheme: themeScheme() },
                   value: draft.secondaryBackend,
                   onChange: (event) => set({ secondaryBackend: event.target.value }),
                 },
@@ -809,7 +812,7 @@ function DetailSection(props) {
               ),
               draft.secondaryBackend === 'git'
                 ? h('input', {
-                    style: S.input,
+                    style: { ...S.input, colorScheme: themeScheme() },
                     value: draft.secondaryRemote,
                     placeholder: 'https://github.com/user/dsh-sessions-backup.git',
                     onChange: (event) => set({ secondaryRemote: event.target.value }),
@@ -820,20 +823,20 @@ function DetailSection(props) {
                     'div',
                     { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
                     h('input', {
-                      style: S.input,
+                      style: { ...S.input, colorScheme: themeScheme() },
                       value: draft.secondaryLogin,
                       placeholder: 'логин Яндекса',
                       onChange: (event) => set({ secondaryLogin: event.target.value }),
                     }),
                     h('input', {
-                      style: S.input,
+                      style: { ...S.input, colorScheme: themeScheme() },
                       type: 'password',
                       value: draft.secondaryPassword,
                       placeholder: 'пароль приложения',
                       onChange: (event) => set({ secondaryPassword: event.target.value }),
                     }),
                     h('input', {
-                      style: S.input,
+                      style: { ...S.input, colorScheme: themeScheme() },
                       value: draft.secondaryPath,
                       placeholder: 'dsh-sync-backup',
                       onChange: (event) => set({ secondaryPath: event.target.value }),
@@ -1059,7 +1062,17 @@ function DetailSection(props) {
           'div',
           {
             className: 'dshs-card',
-            style: { display: 'flex', flexDirection: 'column', gap: 18, padding: '32px 28px', maxWidth: 560 },
+            style: {
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 18,
+              padding: '32px 28px 64px',
+              maxWidth: 700,
+              height: '100%',
+              boxSizing: 'border-box',
+              overflowY: 'auto',
+              overflowX: 'hidden',
+            },
           },
           h('span', { style: { fontSize: 19, fontWeight: 600 } }, 'Синхронизация сессий'),
           h(
