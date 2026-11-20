@@ -1,0 +1,382 @@
+#!/usr/bin/env node
+/**
+ * dsh-sync — переносимый между устройствами и ОС обмен сессиями DSH.
+ *
+ * Зеркало (git-репозиторий) хранит сессии с нейтральным путём
+ * `/dsh-sync/projects/<id>`, устройство при приёме подставляет свой локальный
+ * путь. Поэтому Windows, macOS и Linux совместимы между собой.
+ *
+ *   dsh-sync init --remote git@github.com:you/dsh-sessions.git
+ *   dsh-sync project add dsh --path "C:\work\my-project"
+ *   dsh-sync push
+ *   dsh-sync pull
+ */
+import { join } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { loadConfig, normalizeProjectId, resolveDshHome, saveConfig } from './lib/config.mjs'
+import { listLocalSessions, listMirrorSessions, sessionsOfProject } from './lib/store.mjs'
+import { pull, push } from './lib/sync.mjs'
+import { ensureRepo, git, setRemote } from './lib/git.mjs'
+import { collectDiagnostics } from './lib/diagnostics.mjs'
+import { repairLog } from './lib/repair.mjs'
+import { pruneAttachments } from './lib/attachments.mjs'
+import { decodeFrame, frameSlices } from './lib/frames.mjs'
+import { readMeta, writeMeta } from './lib/mirror-meta.mjs'
+import { createRemote } from './lib/remote.mjs'
+
+const VALUE_FLAGS = new Set(['home', 'remote', 'repo', 'branch', 'path', 'title', 'project', 'backend', 'months', 'yandex-token', 'yandex-path'])
+
+function parseArgs(argv) {
+  const opts = {}
+  const positional = []
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--dry-run' || arg === '--prune' || arg === '--no-prune' || arg === '--attachments' || arg === '--save') {
+      opts[arg.slice(2)] = true
+      continue
+    }
+    if (arg.startsWith('--')) {
+      const key = arg.slice(2)
+      opts[key] = VALUE_FLAGS.has(key) ? argv[++i] : true
+      continue
+    }
+    positional.push(arg)
+  }
+  return { command: positional[0], sub: positional[1], rest: positional.slice(2), opts }
+}
+
+function home(opts) {
+  return resolveDshHome(opts.home)
+}
+
+async function cmdInit(opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+  if (opts.remote) config.remote = opts.remote
+  if (opts.branch) config.branch = opts.branch
+  if (opts.repo) config.repoDir = opts.repo
+  if (opts.backend) {
+    if (!['git', 'folder', 'yandex'].includes(opts.backend)) throw new Error('backend: git, folder или yandex')
+    config.backend = opts.backend
+  }
+  if (opts['yandex-token']) config.yandexToken = String(opts['yandex-token']).trim()
+  if (opts['yandex-path']) config.yandexPath = String(opts['yandex-path']).trim()
+  if (config.backend === 'yandex' && !config.repoDir) config.repoDir = join(dshHome, 'dsh-sync', 'yandex-cache')
+  if (opts.attachments) config.attachments = true
+  if (config.backend !== 'folder') {
+    await ensureRepo({ repoDir: config.repoDir, branch: config.branch })
+    if (config.remote) await setRemote(config.repoDir, config.remote)
+  }
+  await saveConfig(dshHome, config)
+  console.log(`конфиг:     ${join(dshHome, 'dsh-sync.json')}`)
+  console.log(`бэкенд:     ${config.backend}`)
+  console.log(`зеркало:    ${config.repoDir}`)
+  console.log(`remote:     ${config.remote || '(не задан)'}`)
+  console.log(`ветка:      ${config.branch}`)
+  console.log(`устройство: ${config.deviceId}`)
+  if (config.backend === 'folder') {
+    console.log('\nпапка зеркала должна синхронизироваться внешним клиентом (OneDrive, Яндекс.Диск, Syncthing)')
+  }
+}
+
+async function cmdProject(sub, rest, opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+
+  if (sub === 'add') {
+    const id = normalizeProjectId(rest[0] ?? '')
+    const path = opts.path
+    if (!path) throw new Error('нужен --path <локальный путь проекта>')
+    config.projects[id] = { path, title: opts.title ?? id }
+    await saveConfig(dshHome, config)
+    console.log(`проект ${id} → ${path}`)
+    return
+  }
+
+  if (sub === 'remove') {
+    const id = normalizeProjectId(rest[0] ?? '')
+    delete config.projects[id]
+    await saveConfig(dshHome, config)
+    console.log(`проект ${id} удалён`)
+    return
+  }
+
+  if (Object.keys(config.projects).length === 0) {
+    console.log('проекты не настроены: dsh-sync project add <id> --path <путь>')
+    return
+  }
+  console.log('проекты:')
+  for (const [id, entry] of Object.entries(config.projects)) {
+    console.log(`  ${id.padEnd(24)} ${entry.path}${entry.title && entry.title !== id ? `  (${entry.title})` : ''}`)
+  }
+}
+
+async function cmdDiagnostics(opts) {
+  const dshHome = home(opts)
+  let gitVersion = 'не найден'
+  const probe = await git(dshHome, ['--version'], { allowFailure: true })
+  if (probe.code === 0) gitVersion = probe.stdout.trim().replace(/^git version\s*/, '')
+  const report = await collectDiagnostics(dshHome, { gitVersion })
+  console.log(report)
+  if (opts.save) {
+    const dir = join(dshHome, 'dsh-sync')
+    await mkdir(dir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const file = join(dir, `diagnostics-${stamp}.txt`)
+    await writeFile(file, `${report}\n`, 'utf8')
+    console.log(`\nсохранено: ${file}`)
+  }
+}
+
+async function cmdDevice(sub, rest, opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+  if (!config.repoDir || !existsSync(config.repoDir)) throw new Error('зеркало ещё не создано')
+
+  const remote = await createRemote(config)
+  await remote.sync()
+  const meta = await readMeta(config.repoDir)
+
+  if (sub === 'forget') {
+    const id = rest[0]
+    if (!id) throw new Error('укажите id устройства: dsh-sync device forget <id>')
+    for (const project of Object.values(meta.projects ?? {})) {
+      if (project?.devices !== undefined) delete project.devices[id]
+    }
+    await writeMeta(config.repoDir, meta)
+    const result = await remote.commit(`dsh-sync: forget device ${id}`)
+    console.log(`устройство ${id} убрано из метаданных; коммит: ${result.committed ? 'создан' : 'нет изменений'}`)
+    return
+  }
+
+  const devices = new Set()
+  for (const project of Object.values(meta.projects ?? {})) {
+    for (const id of Object.keys(project?.devices ?? {})) devices.add(id)
+  }
+  if (devices.size === 0) {
+    console.log('в метаданных зеркала нет устройств')
+    return
+  }
+  console.log('устройства в зеркале:')
+  for (const id of [...devices].sort()) console.log(`  ${id}`)
+}
+
+/**
+ * Свернуть историю старше N месяцев в один корневой коммит.
+ * Нужный для роста репозитория случай: старые версии бинарных логов больше не
+ * нужны, а места занимают много.
+ */
+async function cmdCompact(opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+  const months = Number(opts.months ?? 36)
+  if (!Number.isFinite(months) || months <= 0) throw new Error('--months должен быть положительным числом')
+  if (config.backend === 'folder') throw new Error('для папки-бэкенда история не ведётся')
+  if (!config.repoDir || !existsSync(config.repoDir)) throw new Error('зеркало ещё не создано')
+
+  const cutoffMs = Date.now() - months * 30 * 24 * 60 * 60 * 1000
+  const cutoff = new Date(cutoffMs).toISOString()
+  const revList = await git(config.repoDir, ['rev-list', '-1', `--before=${cutoff}`, 'HEAD'], { allowFailure: true })
+  const base = revList.stdout.trim()
+  if (base === '') {
+    console.log(`нечего сворачивать: все коммиты моложе ${months} мес.`)
+    return
+  }
+
+  const tree = (await git(config.repoDir, ['rev-parse', `${base}^{tree}`])).stdout.trim()
+  const root = (await git(config.repoDir, [
+    '-c', 'user.name=dsh-sync', '-c', 'user.email=dsh-sync@localhost',
+    'commit-tree', tree, '-m', `base: история до ${cutoff.slice(0, 10)} свёрнута`,
+  ])).stdout.trim()
+
+  console.log(`база (последний коммит старше отсечки): ${base.slice(0, 12)}`)
+  console.log(`новый корневой коммит:                  ${root.slice(0, 12)}`)
+
+  if (opts['dry-run']) {
+    console.log('сухой прогон: ничего не изменено')
+    return
+  }
+
+  const rebased = await git(config.repoDir, ['rebase', '--onto', root, base, 'HEAD'], { allowFailure: true })
+  if (rebased.code !== 0) {
+    await git(config.repoDir, ['rebase', '--abort'], { allowFailure: true })
+    throw new Error(`rebase не удался: ${(rebased.stderr || rebased.stdout).trim().slice(0, 300)}`)
+  }
+
+  await git(config.repoDir, ['gc', '--prune=now', '--quiet'], { allowFailure: true })
+  console.log('история свёрнута. Чтобы обновить удалённый репозиторий, нужен force-push:')
+  console.log(`  git -C "${config.repoDir}" push --force origin HEAD:${config.branch}`)
+}
+
+/**
+ * Починить логи, скопированные при конфликте: в копии новый идентификатор в
+ * заголовке, а события называют исходную сессию, и DSH считает лог битым.
+ */
+/** Собрать хеши вложений, на которые ссылаются оставшиеся сессии. */
+async function collectAttachmentReferences(sessions) {
+  const references = new Set()
+  for (const session of sessions) {
+    if (typeof session.path !== 'string' || !existsSync(session.path)) continue
+    let bytes
+    try {
+      bytes = await readFile(session.path)
+    } catch {
+      continue
+    }
+    for (const [start, end] of frameSlices(bytes).slice(1)) {
+      try {
+        const text = decodeFrame(bytes, start, end)
+        for (const match of text.matchAll(/sha256:([0-9a-f]{64})/g)) references.add(match[1])
+      } catch {
+        // битый кадр не мешает остальным
+      }
+    }
+  }
+  return references
+}
+
+/** Удалить вложения, которые больше не нужны ни одной сессии. */
+async function cmdPruneAttachments(opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+  const sessions = await listLocalSessions(dshHome)
+  const references = await collectAttachmentReferences(sessions)
+  console.log(`ссылок в сессиях: ${references.size}, сессий просмотрено: ${sessions.length}`)
+
+  const result = await pruneAttachments({
+    home: dshHome,
+    repoDir: config.repoDir,
+    references,
+    dryRun: opts['dry-run'] === true,
+  })
+  console.log(`удалено файлов: ${result.removed}, оставлено: ${result.kept}, объём: ${(result.bytes / 1024 / 1024).toFixed(1)} MB`)
+  if (result.archive) console.log(`архив: ${result.archive}`)
+
+  if (!opts['dry-run'] && result.removed > 0 && config.backend !== 'folder') {
+    const remote = await createRemote(config)
+    const commit = await remote.commit('dsh-sync: убраны неиспользуемые вложения')
+    console.log(`зеркало: ${commit.committed ? 'коммит создан' : 'без изменений'}`)
+  }
+}
+
+async function cmdRepair(opts) {
+  const dshHome = home(opts)
+  const sessions = await listLocalSessions(dshHome)
+  let fixed = 0
+  let checked = 0
+
+  for (const session of sessions) {
+    if (typeof session.path !== 'string' || !existsSync(session.path)) continue
+    checked += 1
+    try {
+      const bytes = await readFile(session.path)
+      const result = repairLog(bytes)
+      if (result.changed > 0) {
+        if (!opts['dry-run']) await writeFile(session.path, result.bytes)
+        fixed += 1
+        console.log(`  ${session.id}: исправлено событий ${result.changed}${opts['dry-run'] ? ' (сухой прогон)' : ''}`)
+      }
+    } catch (error) {
+      console.log(`  ${session.id}: не удалось проверить (${error instanceof Error ? error.message : String(error)})`)
+    }
+  }
+
+  console.log(`проверено сессий: ${checked}, исправлено: ${fixed}`)
+  if (fixed > 0 && !opts['dry-run']) {
+    console.log('теперь выполните dsh-sync push — исправления уедут в зеркало')
+  }
+}
+
+async function cmdStatus(opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+  const local = await listLocalSessions(dshHome)
+  console.log(`устройство: ${config.deviceId}`)
+  console.log(`бэкенд:     ${config.backend ?? 'git'}`)
+  console.log(`зеркало:    ${config.repoDir}${existsSync(config.repoDir) ? '' : ' (ещё не создано)'}`)
+  console.log(`remote:     ${config.remote || '(не задан)'}`)
+  console.log('')
+  for (const [id, entry] of Object.entries(config.projects)) {
+    const mine = sessionsOfProject(local, entry.path)
+    const mirrored = existsSync(config.repoDir) ? await listMirrorSessions(config.repoDir, id) : []
+    const localIds = new Set(mine.map(s => s.id))
+    const mirrorIds = new Set(mirrored.map(s => s.id))
+    const onlyLocal = mine.filter(s => !mirrorIds.has(s.id)).length
+    const onlyMirror = mirrored.filter(s => !localIds.has(s.id)).length
+    console.log(`${id}  (${entry.path})`)
+    console.log(`  локально: ${mine.length}, в зеркале: ${mirrored.length}, только локально: ${onlyLocal}, только в зеркале: ${onlyMirror}`)
+  }
+}
+
+async function main() {
+  const { command, sub, rest, opts } = parseArgs(process.argv.slice(2))
+  const dshHome = home(opts)
+
+  if (command === 'init') return cmdInit(opts)
+  if (command === 'project') return cmdProject(sub, rest, opts)
+
+  if (command === 'push' || command === 'pull') {
+    const config = await loadConfig(dshHome)
+    if (Object.keys(config.projects).length === 0) throw new Error('проекты не настроены: dsh-sync project add <id> --path <путь>')
+    if (command === 'push') {
+      const result = await push({ home: dshHome, config, project: opts.project, prune: opts['no-prune'] ? false : true })
+      console.log(`отправлено сессий: ${result.pushed}`)
+      console.log(`удалено в зеркале: ${result.removed}`)
+      if (result.attachments) {
+        console.log(`вложений добавлено: ${result.attachments.added} (${(result.attachments.bytes / 1048576).toFixed(1)} MB)`)
+      }
+      console.log(`коммит: ${result.committed ? 'да' : 'нет изменений'}, push: ${result.pushedToRemote ? 'да' : 'нет'}`)
+      return
+    }
+    const result = await pull({ home: dshHome, config, project: opts.project, dryRun: opts['dry-run'] === true })
+    console.log(`импортировано: ${result.imported}`)
+    console.log(`обновлено:     ${result.updated}`)
+    console.log(`конфликтов:    ${result.conflicts}`)
+    console.log(`без изменений: ${result.unchanged}, локально новее: ${result.ahead}, открыто: ${result.locked}`)
+  if ((result.deleted ?? 0) > 0) console.log(`удалено по отметкам других устройств: ${result.deleted}`)
+    if (result.attachments) console.log(`вложений восстановлено: ${result.attachments.restored}`)
+    for (const fork of result.forkIds ?? []) console.log(`  fork: ${fork.from} → ${fork.to}`)
+    if (result.unknownProjects.length > 0) {
+      console.log(`\nв зеркале есть проекты, не настроенные здесь: ${result.unknownProjects.join(', ')}`)
+      console.log('добавьте их: dsh-sync project add <id> --path <локальный путь>')
+    }
+    if (result.imported + result.updated + result.conflicts > 0 && !opts['dry-run']) {
+      console.log('\nперезапустите DSH, чтобы новые сессии появились в списке')
+    }
+    return
+  }
+
+  if (command === 'status') return cmdStatus(opts)
+  if (command === 'compact') return cmdCompact(opts)
+  if (command === 'repair') return cmdRepair(opts)
+  if (command === 'prune-attachments') return cmdPruneAttachments(opts)
+  if (command === 'device') return cmdDevice(sub, rest, opts)
+  if (command === 'diagnostics') return cmdDiagnostics(opts)
+
+  console.log('использование:')
+  console.log('  dsh-sync init --backend git|folder --repo <каталог> [--remote <git-url>] [--branch main]')
+  console.log('  dsh-sync project add <id> --path <локальный путь> [--title <название>]')
+  console.log('  dsh-sync project list | remove <id>')
+  console.log('  dsh-sync status')
+  console.log('  dsh-sync diagnostics [--save]')
+  console.log('  dsh-sync device list | forget <id>')
+  console.log('  dsh-sync compact [--months 36] [--dry-run]')
+  console.log('  dsh-sync repair [--dry-run]')
+  console.log('  dsh-sync prune-attachments [--dry-run]')
+  console.log('  dsh-sync push [--project <id>] [--no-prune]')
+  console.log('  dsh-sync pull [--project <id>] [--dry-run]')
+  console.log('')
+  console.log('общие ключи: --home <каталог DSH> (по умолчанию $DSH_HOME или ~/.dsh)')
+  console.log('')
+  console.log('примеры:')
+  console.log('  dsh-sync init --backend git --remote git@github.com:me/dsh-sessions.git')
+  console.log('  dsh-sync init --backend folder --repo "C:\\Users\\me\\YandexDisk\\dsh-sync"')
+  console.log('  dsh-sync project add myproject --path "C:\\work\\my-project"')
+  process.exitCode = 2
+}
+
+main().catch((error) => {
+  console.error(`ошибка: ${error.message}`)
+  process.exitCode = 1
+})

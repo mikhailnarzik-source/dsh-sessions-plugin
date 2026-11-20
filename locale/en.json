@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Sessions",
+    "description": "Keeps session history identical on every device (git repository, cloud folder or Yandex.Disk) and adds a confirmed session deletion. Pulls on start, pushes changes, reports errors and writes a human-readable backup catalog.",
+    "detail": "docs/DETAIL.md"
+  }
+}
