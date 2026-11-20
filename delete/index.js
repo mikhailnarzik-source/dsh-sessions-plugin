@@ -20,6 +20,8 @@
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { addTombstone, readTombstones, writeTombstones } from '../lib/tombstones.mjs'
+import { loadConfig, resolveDshHome } from '../lib/config.mjs'
 
 export const name = 'session-delete'
 
@@ -96,6 +98,35 @@ async function handleInspect(ctx, request) {
  * @param request - buffered Fetch request.
  * @returns the JSON answer; `409` carries a business refusal.
  */
+
+/**
+ * Пометить сессию удалённой в зеркале синхронизации.
+ *
+ * Без этого удаление остаётся локальным: при следующем приёме сессия вернётся
+ * из репозитория. Надгробие уносится при обычной отправке и удаляет сессию на
+ * остальных устройствах, поэтому вызывается только по явному согласию.
+ *
+ * @param sessionId удалённая сессия.
+ * @returns true, если пометка записана.
+ */
+async function markDeletedInMirror(sessionId) {
+  try {
+    const config = await loadConfig(resolveDshHome())
+    if (config === undefined || typeof config.repoDir !== 'string') return false
+    if (config.remote === undefined || config.remote === '') {
+      // Без удалённого хранилища помечать нечего.
+      return false
+    }
+    const tombstones = await readTombstones(config.repoDir)
+    addTombstone(tombstones, sessionId, config.deviceId ?? 'device')
+    await writeTombstones(config.repoDir, tombstones)
+    return true
+  } catch (error) {
+    console.error('[session-delete] не удалось пометить сессию в зеркале:', error)
+    return false
+  }
+}
+
 async function handleDelete(ctx, request) {
   const decoded = await decodeRequest(request)
   if (decoded.error !== undefined) return decoded.error
@@ -103,9 +134,13 @@ async function handleDelete(ctx, request) {
     return json({ ok: false, code: 'request/invalid', message: 'The confirm word is required.' }, 400)
   }
   const deleteFiles = decoded.payload.deleteFiles === true
+  // localOnly = true — сессия исчезает только здесь; из зеркала она вернётся
+  // при следующем приёме, поэтому это осознанный выбор пользователя.
+  const localOnly = decoded.payload.localOnly === true
   try {
     const result = await deleteSession(ctx, decoded.sessionId, { deleteFiles })
-    return json(result, result.ok ? 200 : 409)
+    const marked = localOnly || result.ok !== true ? false : await markDeletedInMirror(decoded.sessionId)
+    return json({ ...result, markedInMirror: marked, localOnly }, result.ok ? 200 : 409)
   } catch (error) {
     console.error(`[session-delete] deleting ${decoded.sessionId} failed:`, error)
     return json({

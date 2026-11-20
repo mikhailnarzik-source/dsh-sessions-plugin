@@ -2139,6 +2139,7 @@ function DetailSection(props) {
       busy: false,
       error: null,
       deleteFiles: false,
+      localOnly: false,
       relatedOpen: false,
       filesOpen: false,
     }
@@ -2255,6 +2256,8 @@ function DetailSection(props) {
           sessionId: target.sessionId,
           confirm: CONFIRM_WORD,
           deleteFiles: state.deleteFiles === true,
+          // Область удаления: по умолчанию расходится на другие устройства.
+          localOnly: state.localOnly === true,
         })
         if (response.ok && payload !== null && payload.ok === true) {
           patch({ ...initialState })
@@ -2597,6 +2600,32 @@ function DetailSection(props) {
               ? t('session.runningNote')
               : t('session.liveNote'))
             : null,
+          h('div', { key: 'scope', className: `${P}-scope` }, [
+            h('p', { key: 'title', className: `${P}-status` }, t('dialog.scopeTitle')),
+            h('label', { key: 'everywhere', className: `${P}-check` }, [
+              h('input', {
+                key: 'radio',
+                type: 'radio',
+                name: 'dshsd-scope',
+                checked: current.localOnly !== true,
+                disabled: busy,
+                onChange: () => patch({ localOnly: false }),
+              }),
+              h('span', { key: 'text' }, t('dialog.scopeEverywhere')),
+            ]),
+            h('label', { key: 'local', className: `${P}-check` }, [
+              h('input', {
+                key: 'radio',
+                type: 'radio',
+                name: 'dshsd-scope',
+                checked: current.localOnly === true,
+                disabled: busy,
+                onChange: () => patch({ localOnly: true }),
+              }),
+              h('span', { key: 'text' }, t('dialog.scopeLocal')),
+            ]),
+            h('p', { key: 'warning', className: `${P}-error` }, t('dialog.warning')),
+          ]),
           files.length > 0 ? h('label', { key: 'check', className: `${P}-check` }, [
             h('input', {
               key: 'box',
