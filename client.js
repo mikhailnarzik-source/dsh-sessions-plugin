@@ -1458,15 +1458,17 @@ window.__ModuleLoader__.load({
     function SyncFooterRow() {
       const state = useSnapshot();
       const data = state.data;
-      if (data === null || data === undefined) return null;
+      // Строка рисуется даже до загрузки состояния: так сразу видно, что место
+      // в подвале панели действительно отдано, а не проигнорировано.
+      const ready = data !== null && data !== undefined;
 
-      const pending = data.pending === true;
-      const backup = data.backup;
-      const percent = backup?.percent ?? 100;
-      const done = percent >= 100;
+      const pending = ready && data.pending === true;
+      const backup = ready ? data.backup : undefined;
+      const percent = backup?.percent;
+      const done = typeof percent === 'number' && percent >= 100;
 
-      const dot = pending ? '#e8590c' : '#2f9e44';
-      const label = pending ? 'есть изменения' : 'синхронизировано';
+      const dot = !ready ? 'rgba(128,128,128,0.6)' : pending ? '#e8590c' : '#2f9e44';
+      const label = !ready ? 'синхронизация…' : pending ? 'есть изменения' : 'синхронизировано';
 
       return h(
         'div',
@@ -1499,7 +1501,7 @@ window.__ModuleLoader__.load({
           },
         }),
         h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, label),
-        backup && !done
+        typeof percent === 'number' && !done
           ? h('span', { style: { opacity: 0.7, marginLeft: 'auto' } }, `резерв ${percent}%`)
           : null,
       );
