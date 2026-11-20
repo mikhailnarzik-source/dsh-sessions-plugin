@@ -1,6 +1,6 @@
 {
   "name": "dsh-sessions",
-  "version": "1.0.35",
+  "version": "1.0.36",
   "description": "Сессии DeepSeek Harness: синхронизация между устройствами (git, облако, Яндекс.Диск) и удаление сессии с подтверждением",
   "type": "module",
   "license": "MIT",
@@ -55,5 +55,6 @@
         "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
-  }
+  },
+  "icon": "./icon.svg"
 }
