@@ -23,6 +23,7 @@ import { readHistory, recordRun } from './lib/history.mjs'
 import { readLedger, sessionState } from './lib/ledger.mjs'
 import { probeYandex } from './lib/yandex.mjs'
 import { probeWebdav } from './lib/webdav.mjs'
+import { backupProgress } from './lib/progress.mjs'
 import { apply as applyDeletePlugin } from './delete/index.js'
 import { matchProjectPath } from './lib/mirror-meta.mjs'
 import { listLocalSessions, listMirrorSessions, sessionsOfProject } from './lib/store.mjs'
@@ -425,6 +426,7 @@ async function readState(ctx) {
   const mode = external.found && external.callable && preferExternal ? 'external' : 'builtin'
 
   const pendingUpdate = await readPendingUpdate()
+  const backup = await readBackupProgress(config)
   const currentFingerprint = await computeFingerprint(ctx)
   const pending = automation.fingerprint !== '' && currentFingerprint !== '' && currentFingerprint !== automation.fingerprint
 
@@ -473,6 +475,7 @@ async function readState(ctx) {
     suggestedFolder,
     version: packageVersion,
     updatedFrom: pendingUpdate?.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
+    backup,
     pending,
     history,
     automation: {
@@ -868,6 +871,28 @@ async function runViaExternal(external, action) {
     }
     await writeLastRun(record)
     return record
+  }
+}
+
+/** Готовность резервной копии; считается не чаще раза в 10 секунд. */
+let backupProgressCache = { at: 0, key: '', value: undefined }
+
+async function readBackupProgress(config) {
+  const secondary = config?.secondary
+  if (secondary === undefined || secondary === null || secondary.enabled === false) return undefined
+  const repoDir = secondary.repoDir
+  if (typeof repoDir !== 'string' || repoDir === '') return undefined
+
+  const key = `${repoDir}:${secondary.backend}`
+  if (backupProgressCache.value !== undefined && backupProgressCache.key === key && Date.now() - backupProgressCache.at < 10_000) {
+    return backupProgressCache.value
+  }
+  try {
+    const value = await backupProgress(repoDir)
+    backupProgressCache = { at: Date.now(), key, value }
+    return value
+  } catch {
+    return backupProgressCache.value
   }
 }
 

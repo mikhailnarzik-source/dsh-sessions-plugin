@@ -766,6 +766,56 @@ window.__ModuleLoader__.load({
               h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#e8590c' } }), 'есть изменения'),
               h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#d1242f' } }), 'не отправлялось'),
             ),
+            data?.backup
+              ? (() => {
+                  const backup = data.backup;
+                  const megabytes = (bytes) => `${(Number(bytes ?? 0) / 1024 / 1024).toFixed(1)} МБ`;
+                  const done = backup.percent >= 100;
+                  return h(
+                    'div',
+                    { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 2 } },
+                    h(
+                      'div',
+                      { style: { display: 'flex', justifyContent: 'space-between', fontSize: 12, opacity: 0.85 } },
+                      h('span', null, 'Резервная копия'),
+                      h(
+                        'span',
+                        { style: { fontWeight: 600 } },
+                        done
+                          ? `готово · ${megabytes(backup.totalBytes)}`
+                          : `${backup.percent}% · ${megabytes(backup.doneBytes)} из ${megabytes(backup.totalBytes)}`,
+                      ),
+                    ),
+                    h(
+                      'div',
+                      {
+                        style: {
+                          height: 6,
+                          borderRadius: 3,
+                          background: 'rgba(128,128,128,0.22)',
+                          overflow: 'hidden',
+                        },
+                      },
+                      h('div', {
+                        style: {
+                          width: `${Math.max(1, backup.percent)}%`,
+                          height: '100%',
+                          borderRadius: 3,
+                          background: done ? '#2f9e44' : '#e8590c',
+                          transition: 'width .3s ease',
+                        },
+                      }),
+                    ),
+                    h(
+                      'span',
+                      { style: S.hint },
+                      done
+                        ? 'Все файлы выгружены в резервное хранилище.'
+                        : `Выгружено ${backup.doneFiles} из ${backup.totalFiles} файлов. Остальные догружаются в фоне — вручную ничего делать не нужно.`,
+                    ),
+                  );
+                })()
+              : null,
             data?.pending
               ? h('span', { style: S.note }, 'Есть неотправленные изменения — они уйдут при следующей отправке (не чаще раза в 5 минут) или по кнопке.')
               : null,
