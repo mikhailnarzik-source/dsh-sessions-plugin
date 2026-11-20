@@ -358,17 +358,16 @@ window.__ModuleLoader__.load({
        * или официальный плагин. Настройки показываем только для своего пакета,
        * иначе они появятся на странице каждого плагина.
        */
-      function DetailSection(props) {
+function DetailSection(props) {
+        // Настройки плюс строка диагностики: пока неясно, что передаёт страница.
         const subject = props?.subject
-        const pkgName =
-          subject !== null && typeof subject === 'object'
-            ? String(subject.pkg?.name ?? subject.pkg ?? subject.row?.name ?? '')
-            : ''
-        // Некоторые версии хоста не передают subject: тогда показываем секцию,
-        // иначе страница плагина остаётся пустой без объяснения.
-        const known = pkgName !== ''
-        if (known && pkgName !== 'dsh-sessions' && pkgName !== 'dsh-sessions-plugin') return null
-        return h(SyncCard, { view: null })
+        const debug = subject === undefined ? 'subject: нет' : 'subject: ' + JSON.stringify(subject).slice(0, 220)
+        return h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+          h('span', { style: { fontSize: 11, opacity: 0.55 } }, debug),
+          h(SyncCard, { view: null }),
+        )
       }
 
       function SyncCard(props) {
