@@ -1293,48 +1293,138 @@ window.__ModuleLoader__.load({
 
 
       /**
-       * Плашка в шапке беседы: состояние синхронизации видно в основном окне.
-       * Занимает своё место в строке заголовка, поэтому ничего не перекрывает.
+       * Плашка состояния в основном окне: короткая подпись и всплывающая
+       * карточка с двумя хранилищами. Висит отдельным слоем, поэтому ничего
+       * не перекрывает в обычном состоянии.
        */
       function SyncHeaderBadge() {
         const state = useSnapshot();
         const data = state.data;
         const ready = data !== null && data !== undefined;
 
+        const ref = React.useRef(null);
+        const [anchor, setAnchor] = React.useState(null);
+
         const pending = ready && data.pending === true;
         const percent = ready ? data.backup?.percent : undefined;
         const color = !ready ? 'rgba(128,128,128,0.7)' : pending ? '#e8590c' : '#2f9e44';
-        const label = !ready
-          ? 'синхронизация…'
-          : pending
-            ? 'есть изменения'
-            : 'синхронизировано';
-        const detail = typeof percent === 'number' ? ` · резерв ${percent}%` : '';
+        const caption = !ready
+          ? 'синхронизация'
+          : typeof percent === 'number'
+            ? `резерв ${percent}%`
+            : pending
+              ? 'есть изменения'
+              : 'синхронизировано';
+
+        const open = () => {
+          const rect = ref.current?.getBoundingClientRect?.();
+          if (rect !== undefined && rect !== null) {
+            setAnchor({ left: rect.left, top: rect.top, width: rect.width });
+          }
+        };
+        const close = () => setAnchor(null);
 
         return h(
           'span',
           {
-            title: `${label}${detail}`,
+            ref,
+            onMouseEnter: open,
+            onMouseLeave: close,
+            onFocus: open,
+            onBlur: close,
+            tabIndex: 0,
+            title: ready ? undefined : 'Состояние синхронизации загружается',
             style: {
               display: 'inline-flex',
               alignItems: 'center',
               gap: 6,
-              height: 24,
-              padding: '0 9px',
-              borderRadius: 12,
+              height: 22,
+              padding: '0 8px',
+              borderRadius: 11,
               border: '1px solid rgba(128,128,128,0.28)',
               background: 'rgba(128,128,128,0.08)',
               fontSize: 11.5,
               color: 'inherit',
               whiteSpace: 'nowrap',
               userSelect: 'none',
+              cursor: 'default',
+              outline: 'none',
             },
           },
           h('span', {
             style: { width: 7, height: 7, borderRadius: 4, background: color, flex: '0 0 auto' },
           }),
-          h('span', { style: { opacity: 0.85 } }, pending ? 'есть изменения' : typeof percent === 'number' ? `резерв ${percent}%` : 'синхронизация'),
+          h('span', { style: { opacity: 0.85 } }, caption),
+          anchor !== null ? h(SyncPopover, { anchor, data }) : null,
         );
+      }
+
+      /** Всплывающая карточка с двумя хранилищами; рисуется поверх приложения. */
+      function SyncPopover({ anchor, data }) {
+        if (data === null || data === undefined) return null;
+
+        const megabytes = (bytes) => `${(Number(bytes ?? 0) / 1024 / 1024).toFixed(1).replace('.', ',')} МБ`;
+        const status = data.status;
+        const backup = data.backup;
+        const backend = data.config?.backend ?? 'git';
+        const secondaryBackend = data.secondaryBackend;
+        const hasSecondary = typeof secondaryBackend === 'string' && secondaryBackend !== 'none';
+
+        const primaryPercent = status && status.local > 0 ? (status.mirror / status.local) * 100 : 100;
+
+        const rows = [
+          h(ProgressRow, {
+            key: 'primary',
+            label: BACKEND_LABELS[backend] ?? 'Основное',
+            percent: primaryPercent,
+            done: primaryPercent >= 100,
+            note: status ? `${status.mirror} из ${status.local} сессий` : '',
+          }),
+        ];
+        if (hasSecondary) {
+          rows.push(
+            h(ProgressRow, {
+              key: 'secondary',
+              label: BACKEND_LABELS[secondaryBackend] ?? 'Резерв',
+              percent: backup?.percent ?? 0,
+              done: (backup?.percent ?? 0) >= 100,
+              note: backup
+                ? `${megabytes(backup.doneBytes)} из ${megabytes(backup.totalBytes)} · ${backup.doneFiles} из ${backup.totalFiles} файлов`
+                : 'готовится к выгрузке',
+            }),
+          );
+        }
+
+        const card = h(
+          'div',
+          {
+            style: {
+              position: 'fixed',
+              left: Math.max(8, Math.min(anchor.left, window.innerWidth - 300)),
+              bottom: window.innerHeight - anchor.top + 8,
+              width: 280,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+              padding: '12px 14px',
+              borderRadius: 12,
+              border: '1px solid rgba(128,128,128,0.3)',
+              background: 'var(--dsw-alias-bg-base, #22242a)',
+              color: 'var(--dsw-alias-label-primary, inherit)',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.35)',
+              zIndex: 2147483000,
+              pointerEvents: 'none',
+            },
+          },
+          h('span', { style: { fontSize: 12.5, fontWeight: 600 } }, 'Синхронизация'),
+          ...rows,
+        );
+
+        try {
+          return createPortal(card, document.body);
+        } catch {
+          return card;
+        }
       }
 
       function SyncSidebarIcon(props) {
