@@ -1284,7 +1284,73 @@ window.__ModuleLoader__.load({
       } catch (error) {
         console.error('[dsh-sync] индикатор в списке сессий недоступен:', error);
       }
+
+      // Строка состояния в подвале панели: сразу видно, всё ли синхронизировано.
+      try {
+        ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+          name: 'sidebar.footer.action',
+          id: 'dsh-sync-footer',
+          order: 40,
+        }, SyncFooterRow));
+      } catch (error) {
+        console.error('[dsh-sync] строка состояния в подвале недоступна:', error);
+      }
     }
+
+    // --- строка состояния в подвале боковой панели ------------------------
+    /**
+     * Компактная строка над «Pending changes»: состояние сессий и готовность
+     * резервной копии. Читает тот же снимок, что и карточка плагина.
+     */
+    function SyncFooterRow() {
+      const state = useSnapshot();
+      const data = state.data;
+      if (data === null || data === undefined) return null;
+
+      const pending = data.pending === true;
+      const backup = data.backup;
+      const percent = backup?.percent ?? 100;
+      const done = percent >= 100;
+
+      const dot = pending ? '#e8590c' : '#2f9e44';
+      const label = pending ? 'есть изменения' : 'синхронизировано';
+
+      return h(
+        'div',
+        {
+          title: backup
+            ? `Резервная копия: ${percent}% (${backup.doneFiles} из ${backup.totalFiles} файлов)`
+            : 'Синхронизация сессий',
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 10px',
+            margin: '0 6px 4px',
+            borderRadius: 8,
+            fontSize: 12,
+            color: 'inherit',
+            opacity: 0.9,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+          },
+        },
+        h('span', {
+          style: {
+            width: 7,
+            height: 7,
+            borderRadius: 4,
+            background: dot,
+            flex: '0 0 auto',
+          },
+        }),
+        h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, label),
+        backup && !done
+          ? h('span', { style: { opacity: 0.7, marginLeft: 'auto' } }, `резерв ${percent}%`)
+          : null,
+      );
+    }
+
 
     // --- индикатор синхронизации в списке сессий --------------------------
     // Один общий запрос на все строки: список перерисовывается часто, а
