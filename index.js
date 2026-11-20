@@ -8,7 +8,7 @@
  * Токены нигде не хранятся: git использует штатный credential helper.
  */
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -423,6 +423,7 @@ async function readState(ctx) {
   const history = await readHistory(home, 5)
 
   const external = await discoverExternal(ctx)
+  // Итог пишем в журнал: при сбое видно, что и когда запускалось.
   const preferExternal = config.useExternal !== false
   const mode = external.found && external.callable && preferExternal ? 'external' : 'builtin'
 
@@ -803,6 +804,18 @@ async function applySecret(ctx, config) {
   return config
 }
 
+
+/** Записать событие в общий журнал плагина. */
+async function appendLog(kind, ok, text) {
+  try {
+    const dir = join(dshHome(), 'dsh-sessions')
+    await mkdir(dir, { recursive: true })
+    await appendFile(join(dir, 'log.jsonl'), JSON.stringify({ at: new Date().toISOString(), plugin: 'dsh-sessions', kind, ok, text }) + '\n', 'utf8')
+  } catch {
+    // журнал необязателен
+  }
+}
+
 async function runSync(ctx, action) {
   const home = dshHome()
   const config = await applySecret(ctx, await loadConfig(home))
@@ -812,6 +825,7 @@ async function runSync(ctx, action) {
   }
 
   const external = await discoverExternal(ctx)
+  void appendLog('sync-start', true, `запуск: ${action}`)
   if (external.found && external.callable && config.useExternal !== false) {
     return runViaExternal(external, action)
   }
