@@ -1149,8 +1149,8 @@ window.__ModuleLoader__.load({
             style: {
               position: 'fixed',
               left: 8,
-              bottom: 44,
-              width: 232,
+              bottom: 84,
+              width: 236,
               display: 'flex',
               alignItems: 'center',
               gap: 8,
@@ -1233,8 +1233,6 @@ window.__ModuleLoader__.load({
           }, TOAST_LIFETIME_MS);
           return () => clearTimeout(timer);
         }, [items]);
-
-        if (items.length === 0) return null;
 
         const color = (kind) =>
           kind === 'error' ? '#d1242f' : kind === 'update' ? '#1f6feb' : '#2f9e44';
