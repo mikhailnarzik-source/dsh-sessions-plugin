@@ -299,6 +299,9 @@ window.__ModuleLoader__.load({
             }),
           ),
           h('span', { style: { fontSize: 11.5, opacity: 0.7 } }, note ?? caption),
+          data?.backupStatus !== undefined && data.backupStatus.ok !== true && data.backupStatus.message !== ''
+            ? h('span', { style: { fontSize: 11.5, color: '#d1242f' } }, data.backupStatus.message)
+            : null,
         );
       }
 

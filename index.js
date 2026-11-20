@@ -427,6 +427,7 @@ async function readState(ctx) {
 
   const pendingUpdate = await readPendingUpdate()
   const backup = await readBackupProgress(config)
+  const backupStatus = await readSecondaryStatus()
   const currentFingerprint = await computeFingerprint(ctx)
   const pending = automation.fingerprint !== '' && currentFingerprint !== '' && currentFingerprint !== automation.fingerprint
 
@@ -476,6 +477,7 @@ async function readState(ctx) {
     version: packageVersion,
     updatedFrom: pendingUpdate?.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
     backup,
+    backupStatus,
     // Тип резервного хранилища без секретов: по нему карточка подписывает полосу.
     secondaryBackend: config?.secondary?.backend ?? 'none',
     pending,
@@ -873,6 +875,22 @@ async function runViaExternal(external, action) {
     }
     await writeLastRun(record)
     return record
+  }
+}
+
+/** Последний результат выгрузки резерва: нужен, чтобы показать причину сбоя. */
+async function readSecondaryStatus() {
+  try {
+    const parsed = JSON.parse(await readFile(join(dshHome(), 'dsh-sync', 'secondary-status.json'), 'utf8'))
+    if (parsed === null || typeof parsed !== 'object') return undefined
+    return {
+      ok: parsed.ok === true,
+      message: typeof parsed.message === 'string' ? parsed.message.slice(0, 300) : '',
+      at: typeof parsed.at === 'string' ? parsed.at : undefined,
+      percent: typeof parsed.percent === 'number' ? parsed.percent : undefined,
+    }
+  } catch {
+    return undefined
   }
 }
 
