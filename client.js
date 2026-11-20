@@ -350,6 +350,24 @@ window.__ModuleLoader__.load({
         );
       }
 
+
+      /**
+       * Секция на странице плагина в панели «Плагины».
+       *
+       * Страница отдаёт `subject` — что именно открыто: пакет, строка списка
+       * или официальный плагин. Настройки показываем только для своего пакета,
+       * иначе они появятся на странице каждого плагина.
+       */
+      function DetailSection(props) {
+        const subject = props?.subject
+        const pkgName =
+          subject !== null && typeof subject === 'object'
+            ? String(subject.pkg?.name ?? subject.pkg ?? subject.row?.name ?? '')
+            : ''
+        if (pkgName !== 'dsh-sessions' && pkgName !== 'dsh-sessions-plugin') return null
+        return h(SyncCard, { view: null })
+      }
+
       function SyncCard(props) {
         const view = props?.view;
         const state = useSnapshot();
@@ -1541,6 +1559,18 @@ window.__ModuleLoader__.load({
         }, SyncHeaderBadge));
       } catch (error) {
         console.error('[dsh-sync] плашка у поля ввода недоступна:', error);
+      }
+
+
+      // Настройки на странице плагина в панели «Плагины»: только для своего пакета.
+      try {
+        ctx.slots.inject('plugins.detail.section', () => ctx.slots.register({
+          name: 'plugins.detail.section',
+          id: 'dsh-sync-detail',
+          order: 50,
+        }, DetailSection));
+      } catch (error) {
+        console.error('[dsh-sync] секция на странице плагина недоступна:', error);
       }
 
       // Строка состояния в подвале панели: сразу видно, всё ли синхронизировано.
