@@ -70,7 +70,8 @@ assert.ok(registrations.some(entry => entry.options.name === 'main' && entry.opt
 assert.ok(registrations.some(entry => entry.options.name === 'sidebar.panellist'), 'пункт в левой панели')
 assert.ok(registrations.some(entry => entry.options.name === 'sidebar.session.row.leading'), 'индикатор в строке сессии')
 assert.ok(registrations.some(entry => entry.options.name === 'sidebar.footer.action'), 'строка состояния в подвале панели')
-assert.ok(registrations.some(entry => entry.options.name === 'conversation.header'), 'плашка состояния в шапке беседы')
+assert.ok(registrations.some(entry => entry.options.name === 'conversation.composer.dock'), 'плашка состояния у поля ввода')
+assert.ok(!registrations.some(entry => entry.options.name === 'conversation.header'), 'шапку беседы не трогаем: слот одиночный')
 const cardRegistration = registrations.find(entry => entry.options.name === 'plugins.item')
 assert.ok(cardRegistration, 'карточка плагина регистрируется')
 const { options, component } = cardRegistration

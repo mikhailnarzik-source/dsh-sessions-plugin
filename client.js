@@ -1431,15 +1431,18 @@ window.__ModuleLoader__.load({
       }
 
 
-      // Плашка в шапке беседы: состояние видно в основном окне.
+
+      // Плашка над полем ввода: состояние видно в основном окне.
+      // В шапку беседы её ставить нельзя — это одиночный слот, занятый системой,
+      // и повторная регистрация роняет загрузку интерфейса.
       try {
-        ctx.slots.inject('conversation.header', () => ctx.slots.register({
-          name: 'conversation.header',
+        ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+          name: 'conversation.composer.dock',
           id: 'dsh-sync-header',
           order: 80,
         }, SyncHeaderBadge));
       } catch (error) {
-        console.error('[dsh-sync] плашка в шапке недоступна:', error);
+        console.error('[dsh-sync] плашка у поля ввода недоступна:', error);
       }
 
       // Строка состояния в подвале панели: сразу видно, всё ли синхронизировано.
