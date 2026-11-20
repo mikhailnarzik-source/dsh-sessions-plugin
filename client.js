@@ -1291,6 +1291,52 @@ window.__ModuleLoader__.load({
         }
       }
 
+
+      /**
+       * Плашка в шапке беседы: состояние синхронизации видно в основном окне.
+       * Занимает своё место в строке заголовка, поэтому ничего не перекрывает.
+       */
+      function SyncHeaderBadge() {
+        const state = useSnapshot();
+        const data = state.data;
+        const ready = data !== null && data !== undefined;
+
+        const pending = ready && data.pending === true;
+        const percent = ready ? data.backup?.percent : undefined;
+        const color = !ready ? 'rgba(128,128,128,0.7)' : pending ? '#e8590c' : '#2f9e44';
+        const label = !ready
+          ? 'синхронизация…'
+          : pending
+            ? 'есть изменения'
+            : 'синхронизировано';
+        const detail = typeof percent === 'number' ? ` · резерв ${percent}%` : '';
+
+        return h(
+          'span',
+          {
+            title: `${label}${detail}`,
+            style: {
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              height: 24,
+              padding: '0 9px',
+              borderRadius: 12,
+              border: '1px solid rgba(128,128,128,0.28)',
+              background: 'rgba(128,128,128,0.08)',
+              fontSize: 11.5,
+              color: 'inherit',
+              whiteSpace: 'nowrap',
+              userSelect: 'none',
+            },
+          },
+          h('span', {
+            style: { width: 7, height: 7, borderRadius: 4, background: color, flex: '0 0 auto' },
+          }),
+          h('span', { style: { opacity: 0.85 } }, pending ? 'есть изменения' : typeof percent === 'number' ? `резерв ${percent}%` : 'синхронизация'),
+        );
+      }
+
       function SyncSidebarIcon(props) {
         const size = Number(props && props.size) || 16;
         const state = useSnapshot();
@@ -1382,6 +1428,18 @@ window.__ModuleLoader__.load({
         }, SyncDot));
       } catch (error) {
         console.error('[dsh-sync] индикатор в списке сессий недоступен:', error);
+      }
+
+
+      // Плашка в шапке беседы: состояние видно в основном окне.
+      try {
+        ctx.slots.inject('conversation.header', () => ctx.slots.register({
+          name: 'conversation.header',
+          id: 'dsh-sync-header',
+          order: 80,
+        }, SyncHeaderBadge));
+      } catch (error) {
+        console.error('[dsh-sync] плашка в шапке недоступна:', error);
       }
 
       // Строка состояния в подвале панели: сразу видно, всё ли синхронизировано.
