@@ -1098,9 +1098,20 @@ function DetailSection(props) {
             'Автосинхронизация работает в фоне: приём при старте и раз в 15 минут, отправка при изменениях.',
           ),
           h(
-            'span',
-            { style: { fontSize: 12, opacity: 0.8, lineHeight: 1.6 } },
-            'Настройки — в разделе «Плагины», в карточке «Сессии»: тип хранилища, адрес репозитория, токен Яндекса и резервное хранилище.',
+            'div',
+            {
+              style: {
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 12,
+                marginTop: 6,
+                paddingTop: 12,
+                borderTop: '1px solid rgba(128,128,128,0.18)',
+                maxWidth: 640,
+              },
+            },
+            h('span', { style: { fontSize: 13.5, fontWeight: 600 } }, 'Настройки'),
+            h(SyncCard, { view: null }),
           ),
 
         );
