@@ -256,6 +256,97 @@ window.__ModuleLoader__.load({
         return snapshot;
       };
 
+
+      /** Подпись хранилища по его типу. */
+      const BACKEND_LABELS = {
+        git: 'GitHub',
+        webdav: 'Яндекс.Диск',
+        yandex: 'Яндекс.Диск',
+        folder: 'Папка',
+      };
+
+      /** Полоса готовности одного хранилища: подпись, процент, объём, шкала. */
+      function ProgressRow({ label, percent, caption, note, done }) {
+        const value = Math.min(100, Math.max(0, Math.round(Number(percent) || 0)));
+        const color = done ? '#2f9e44' : '#e8590c';
+        return h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12.5 } },
+            h('span', { style: { fontWeight: 600 } }, label),
+            h('span', { style: { marginLeft: 'auto', fontWeight: 600 } }, done ? 'готово' : `${value}%`),
+          ),
+          h(
+            'div',
+            {
+              style: {
+                height: 6,
+                borderRadius: 3,
+                background: 'rgba(128,128,128,0.22)',
+                overflow: 'hidden',
+              },
+            },
+            h('div', {
+              style: {
+                width: `${done ? 100 : Math.max(1, value)}%`,
+                height: '100%',
+                borderRadius: 3,
+                background: color,
+                transition: 'width .3s ease',
+              },
+            }),
+          ),
+          h('span', { style: { fontSize: 11.5, opacity: 0.7 } }, note ?? caption),
+        );
+      }
+
+      /** Два хранилища рядом: основное и резервное, с процентами и объёмами. */
+      function SyncProgress({ data }) {
+        const megabytes = (bytes) => `${(Number(bytes ?? 0) / 1024 / 1024).toFixed(1).replace('.', ',')} МБ`;
+        const status = data?.status;
+        const backup = data?.backup;
+        const backend = data?.config?.backend ?? 'git';
+        const secondaryBackend = data?.secondaryBackend;
+        const hasSecondary = typeof secondaryBackend === 'string' && secondaryBackend !== 'none';
+
+        const primaryPercent = status && status.local > 0 ? (status.mirror / status.local) * 100 : 100;
+        const primaryNote = status
+          ? `${status.mirror} из ${status.local} сессий${status.onlyLocal > 0 ? `, ждут отправки: ${status.onlyLocal}` : ''}`
+          : '';
+
+        const rows = [
+          h(ProgressRow, {
+            key: 'primary',
+            label: BACKEND_LABELS[backend] ?? 'Основное хранилище',
+            percent: primaryPercent,
+            done: primaryPercent >= 100,
+            note: primaryNote,
+          }),
+        ];
+
+        if (hasSecondary) {
+          rows.push(
+            h(ProgressRow, {
+              key: 'secondary',
+              label: BACKEND_LABELS[secondaryBackend] ?? 'Резервное хранилище',
+              percent: backup?.percent ?? 0,
+              done: (backup?.percent ?? 0) >= 100,
+              note: backup
+                ? `${megabytes(backup.doneBytes)} из ${megabytes(backup.totalBytes)} · ${backup.doneFiles} из ${backup.totalFiles} файлов`
+                : 'готовится к выгрузке',
+            }),
+          );
+        }
+
+        return h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: 14, marginTop: 4 } },
+          ...rows,
+        );
+      }
+
       function SyncCard(props) {
         const view = props?.view;
         const state = useSnapshot();
@@ -792,56 +883,8 @@ window.__ModuleLoader__.load({
               h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#e8590c' } }), 'есть изменения'),
               h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#d1242f' } }), 'не отправлялось'),
             ),
-            data?.backup
-              ? (() => {
-                  const backup = data.backup;
-                  const megabytes = (bytes) => `${(Number(bytes ?? 0) / 1024 / 1024).toFixed(1)} МБ`;
-                  const done = backup.percent >= 100;
-                  return h(
-                    'div',
-                    { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 2 } },
-                    h(
-                      'div',
-                      { style: { display: 'flex', justifyContent: 'space-between', fontSize: 12, opacity: 0.85 } },
-                      h('span', null, 'Резервная копия'),
-                      h(
-                        'span',
-                        { style: { fontWeight: 600 } },
-                        done
-                          ? `готово · ${megabytes(backup.totalBytes)}`
-                          : `${backup.percent}% · ${megabytes(backup.doneBytes)} из ${megabytes(backup.totalBytes)}`,
-                      ),
-                    ),
-                    h(
-                      'div',
-                      {
-                        style: {
-                          height: 6,
-                          borderRadius: 3,
-                          background: 'rgba(128,128,128,0.22)',
-                          overflow: 'hidden',
-                        },
-                      },
-                      h('div', {
-                        style: {
-                          width: `${Math.max(1, backup.percent)}%`,
-                          height: '100%',
-                          borderRadius: 3,
-                          background: done ? '#2f9e44' : '#e8590c',
-                          transition: 'width .3s ease',
-                        },
-                      }),
-                    ),
-                    h(
-                      'span',
-                      { style: S.hint },
-                      done
-                        ? 'Все файлы выгружены в резервное хранилище.'
-                        : `Выгружено ${backup.doneFiles} из ${backup.totalFiles} файлов. Остальные догружаются в фоне — вручную ничего делать не нужно.`,
-                    ),
-                  );
-                })()
-              : null,
+            h(SyncProgress, { data }),
+
             data?.pending
               ? h('span', { style: S.note }, 'Есть неотправленные изменения — они уйдут при следующей отправке (не чаще раза в 5 минут) или по кнопке.')
               : null,

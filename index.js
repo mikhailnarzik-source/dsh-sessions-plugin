@@ -476,6 +476,8 @@ async function readState(ctx) {
     version: packageVersion,
     updatedFrom: pendingUpdate?.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
     backup,
+    // Тип резервного хранилища без секретов: по нему карточка подписывает полосу.
+    secondaryBackend: config?.secondary?.backend ?? 'none',
     pending,
     history,
     automation: {
