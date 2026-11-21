@@ -180,8 +180,6 @@ window.__ModuleLoader__.load({
         console.error('[dsh-sync] анимация недоступна:', error);
       }
 
-      const listeners = new Set();
-      let snapshot = { loading: true, data: null, error: '', busy: '', notice: '' };
 
       const publish = (next) => {
         snapshot = { ...snapshot, ...next };
@@ -248,15 +246,6 @@ window.__ModuleLoader__.load({
         } catch (error) {
           publish({ busy: '', error: `Синхронизация не удалась: ${explain(error)}` });
         }
-      };
-
-      const useSnapshot = () => {
-        const [, force] = React.useReducer((n) => n + 1, 0);
-        React.useEffect(() => {
-          listeners.add(force);
-          return () => listeners.delete(force);
-        }, []);
-        return snapshot;
       };
 
 
@@ -1775,6 +1764,19 @@ function CollapsedItem({ title, summary, badge, children }) {
         console.error('[dsh-sync] строка состояния в подвале недоступна:', error);
       }
     }
+
+    // Хранилище состояния синхронизации на уровне модуля: его читают и
+    // карточка плагина, и строка в подвале боковой панели.
+    const listeners = new Set();
+    let snapshot = { loading: true, data: null, error: '', busy: '', notice: '' };
+    const useSnapshot = () => {
+      const [, force] = React.useReducer((n) => n + 1, 0);
+      React.useEffect(() => {
+        listeners.add(force);
+        return () => listeners.delete(force);
+      }, []);
+      return snapshot;
+    };
 
     // --- строка состояния в подвале боковой панели ------------------------
     /**
