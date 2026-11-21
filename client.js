@@ -353,15 +353,15 @@ window.__ModuleLoader__.load({
        * иначе они появятся на странице каждого плагина.
        */
 function DetailSection(props) {
-        // Слот общий для всех плагинов: настройки показываем только у своего.
+        // Слот общий: настройки показываем только у своего пакета.
         const subject = props?.subject
-        const subjectId = typeof subject?.id === 'string' ? subject.id : ''
-        const subjectName = typeof subject?.name === 'string' ? subject.name : ''
-        const isOurs =
-          subjectId === 'dsh-sync' ||
-          subjectId === 'dsh-sessions' ||
-          subjectName.toLowerCase().includes('dsh-sessions')
-        if (!isOurs) return null
+        const packageName =
+          subject?.kind === 'bundle' && typeof subject?.pkg?.name === 'string'
+            ? subject.pkg.name
+            : typeof subject?.id === 'string'
+              ? subject.id
+              : ''
+        if (packageName !== 'dsh-sessions' && packageName !== 'dsh-sync') return null
         return h(
           'div',
           { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
@@ -1682,14 +1682,6 @@ function CollapsedItem({ title, summary, badge, children }) {
           h(SyncToasts, null),
         );
       }
-
-      ctx.slots.inject('plugins.item', () => ctx.slots.register({
-        name: 'plugins.item',
-        id: 'dsh-sync',
-        order: 55,
-        label: () => t('title'),
-        locale: NS,
-      }, () => h(CollapsedItem, { title: 'Синхронизация сессий', summary: 'Статус, резерв и настройки хранилища', badge: 'наше' }, h(SyncCard))));
 
       // На странице плагина карточка не нужна: менеджер показывает описание, а
       // настройки живут в карточке своего плагина в списке. Иначе одна и та же
