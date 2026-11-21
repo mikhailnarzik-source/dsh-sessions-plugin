@@ -1753,16 +1753,8 @@ function CollapsedItem({ title, summary, badge, children }) {
         console.error('[dsh-sync] секция на странице плагина недоступна:', error);
       }
 
-      // Строка состояния в подвале панели: сразу видно, всё ли синхронизировано.
-      try {
-        ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-          name: 'sidebar.footer.action',
-          id: 'dsh-sync-footer',
-          order: 40,
-        }, SyncFooterRow));
-      } catch (error) {
-        console.error('[dsh-sync] строка состояния в подвале недоступна:', error);
-      }
+      // Строка в подвале панели убрана: она показывала служебные сообщения
+    // вроде «есть изменения» и занимала место в интерфейсе.
     }
 
     // Хранилище состояния синхронизации на уровне модуля: его читают и
