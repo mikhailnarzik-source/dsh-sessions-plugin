@@ -403,6 +403,80 @@ function DetailSection(props) {
         }
       }
 
+    /** Свёрнутая строка плагина: заголовок, пояснение и «Открыть». */
+    function CollapsedItem({ title, summary, badge, children }) {
+      const [open, setOpen] = React.useState(false)
+      return h(
+        'div',
+        {
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            padding: '10px 12px',
+            borderRadius: 10,
+            border: '1px solid rgba(128,128,128,0.22)',
+            background: 'rgba(128,128,128,0.05)',
+          },
+        },
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+          h('span', { style: { fontSize: 13, fontWeight: 600, flex: '0 0 auto' } }, title),
+          badge !== undefined && badge !== ''
+            ? h(
+                'span',
+                {
+                  style: {
+                    fontSize: 10.5,
+                    padding: '1px 7px',
+                    borderRadius: 999,
+                    background: 'rgba(106,139,208,0.22)',
+                    opacity: 0.9,
+                    flex: '0 0 auto',
+                  },
+                },
+                badge,
+              )
+            : null,
+          h(
+            'span',
+            {
+              style: {
+                flex: 1,
+                fontSize: 11.5,
+                opacity: 0.6,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              },
+            },
+            summary ?? '',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              onClick: () => setOpen(!open),
+              style: {
+                padding: '4px 12px',
+                borderRadius: 8,
+                border: '1px solid rgba(128,128,128,0.32)',
+                background: open ? 'rgba(106,139,208,0.18)' : 'rgba(128,128,128,0.1)',
+                color: 'inherit',
+                font: 'inherit',
+                fontSize: 12,
+                cursor: 'pointer',
+                flex: '0 0 auto',
+              },
+            },
+            open ? 'Свернуть' : 'Открыть',
+          ),
+        ),
+        open ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, children) : null,
+      )
+    }
+
       function SyncCard(props) {
         const view = props?.view;
         const state = useSnapshot();
@@ -1571,7 +1645,7 @@ function DetailSection(props) {
         order: 55,
         label: () => t('title'),
         locale: NS,
-      }, SyncCard));
+      }, () => h(CollapsedItem, { title: 'Синхронизация сессий', summary: 'Статус, резерв и настройки хранилища', badge: 'наше' }, h(SyncCard))));
 
       // На странице плагина карточка не нужна: менеджер показывает описание, а
       // настройки живут в карточке своего плагина в списке. Иначе одна и та же
