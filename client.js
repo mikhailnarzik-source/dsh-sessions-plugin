@@ -409,15 +409,8 @@ function DetailSection(props) {
       return h(
         'div',
         {
-          style: {
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
-            padding: '10px 12px',
-            borderRadius: 10,
-            border: '1px solid rgba(128,128,128,0.22)',
-            background: 'rgba(128,128,128,0.05)',
-          },
+          className: 'dsh-our-card',
+          style: { display: 'flex', flexDirection: 'column', gap: 8 },
         },
         h(
           'div',
