@@ -1939,7 +1939,11 @@ function CollapsedItem({ title, summary, badge, children }) {
       'error.invalid': 'The request was rejected.',
       'error.network': 'The request failed. Nothing was deleted.',
       'error.generic': 'Operation failed: {message}',
-    }
+      'dialog.scopeTitle': 'Where to delete',
+      'dialog.scopeEverywhere': 'Delete on every device — the session disappears from the shared repository too.',
+      'dialog.scopeLocal': 'Only on this device — the session comes back on the next sync.',
+      'dialog.warning': 'Deletion is permanent and, by default, propagates to the other devices through synchronization.',
+}
 
     const ru = {
       'menu.delete': 'Удалить сессию',
@@ -1974,7 +1978,11 @@ function CollapsedItem({ title, summary, badge, children }) {
       'error.invalid': 'Запрос отклонён.',
       'error.network': 'Не удалось выполнить запрос. Ничего не удалено.',
       'error.generic': 'Не удалось выполнить: {message}',
-    }
+      'dialog.scopeTitle': 'Где удалять',
+      'dialog.scopeEverywhere': 'На всех устройствах — сессия исчезнет и из общего репозитория.',
+      'dialog.scopeLocal': 'Только на этом устройстве — при следующей синхронизации сессия вернётся.',
+      'dialog.warning': 'Удаление необратимо и по умолчанию распространяется на другие устройства через синхронизацию.',
+}
 
     const de = {
       'menu.delete': 'Sitzung löschen',
