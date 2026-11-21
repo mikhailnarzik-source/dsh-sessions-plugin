@@ -353,13 +353,18 @@ window.__ModuleLoader__.load({
        * иначе они появятся на странице каждого плагина.
        */
 function DetailSection(props) {
-        // Настройки плюс строка диагностики: пока неясно, что передаёт страница.
+        // Слот общий для всех плагинов: настройки показываем только у своего.
         const subject = props?.subject
-        const debug = subject === undefined ? 'subject: нет' : 'subject: ' + JSON.stringify(subject).slice(0, 220)
+        const subjectId = typeof subject?.id === 'string' ? subject.id : ''
+        const subjectName = typeof subject?.name === 'string' ? subject.name : ''
+        const isOurs =
+          subjectId === 'dsh-sync' ||
+          subjectId === 'dsh-sessions' ||
+          subjectName.toLowerCase().includes('dsh-sessions')
+        if (!isOurs) return null
         return h(
           'div',
           { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
-          h('span', { style: { fontSize: 11, opacity: 0.55 } }, debug),
           h(SyncCard, { view: null }),
         )
       }
