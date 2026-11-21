@@ -404,7 +404,55 @@ function DetailSection(props) {
       }
 
     /** Свёрнутая строка плагина: заголовок, пояснение и «Открыть». */
-    function CollapsedItem({ title, summary, badge, children }) {
+    /** Кнопка-шеврон: развернуть и свернуть. Виден в любой теме (currentColor). */
+    function ToggleIcon({ open, onClick }) {
+      return h(
+        'button',
+        {
+          type: 'button',
+          onClick,
+          title: open ? 'Свернуть' : 'Открыть',
+          'aria-label': open ? 'Свернуть' : 'Открыть',
+          'aria-expanded': open ? 'true' : 'false',
+          style: {
+            marginLeft: 'auto',
+            flex: '0 0 auto',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 28,
+            height: 28,
+            padding: 0,
+            borderRadius: 8,
+            border: '1px solid rgba(128,128,128,0.32)',
+            background: 'rgba(128,128,128,0.1)',
+            color: 'inherit',
+            cursor: 'pointer',
+          },
+        },
+        h(
+          'svg',
+          {
+            width: 16,
+            height: 16,
+            viewBox: '0 0 24 24',
+            fill: 'none',
+            'aria-hidden': 'true',
+            focusable: 'false',
+            style: { transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .15s ease' },
+          },
+          h('path', {
+            d: 'M6 15l6-6 6 6',
+            stroke: 'currentColor',
+            strokeWidth: 2,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          }),
+        ),
+      )
+    }
+
+function CollapsedItem({ title, summary, badge, children }) {
       const [open, setOpen] = React.useState(false)
       return h(
         'div',
@@ -454,25 +502,7 @@ function DetailSection(props) {
             },
             summary ?? '',
           ),
-          h(
-            'button',
-            {
-              type: 'button',
-              onClick: () => setOpen(!open),
-              style: {
-                padding: '4px 12px',
-                borderRadius: 8,
-                border: '1px solid rgba(128,128,128,0.32)',
-                background: open ? 'rgba(106,139,208,0.18)' : 'rgba(128,128,128,0.1)',
-                color: 'inherit',
-                font: 'inherit',
-                fontSize: 12,
-                cursor: 'pointer',
-                flex: '0 0 auto',
-              },
-            },
-            open ? 'Свернуть' : 'Открыть',
-          ),
+          h(ToggleIcon, { open, onClick: () => setOpen(!open) }),
         ),
         open
           ? h(
