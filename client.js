@@ -1069,7 +1069,7 @@ function CollapsedItem({ title, summary, badge, children }) {
               ? h(
                   'span',
                   { style: S.note },
-                  `Диагностика: home=${data?.debug?.home ?? '?'}, просканировано сессий ${data?.debug?.sessionsScanned ?? '?'}, пути в сторе: ${(data?.debug?.cwds ?? []).join(' | ') || '—'}, путь проекта: ${data?.debug?.projectPath || '—'}`,
+                  'На этом устройстве пока нет локальных сессий — они появятся после первой отправки или скачивания из зеркала.',
                 )
               : null,
             h(
