@@ -1050,7 +1050,6 @@ function CollapsedItem({ title, summary, badge, children }) {
             'div',
             { style: S.section },
             h('span', { style: S.title }, h('span', { style: S.accent }), 'Синхронизация'),
-        h('span', { style: { fontSize: 11, opacity: 0.5 } }, 'секция страницы: ' + detailState),
             status
               ? h('span', { style: S.hint }, `Сессий локально: ${status.local}, в зеркале: ${status.mirror}. Только локально: ${status.onlyLocal}, только в зеркале: ${status.onlyMirror}.`)
               : null,
