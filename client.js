@@ -115,10 +115,10 @@ window.__ModuleLoader__.load({
         overflowX: 'hidden',
         fontSize: 13,
       },
-      // Центрированный контейнер контента: 940 px по центру окна.
+      // Центрированный контейнер контента: до 960 px по центру окна.
       container: {
         width: '100%',
-        maxWidth: 940,
+        maxWidth: 960,
         margin: '0 auto',
         display: 'flex',
         flexDirection: 'column',
@@ -173,13 +173,14 @@ window.__ModuleLoader__.load({
         display: 'flex',
         flexDirection: 'column',
         gap: 12,
+        minWidth: 0,
         padding: '16px 18px',
         boxSizing: 'border-box',
         borderRadius: 14,
         border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
         background: 'var(--dsw-alias-bg-layer-1, rgba(128,128,128,0.045))',
       },
-      cardHead: { display: 'flex', alignItems: 'center', gap: 8 },
+      cardHead: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
       cardTitle: {
         margin: 0,
         fontSize: 14,
@@ -190,7 +191,7 @@ window.__ModuleLoader__.load({
         gap: 8,
         color: 'var(--dsw-alias-label-primary, inherit)',
       },
-      cardBody: { display: 'flex', flexDirection: 'column', gap: 10 },
+      cardBody: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 },
       cardActions: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
       // Строка статуса на странице синхронизации: результат автозапуска.
       statusPanel: {
@@ -204,11 +205,11 @@ window.__ModuleLoader__.load({
         background: 'var(--dsw-alias-card-fill, rgba(128,128,128,0.045))',
       },
       accent: { width: 3, height: 16, borderRadius: 2, background: 'var(--dsw-alias-brand-primary, rgba(80,120,200,0.75))', flex: '0 0 auto' },
-      hint: { fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary, rgba(128,128,128,0.95))' },
+      hint: { fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary, rgba(128,128,128,0.95))', overflowWrap: 'anywhere' },
       row: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 },
       dot: { width: 8, height: 8, borderRadius: 4, flex: '0 0 auto' },
       badge: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '2px 8px', borderRadius: 999, fontSize: 12, fontWeight: 500 },
-      field: { display: 'flex', flexDirection: 'column', gap: 5 },
+      field: { display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 },
       label: { fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary, inherit)' },
       get input() {
         return {
@@ -224,27 +225,89 @@ window.__ModuleLoader__.load({
           colorScheme: themeScheme(),
         };
       },
-      buttons: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' },
+      buttons: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', minWidth: 0 },
+      // Кнопки — единая система (`.tools/plugin-design-spec-v2.md`):
+      // высота 36 (в шапке 32), padding 0 14, радиус 10, шрифт 600 12.5,
+      // ширина по тексту. Только токены темы; мягкие заливки вместо белого.
       button: {
-        padding: '8px 13px',
+        boxSizing: 'border-box',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        height: 36,
+        padding: '0 14px',
         borderRadius: 10,
-        border: '1px solid var(--dsw-alias-border-l3, rgba(128,128,128,0.35))',
-        background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08))',
-        color: 'inherit',
-        fontSize: 12.5,
-        cursor: 'pointer',
-        fontFamily: 'inherit',
-      },
-      primary: {
-        padding: '8px 15px',
-        borderRadius: 10,
-        border: '1px solid transparent',
-        background: 'var(--dsw-alias-button-primary-fill, #2a6df4)',
-        color: 'var(--dsw-alias-label-primary-foreground, #fff)',
+        border: '1px solid var(--dsw-alias-border-l4, rgba(128,128,128,0.35))',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-primary, inherit)',
         fontSize: 12.5,
         fontWeight: 600,
+        lineHeight: 1,
+        whiteSpace: 'nowrap',
         cursor: 'pointer',
         fontFamily: 'inherit',
+        transition: 'background-color .14s ease, border-color .14s ease, color .14s ease',
+      },
+      buttonSmall: {
+        boxSizing: 'border-box',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        height: 32,
+        padding: '0 14px',
+        borderRadius: 10,
+        border: '1px solid var(--dsw-alias-border-l4, rgba(128,128,128,0.35))',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-primary, inherit)',
+        fontSize: 12.5,
+        fontWeight: 600,
+        lineHeight: 1,
+        whiteSpace: 'nowrap',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        transition: 'background-color .14s ease, border-color .14s ease, color .14s ease',
+      },
+      primary: {
+        boxSizing: 'border-box',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        height: 36,
+        padding: '0 14px',
+        borderRadius: 10,
+        border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #4a7dcc) 55%, transparent)',
+        background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #4a7dcc) 18%, transparent)',
+        color: 'var(--dsw-alias-brand-primary, #4a7dcc)',
+        fontSize: 12.5,
+        fontWeight: 600,
+        lineHeight: 1,
+        whiteSpace: 'nowrap',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        transition: 'background-color .14s ease, border-color .14s ease, color .14s ease',
+      },
+      danger: {
+        boxSizing: 'border-box',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        height: 36,
+        padding: '0 14px',
+        borderRadius: 10,
+        border: '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary, #d1242f) 50%, transparent)',
+        background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary, #d1242f) 16%, transparent)',
+        color: 'var(--dsw-alias-state-error-primary, #d1242f)',
+        fontSize: 12.5,
+        fontWeight: 600,
+        lineHeight: 1,
+        whiteSpace: 'nowrap',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        transition: 'background-color .14s ease, border-color .14s ease, color .14s ease',
       },
       note: {
         fontSize: 12,
@@ -269,7 +332,7 @@ window.__ModuleLoader__.load({
         background: 'rgba(40,150,80,0.12)',
         border: '1px solid var(--dsw-alias-state-success-primary, rgba(40,150,80,0.35))',
       },
-      meta: { fontSize: 11.5, color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.8))' },
+      meta: { fontSize: 11.5, color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.8))', overflowWrap: 'anywhere' },
       checkboxRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 },
       // Панель действий внизу: «Сохранить», «Создать репозиторий», «Диагностика».
       actions: {
@@ -328,22 +391,26 @@ window.__ModuleLoader__.load({
           // синхронизации, поэтому кнопки и поля ведут себя одинаково.
           style.textContent = [
             '@keyframes dsh-sync-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}',
-            '.dshs-card button{transition:background-color .12s ease,border-color .12s ease,color .12s ease}',
-            '.dshs-card button:hover:not(:disabled){background:rgba(128,128,128,0.16);border-color:rgba(150,150,150,0.65)}',
-            '.dshs-card button:active:not(:disabled){background:rgba(128,128,128,0.24)}',
+            // Кнопки — единая система: secondary по умолчанию, primary — класс
+            // dshs-btn-primary (мягкая заливка brand). Ширина по тексту.
+            '.dshs-card button{transition:background-color .12s ease,border-color .12s ease,color .12s ease;min-width:0;max-width:100%}',
+            '.dshs-card button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16)) !important;border-color:var(--dsw-alias-border-l4,rgba(150,150,150,0.65))}',
+            '.dshs-card button:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active,rgba(128,128,128,0.24)) !important}',
+            '.dshs-card button.dshs-btn-primary:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 28%,transparent) !important}',
             '.dshs-card button:disabled{opacity:.55;cursor:default}',
-            '.dshs-card button:focus-visible{outline:2px solid rgba(80,120,200,0.65);outline-offset:2px}',
-            '.dshs-card input:focus-visible,.dshs-card select:focus-visible{outline:2px solid rgba(80,120,200,0.55);outline-offset:1px}',
-            '.dshs-card select:hover{border-color:rgba(150,150,150,0.65)}',
+            '.dshs-card button:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:2px}',
+            '.dshs-card input:focus-visible,.dshs-card select:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:1px}',
+            '.dshs-card select:hover{border-color:var(--dsw-alias-border-l4,rgba(150,150,150,0.65))}',
             '.dshs-card select,.dshs-card select option{color-scheme:inherit;background-color:transparent;color:inherit}',
             '.dshs-card select option{background:var(--dsw-alias-bg-layer-2,#22242a);color:var(--dsw-alias-label-primary,#f2f2f2)}',
             '.dshs-card select option:checked{background:var(--dsw-alias-interactive-bg-active,#3a3f4b);color:var(--dsw-alias-label-primary,#ffffff)}',
             '.dshs-card a{color:inherit}',
             // Страница синхронизации: симметричные поля по краям, на узком
             // экране — 16 px, чтобы контент не прилипал к краям окна.
-            '.dshs-sync-page{padding:28px 24px 48px}',
-            '@media (max-width:720px){.dshs-sync-page{padding:20px 16px 36px}}',
-            '.dshs-sync-card{transition:background-color .15s ease,border-color .15s ease}',
+            '.dshs-sync-page{padding:28px 24px 48px;overflow-wrap:anywhere}',
+            '@media (max-width:900px){.dshs-sync-page{padding:20px 18px 36px}}',
+            '@media (max-width:640px){.dshs-sync-page{padding:16px 14px 28px}.dshs-sync-header{gap:10px}.dshs-sync-container{min-width:0}}',
+            '.dshs-sync-card{transition:background-color .15s ease,border-color .15s ease;overflow-wrap:anywhere}',
             '.dshs-sync-card:hover{border-color:var(--dsw-alias-border-l3,rgba(128,128,128,0.35))}',
             '.dshs-sync-chip{transition:background-color .15s ease}',
           ].join('\n');
@@ -579,7 +646,7 @@ window.__ModuleLoader__.load({
             h('span', { style: S.meta }, lastText),
             h(
               'button',
-              { type: 'button', style: S.button, disabled: loading, onClick: () => void refresh() },
+              { type: 'button', style: S.buttonSmall, disabled: loading, onClick: () => void refresh() },
               t('actionRefresh'),
             ),
           ),
@@ -676,13 +743,13 @@ function DetailSection(props) {
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
-            width: 28,
-            height: 28,
+            width: 32,
+            height: 32,
             padding: 0,
-            borderRadius: 8,
-            border: '1px solid rgba(128,128,128,0.32)',
-            background: 'rgba(128,128,128,0.1)',
-            color: 'inherit',
+            borderRadius: 10,
+            border: '1px solid var(--dsw-alias-border-l4, rgba(128,128,128,0.32))',
+            background: 'transparent',
+            color: 'var(--dsw-alias-label-primary, inherit)',
             cursor: 'pointer',
           },
         },
@@ -984,7 +1051,7 @@ function CollapsedItem({ title, summary, badge, children }) {
               { style: S.buttons },
               h(
                 'button',
-                { type: 'button', style: S.primary, disabled: busy, onClick: () => void run('sync') },
+                { type: 'button', className: 'dshs-btn-primary', style: S.primary, disabled: busy, onClick: () => void run('sync') },
                 state.busy === 'sync' ? 'Синхронизация…' : 'Синхронизировать',
               ),
               h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void run('pull') }, 'Только принять'),
@@ -1383,6 +1450,7 @@ function CollapsedItem({ title, summary, badge, children }) {
                 'button',
                 {
                   type: 'button',
+                  className: 'dshs-btn-primary',
                   style: S.primary,
                   disabled: busy || data === null,
                   onClick: () => {
@@ -1486,7 +1554,7 @@ function CollapsedItem({ title, summary, badge, children }) {
             : 'rgba(128,128,128,0.45)';
         const pageState = useSnapshot();
 
-        // Страница целиком: центрированный контейнер до 940 px, симметричные
+        // Страница целиком: центрированный контейнер до 960 px, симметричные
         // поля по краям (на узком экране 16 px — в классе .dshs-sync-page).
         return h(
           'div',
@@ -1610,8 +1678,8 @@ function CollapsedItem({ title, summary, badge, children }) {
             {
               onClick: (event) => event.stopPropagation(),
               style: {
-                width: 420,
-                maxWidth: 'calc(100vw - 32px)',
+                width: '100%',
+                maxWidth: 420,
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 14,
@@ -1621,6 +1689,7 @@ function CollapsedItem({ title, summary, badge, children }) {
                 background: 'var(--dsw-alias-bg-base, #22242a)',
                 color: 'var(--dsw-alias-label-primary, inherit)',
                 boxShadow: '0 18px 50px rgba(0,0,0,0.45)',
+                boxSizing: 'border-box',
               },
             },
             h('div', { style: { fontSize: 15, fontWeight: 600 } }, 'Обновление dsh-sessions'),
@@ -1647,18 +1716,9 @@ function CollapsedItem({ title, summary, badge, children }) {
               h(
                 'button',
                 {
+                  type: 'button',
                   onClick: done,
-                  style: {
-                    padding: '7px 16px',
-                    borderRadius: 8,
-                    border: '1px solid rgba(128,128,128,0.35)',
-                    background: 'rgba(80,120,200,0.18)',
-                    color: 'inherit',
-                    font: 'inherit',
-                    fontSize: 13,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  },
+                  style: { ...S.primary },
                 },
                 'Готово',
               ),
@@ -2486,7 +2546,7 @@ function CollapsedItem({ title, summary, badge, children }) {
 .${P}-content{display:flex;flex-direction:column;width:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .${P}-header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:22px 14px 12px 24px}
 .${P}-title{margin:0;font-size:16px;line-height:24px;font-weight:500;color:var(--dsw-alias-label-primary,#16181d)}
-.${P}-close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:var(--dsw-radius-sm,6px);background:transparent;cursor:pointer;color:var(--dsw-alias-label-secondary,#5a6070)}
+.${P}-close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:1px solid transparent;border-radius:10px;background:transparent;cursor:pointer;color:var(--dsw-alias-label-secondary,#5a6070)}
 .${P}-close:disabled{opacity:.4;cursor:not-allowed}
 .${P}-description{margin:0;padding:0 24px;font-size:14px;line-height:22px;font-weight:400;color:var(--dsw-alias-label-primary,#16181d)}
 .${P}-body{display:flex;flex-direction:column;gap:12px;min-width:0;margin-top:20px;padding:0 24px}
@@ -2494,12 +2554,12 @@ function CollapsedItem({ title, summary, badge, children }) {
 .${P}-warning{display:flex;align-items:flex-start;gap:10px;font-size:14px;line-height:22px;color:var(--dsw-alias-label-secondary,#5a6070)}
 .${P}-warning p{margin:0}
 .${P}-warning svg{margin-top:2px;color:var(--dsw-alias-state-error-primary,#d92d20)}
-.${P}-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 24px}
-.${P}-button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:4px;height:36px;padding:0 14px;border:none;border-radius:var(--dsw-radius-md,8px);background:transparent;cursor:pointer;font:inherit;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary,#16181d);min-width:72px}
-.${P}-button:disabled{cursor:not-allowed;opacity:.4}
-.${P}-button-outline{box-shadow:inset 0 0 0 var(--dsh-hairline-width,.5px) var(--dsh-button-outline-color,var(--dsw-alias-border-l3,#d5d7dd))}
-.${P}-button-primary{background:var(--dsw-alias-button-primary-fill,#2a6df4);color:var(--dsw-alias-label-primary-foreground,#fff)}
-.${P}-button-delete:not(:disabled){color:var(--dsw-alias-state-error-primary,#d92d20)}
+.${P}-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding:0 24px}
+.${P}-button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 14px;border:1px solid var(--dsw-alias-border-l4,#c9ccd4);border-radius:10px;background:transparent;cursor:pointer;font:inherit;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;color:var(--dsw-alias-label-primary,#16181d);min-width:0}
+.${P}-button:disabled{cursor:not-allowed;opacity:.55}
+.${P}-button-outline{background:transparent;border-color:var(--dsw-alias-border-l4,#c9ccd4)}
+.${P}-button-primary{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#2a6df4) 55%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#2a6df4) 18%,transparent);color:var(--dsw-alias-brand-primary,#2a6df4)}
+.${P}-button-delete:not(:disabled){border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d92d20) 50%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d92d20) 16%,transparent);color:var(--dsw-alias-state-error-primary,#d92d20)}
 .${P}-field{box-sizing:border-box;width:100%;height:44px;padding:7px 14px;border:.5px solid var(--dsw-alias-border-l4,#c9ccd4);border-radius:var(--dsw-radius-lg,12px);background:transparent;outline:none;font:inherit;font-size:16px;line-height:22px;color:var(--dsw-alias-label-primary,#16181d)}
 .${P}-field::placeholder{color:var(--dsw-alias-label-dimmed,#9aa0ae)}
 .${P}-field:focus{border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#2a6df4))}
@@ -2518,11 +2578,13 @@ function CollapsedItem({ title, summary, badge, children }) {
 .${P}-check input{flex:none;width:16px;height:16px;margin:3px 0 0;accent-color:var(--dsw-alias-button-primary-fill,#2a6df4);cursor:pointer}
 .${P}-check input:disabled{cursor:default}
 @media(hover:hover){
-.${P}-button-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover,#1f5ada)}
+.${P}-button-primary:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-brand-primary,#2a6df4) 28%,transparent)}
 .${P}-button-outline:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.06))}
+.${P}-button-delete:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d92d20) 24%,transparent)}
 .${P}-close:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.06))}
 }
 @keyframes ${P}-enter{0%{opacity:0}to{opacity:1}}
+@media (max-width:640px){.${P}-footer{padding:0 16px}.${P}-button{flex:1 1 auto;justify-content:center}.${P}-dialog{border-radius:14px}}
 @media(prefers-reduced-motion:reduce){
 .${P}-mask:after,.${P}-dialog{animation:none}
 }

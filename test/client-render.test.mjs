@@ -195,7 +195,8 @@ test('контент страницы в центрированном конте
   const base = pageCss.match(/\.dshs-sync-page\{padding:(\d+)px (\d+)px (\d+)px\}/)
   assert.ok(base, 'у страницы есть базовые поля')
   assert.equal(base[2], base[2], 'поля слева и справа одинаковые')
-  assert.match(pageCss, /@media \(max-width:720px\)\{\.dshs-sync-page\{padding:\d+px 16px \d+px\}\}/, 'на узком экране поля 16 px')
+  assert.match(pageCss, /@media \(max-width:900px\)\{\.dshs-sync-page\{padding:\d+px 18px \d+px\}\}/, 'на 900 px поля 18 px')
+  assert.match(pageCss, /@media \(max-width:640px\)\{\.dshs-sync-page\{padding:\d+px 14px \d+px\}/, 'на 640 px поля 14 px')
   assert.match(pageCss, /--dsw-alias-/, 'цвета берутся из токенов темы')
 })
 
@@ -287,4 +288,65 @@ test('в секции обслуживания — проверка обновл
   const maintenance = nodes.find((node) => node.type === 'section' && textOf(node).includes('Обслуживание'))
   assert.ok(maintenance, 'секция «Обслуживание» найдена')
   assert.match(textOf(maintenance), /Проверяем версию|Актуально|Доступно обновление|Локальная установка|Состояние неизвестно/, 'статус проверки версии виден')
+})
+
+test('кнопки страницы: 36/32, радиус 10, мягкая заливка brand, ширина по тексту', () => {
+  const buttons = nodes.filter((node) => node.type === 'button')
+  assert.ok(buttons.length >= 6, `кнопок на странице: ${buttons.length}`)
+  for (const button of buttons) {
+    const style = button.props.style ?? {}
+    if (style.position === 'absolute') continue // иконка-шеврон, отдельный вариант
+    assert.ok([32, 36].includes(style.height), `высота кнопки 32 или 36, а не ${style.height}`)
+    assert.equal(style.borderRadius, 10, 'радиус кнопки 10')
+    assert.equal(style.display, 'inline-flex', 'кнопка — inline-flex')
+    assert.equal(style.fontWeight, 600, 'кнопка — 600')
+    assert.equal(style.fontSize, 12.5, 'кнопка — 12.5')
+    assert.equal(style.whiteSpace, 'nowrap', 'подпись не переносится')
+    if (textOf(button).trim() !== '') {
+      assert.equal(style.width, undefined, 'у текстовой кнопки нет фиксированной ширины')
+      assert.equal(style.minWidth, undefined, 'нет фиксированной min-width')
+    }
+    assert.doesNotMatch(String(style.color ?? ''), /#fff|label-primary-foreground/i, 'нет белого текста на кнопке')
+  }
+
+  const primary = buttons.find((button) => String(button.props.className ?? '').includes('dshs-btn-primary'))
+  assert.ok(primary, 'primary-кнопка «Синхронизировать» найдена')
+  assert.match(String(primary.props.style.background), /color-mix\(in srgb, ?var\(--dsw-alias-brand-primary, #4a7dcc\) 18%, ?transparent\)/)
+  assert.match(String(primary.props.style.border), /color-mix\(in srgb, ?var\(--dsw-alias-brand-primary, #4a7dcc\) 55%, ?transparent\)/)
+  assert.equal(primary.props.style.color, 'var(--dsw-alias-brand-primary, #4a7dcc)')
+
+  const headerRefresh = buttons.find((button) => textOf(button).includes('Обновить') && button.props.style.height === 32)
+  assert.ok(headerRefresh, '«Обновить» в шапке — 32 px')
+  assert.equal(headerRefresh.props.style.background, 'transparent')
+})
+
+test('адаптив: flex-wrap кнопок, медиа 900/640, без белого на белом и fixed width', () => {
+  const pageCss = styles.find((text) => typeof text === 'string' && text.includes('.dshs-sync-page'))
+  assert.ok(pageCss, 'слой оформления страницы внедрён')
+  assert.match(pageCss, /\.dshs-sync-page\{padding:28px 24px 48px;overflow-wrap:anywhere\}/)
+  assert.match(pageCss, /\.dshs-sync-header\{gap:10px\}/)
+  assert.match(pageCss, /@media \(max-width:900px\)/, 'есть медиа 900 px')
+  assert.match(pageCss, /@media \(max-width:640px\)/, 'есть медиа 640 px')
+  assert.match(pageCss, /button\.dshs-btn-primary:hover:not\(:disabled\)\{background:color-mix\(in srgb,var\(--dsw-alias-brand-primary/, 'hover primary — мягкая заливка brand')
+  assert.doesNotMatch(pageCss, /button:hover:not\(:disabled\)\{background:rgba\(128,128,128/, 'нет старых rgba-кнопок')
+
+  const container = nodes.find((node) => node.props?.className === 'dshs-sync-container')
+  assert.equal(container.props.style.maxWidth, 960, 'контейнер 960 px')
+  assert.equal(container.props.style.width, '100%')
+
+  const dialogCss = styles.find((text) => typeof text === 'string' && text.includes('.dshsd-button{'))
+  assert.ok(dialogCss, 'стили диалога удаления внедрены')
+  assert.match(dialogCss, /\.dshsd-button\{[^}]*height:36px/)
+  assert.match(dialogCss, /\.dshsd-button\{[^}]*padding:0 14px/)
+  assert.match(dialogCss, /\.dshsd-button\{[^}]*border-radius:10px/)
+  assert.match(dialogCss, /\.dshsd-button\{[^}]*font-size:12\.5px/)
+  assert.match(dialogCss, /\.dshsd-button\{[^}]*font-weight:600/)
+  assert.match(dialogCss, /\.dshsd-button\{[^}]*min-width:0/)
+  assert.doesNotMatch(dialogCss, /min-width:72px/, 'нет фиксированной min-width у кнопок')
+  assert.doesNotMatch(dialogCss, /\.dshsd-button-primary\{[^}]*button-primary-fill/, 'нет старой сплошной заливки brand')
+  assert.match(dialogCss, /\.dshsd-button-primary\{[^}]*color-mix\(in srgb,var\(--dsw-alias-brand-primary/)
+  assert.match(dialogCss, /\.dshsd-button-primary\{[^}]*color:var\(--dsw-alias-brand-primary/)
+  assert.doesNotMatch(dialogCss, /button-primary\{[^}]*label-primary-foreground/, 'нет белого текста на primary')
+  assert.match(dialogCss, /\.dshsd-button-delete:not\(:disabled\)\{[^}]*color-mix\(in srgb,var\(--dsw-alias-state-error-primary/)
+  assert.match(dialogCss, /@media \(max-width:640px\)\{\.dshsd-footer/, 'на 640 px кнопки могут растягиваться')
 })
