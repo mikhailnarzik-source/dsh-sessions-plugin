@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Sessions",
-    "description": "Keeps session history identical on every device (git repository, cloud folder or Yandex.Disk) and adds a confirmed session deletion. Pulls on start, pushes changes, reports errors and writes a human-readable backup catalog.",
+    "description": "The plugin does two things: it moves chat history between computers and adds a Delete session action. Set up storage once — a private GitHub repository, a cloud folder or Yandex.Disk — and DSH pulls and pushes changes by itself. Deleted sessions travel to the mirror too and disappear on your other devices.",
     "detail": "docs/DETAIL.md"
   }
 }
