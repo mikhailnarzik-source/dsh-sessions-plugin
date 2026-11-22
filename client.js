@@ -25,8 +25,46 @@ window.__ModuleLoader__.load({
     const UPDATE_APPLY_PATH = '/api/dsh-sync/update/apply';
     const shortSha = (value) => (value === null || value === undefined || value === '' ? '?' : String(value).slice(0, 7));
 
-    const en = { title: 'Session sync' };
-    const ru = { title: 'Синхронизация сессий' };
+    // Подписи страницы «Синхронизация сессий». Только тексты интерфейса:
+    // логика, поля и маршруты от языка не зависят.
+    const en = {
+      title: 'Session sync',
+      subtitle: 'Sessions, settings and attachments across devices',
+      statusReady: 'configured',
+      statusOff: 'not configured',
+      statusChecking: 'checking…',
+      statusLast: 'Last sync',
+      statusNever: 'never synced',
+      statusIdle: 'Ready to sync',
+      actionRefresh: 'Refresh',
+      actionSyncing: 'Syncing…',
+      actionSyncAgain: 'Sync again',
+      sectionSync: 'Synchronization',
+      sectionConnection: 'Connection',
+      sectionExtra: 'Advanced',
+      sectionChecks: 'Environment check',
+      sectionMaintenance: 'Maintenance',
+      sectionExternal: 'External sync plugin',
+    };
+    const ru = {
+      title: 'Синхронизация сессий',
+      subtitle: 'Сессии, настройки и вложения между устройствами',
+      statusReady: 'настроено',
+      statusOff: 'не настроено',
+      statusChecking: 'проверка…',
+      statusLast: 'Последняя синхронизация',
+      statusNever: 'ещё не синхронизировалась',
+      statusIdle: 'Готово к синхронизации',
+      actionRefresh: 'Обновить',
+      actionSyncing: 'Синхронизация…',
+      actionSyncAgain: 'Синхронизировать снова',
+      sectionSync: 'Синхронизация',
+      sectionConnection: 'Подключение',
+      sectionExtra: 'Дополнительно',
+      sectionChecks: 'Проверка окружения',
+      sectionMaintenance: 'Обслуживание',
+      sectionExternal: 'Внешний плагин синхронизации',
+    };
 
     // Нативные выпадающие списки и поля рисуются системными цветами: без
     // color-scheme они остаются светлыми в тёмной теме.
@@ -59,34 +97,128 @@ window.__ModuleLoader__.load({
       // без DOM работаем как раньше
     }
 
+    // Оформление страницы «Синхронизация сессий». Цвета — токены темы
+    // --dsw-alias-*: одинаково выглядят в тёмной и светлой теме DSH. Запасные
+    // значения нужны, если токена нет (старая версия DSH). Отступы и радиусы
+    // у всех секций одинаковые: 12–16 px.
     const S = {
-      page: { display: 'flex', flexDirection: 'column', gap: 14, fontSize: 13 },
-      section: {
+      // Страница целиком: прокрутка и поля по краям задаются классом
+      // .dshs-sync-page (на узком экране — 16 px).
+      page: {
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        width: '100%',
+        height: '100%',
+        boxSizing: 'border-box',
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        fontSize: 13,
+      },
+      // Центрированный контейнер контента: 940 px по центру окна.
+      container: {
+        width: '100%',
+        maxWidth: 940,
+        margin: '0 auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        boxSizing: 'border-box',
+      },
+      // Шапка: иконка в круге, название, подзаголовок, чип и «Обновить».
+      header: { display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', width: '100%' },
+      headerIcon: {
+        width: 52,
+        height: 52,
+        flex: '0 0 auto',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 999,
+        background: 'var(--dsw-alias-brand-primary, rgba(80,120,200,0.9))',
+        color: 'var(--dsw-alias-label-primary-foreground, #fff)',
+      },
+      headerText: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 260px', minWidth: 0 },
+      headerSide: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
+      pageTitle: {
+        margin: 0,
+        fontSize: 21,
+        lineHeight: 1.25,
+        fontWeight: 600,
+        color: 'var(--dsw-alias-label-primary, inherit)',
+      },
+      subtitle: {
+        margin: 0,
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        color: 'var(--dsw-alias-label-secondary, rgba(128,128,128,0.95))',
+      },
+      chip: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '5px 11px',
+        borderRadius: 999,
+        fontSize: 12,
+        fontWeight: 500,
+        whiteSpace: 'nowrap',
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
+        background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08))',
+        color: 'var(--dsw-alias-label-primary, inherit)',
+      },
+      chipDot: { width: 8, height: 8, borderRadius: 4, flex: '0 0 auto' },
+      sections: { display: 'flex', flexDirection: 'column', gap: 16 },
+      // Секция-карточка: единые поля 16/18 px и радиус 14.
+      card: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        padding: '16px 18px',
+        boxSizing: 'border-box',
+        borderRadius: 14,
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
+        background: 'var(--dsw-alias-bg-layer-1, rgba(128,128,128,0.045))',
+      },
+      cardHead: { display: 'flex', alignItems: 'center', gap: 8 },
+      cardTitle: {
+        margin: 0,
+        fontSize: 14,
+        lineHeight: 1.35,
+        fontWeight: 600,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        color: 'var(--dsw-alias-label-primary, inherit)',
+      },
+      cardBody: { display: 'flex', flexDirection: 'column', gap: 10 },
+      cardActions: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+      // Строка статуса на странице синхронизации: результат автозапуска.
+      statusPanel: {
         display: 'flex',
         flexDirection: 'column',
         gap: 8,
-        padding: '12px 14px',
-        border: '1px solid rgba(128,128,128,0.22)',
+        padding: '12px 16px',
+        boxSizing: 'border-box',
         borderRadius: 12,
-        background: 'rgba(128,128,128,0.04)',
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
+        background: 'var(--dsw-alias-card-fill, rgba(128,128,128,0.045))',
       },
-      title: { fontSize: 13.5, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 },
-      accent: { width: 3, height: 16, borderRadius: 2, background: 'rgba(80,120,200,0.75)', flex: '0 0 auto' },
-      hint: { fontSize: 12, opacity: 0.75, lineHeight: 1.5 },
+      accent: { width: 3, height: 16, borderRadius: 2, background: 'var(--dsw-alias-brand-primary, rgba(80,120,200,0.75))', flex: '0 0 auto' },
+      hint: { fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary, rgba(128,128,128,0.95))' },
       row: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 },
       dot: { width: 8, height: 8, borderRadius: 4, flex: '0 0 auto' },
       badge: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '2px 8px', borderRadius: 999, fontSize: 12, fontWeight: 500 },
-      field: { display: 'flex', flexDirection: 'column', gap: 4 },
-      label: { fontSize: 12, fontWeight: 500, opacity: 0.85 },
+      field: { display: 'flex', flexDirection: 'column', gap: 5 },
+      label: { fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary, inherit)' },
       get input() {
         return {
           width: '100%',
           boxSizing: 'border-box',
-          padding: '7px 10px',
-          borderRadius: 8,
-          border: '1px solid rgba(128,128,128,0.35)',
-          background: 'transparent',
-          color: 'inherit',
+          padding: '8px 11px',
+          borderRadius: 10,
+          border: '1px solid var(--dsw-alias-border-l3, rgba(128,128,128,0.35))',
+          background: 'var(--dsw-alias-bg-base, transparent)',
+          color: 'var(--dsw-alias-label-primary, inherit)',
           fontSize: 13,
           fontFamily: 'inherit',
           colorScheme: themeScheme(),
@@ -94,31 +226,66 @@ window.__ModuleLoader__.load({
       },
       buttons: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' },
       button: {
-        padding: '7px 13px',
-        borderRadius: 8,
-        border: '1px solid rgba(128,128,128,0.35)',
-        background: 'transparent',
+        padding: '8px 13px',
+        borderRadius: 10,
+        border: '1px solid var(--dsw-alias-border-l3, rgba(128,128,128,0.35))',
+        background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08))',
         color: 'inherit',
         fontSize: 12.5,
         cursor: 'pointer',
         fontFamily: 'inherit',
       },
       primary: {
-        padding: '7px 14px',
-        borderRadius: 8,
-        border: '1px solid rgba(80,120,200,0.55)',
-        background: 'rgba(80,120,200,0.16)',
-        color: 'inherit',
+        padding: '8px 15px',
+        borderRadius: 10,
+        border: '1px solid transparent',
+        background: 'var(--dsw-alias-button-primary-fill, #2a6df4)',
+        color: 'var(--dsw-alias-label-primary-foreground, #fff)',
         fontSize: 12.5,
         fontWeight: 600,
         cursor: 'pointer',
         fontFamily: 'inherit',
       },
-      note: { fontSize: 12, lineHeight: 1.5, padding: '8px 10px', borderRadius: 8, background: 'rgba(128,128,128,0.10)' },
-      error: { fontSize: 12, lineHeight: 1.5, padding: '8px 10px', borderRadius: 8, background: 'rgba(209,36,47,0.12)', border: '1px solid rgba(209,36,47,0.35)' },
-      ok: { fontSize: 12, lineHeight: 1.5, padding: '8px 10px', borderRadius: 8, background: 'rgba(40,150,80,0.12)', border: '1px solid rgba(40,150,80,0.35)' },
-      meta: { fontSize: 11.5, opacity: 0.65 },
+      note: {
+        fontSize: 12,
+        lineHeight: 1.5,
+        padding: '9px 11px',
+        borderRadius: 10,
+        background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.10))',
+      },
+      error: {
+        fontSize: 12,
+        lineHeight: 1.5,
+        padding: '9px 11px',
+        borderRadius: 10,
+        background: 'rgba(209,36,47,0.12)',
+        border: '1px solid var(--dsw-alias-state-error-primary, rgba(209,36,47,0.35))',
+      },
+      ok: {
+        fontSize: 12,
+        lineHeight: 1.5,
+        padding: '9px 11px',
+        borderRadius: 10,
+        background: 'rgba(40,150,80,0.12)',
+        border: '1px solid var(--dsw-alias-state-success-primary, rgba(40,150,80,0.35))',
+      },
+      meta: { fontSize: 11.5, color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.8))' },
       checkboxRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 },
+      // Панель действий внизу: «Сохранить», «Создать репозиторий», «Диагностика».
+      actions: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        flexWrap: 'wrap',
+        padding: '12px 16px',
+        boxSizing: 'border-box',
+        borderRadius: 14,
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
+        background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08))',
+      },
+      actionsText: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 },
+      statusRow: { display: 'flex', alignItems: 'center', gap: 10, fontSize: 14 },
     };
 
     async function post(path, payload) {
@@ -169,9 +336,16 @@ window.__ModuleLoader__.load({
             '.dshs-card input:focus-visible,.dshs-card select:focus-visible{outline:2px solid rgba(80,120,200,0.55);outline-offset:1px}',
             '.dshs-card select:hover{border-color:rgba(150,150,150,0.65)}',
             '.dshs-card select,.dshs-card select option{color-scheme:inherit;background-color:transparent;color:inherit}',
-            '.dshs-card select option{background:#22242a;color:#f2f2f2}',
-            '.dshs-card select option:checked{background:#3a3f4b;color:#ffffff}',
+            '.dshs-card select option{background:var(--dsw-alias-bg-layer-2,#22242a);color:var(--dsw-alias-label-primary,#f2f2f2)}',
+            '.dshs-card select option:checked{background:var(--dsw-alias-interactive-bg-active,#3a3f4b);color:var(--dsw-alias-label-primary,#ffffff)}',
             '.dshs-card a{color:inherit}',
+            // Страница синхронизации: симметричные поля по краям, на узком
+            // экране — 16 px, чтобы контент не прилипал к краям окна.
+            '.dshs-sync-page{padding:28px 24px 48px}',
+            '@media (max-width:720px){.dshs-sync-page{padding:20px 16px 36px}}',
+            '.dshs-sync-card{transition:background-color .15s ease,border-color .15s ease}',
+            '.dshs-sync-card:hover{border-color:var(--dsw-alias-border-l3,rgba(128,128,128,0.35))}',
+            '.dshs-sync-chip{transition:background-color .15s ease}',
           ].join('\n');
           document.head.appendChild(style);
           return () => style.remove();
@@ -345,6 +519,88 @@ window.__ModuleLoader__.load({
       }
 
 
+      /** Иконка синхронизации: две стрелки по кругу (шапка страницы). */
+      function SyncArrows({ size = 24 }) {
+        return h(
+          'svg',
+          { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true', focusable: 'false' },
+          h('path', {
+            d: 'M12.6 8A4.6 4.6 0 1 1 11.2 4.7',
+            stroke: 'currentColor',
+            strokeWidth: 1.4,
+            strokeLinecap: 'round',
+          }),
+          h('path', {
+            d: 'M12.7 2.5v2.7h-2.7',
+            stroke: 'currentColor',
+            strokeWidth: 1.4,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          }),
+        );
+      }
+
+      /**
+       * Шапка страницы: иконка в круге, название, подзаголовок, статус-чип
+       * (настроено / проверка / не настроено, время последней синхронизации)
+       * и кнопка «Обновить» — она перечитывает состояние с host-части.
+       */
+      function SyncPageHeader({ data, loading }) {
+        const ready = data?.ready === true;
+        const last = data?.lastRun;
+        const chipText = ready ? t('statusReady') : loading ? t('statusChecking') : t('statusOff');
+        const chipColor = ready
+          ? 'var(--dsw-alias-state-success-primary, #2f9e44)'
+          : loading
+            ? 'var(--dsw-alias-state-warn-primary, #e8590c)'
+            : 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.8))';
+        const lastText = last
+          ? `${t('statusLast')}: ${new Date(last.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
+          : t('statusNever');
+        return h(
+          'header',
+          { className: 'dshs-sync-header', style: S.header },
+          h('span', { style: S.headerIcon, 'aria-hidden': 'true' }, h(SyncArrows, { size: 24 })),
+          h(
+            'div',
+            { style: S.headerText },
+            h('h1', { style: S.pageTitle }, t('title')),
+            h('p', { style: S.subtitle }, t('subtitle')),
+          ),
+          h(
+            'div',
+            { style: S.headerSide },
+            h(
+              'span',
+              { className: 'dshs-sync-chip', style: S.chip },
+              h('span', { style: { ...S.chipDot, background: chipColor } }),
+              chipText,
+            ),
+            h('span', { style: S.meta }, lastText),
+            h(
+              'button',
+              { type: 'button', style: S.button, disabled: loading, onClick: () => void refresh() },
+              t('actionRefresh'),
+            ),
+          ),
+        );
+      }
+
+      /** Секция-карточка страницы: заголовок с акцентом, пояснение, содержимое. */
+      function Card(props) {
+        const { title, hint, actions } = props;
+        const children = props.children;
+        return h(
+          'section',
+          { className: 'dshs-sync-card', style: S.card },
+          h('div', { style: S.cardHead }, h('span', { style: S.accent }), h('h2', { style: S.cardTitle }, title)),
+          hint ? h('p', { style: S.hint }, hint) : null,
+          h('div', { style: S.cardBody }, children),
+          actions ? h('div', { style: S.cardActions }, actions) : null,
+        );
+      }
+
+
       /**
        * Секция на странице плагина в панели «Плагины».
        *
@@ -362,9 +618,11 @@ function DetailSection(props) {
               ? subject.id
               : ''
         if (packageName !== 'dsh-sessions' && packageName !== 'dsh-sync') return null
+        // Секция живёт в общей колонке страницы плагина: держим ту же ширину,
+        // что и страница синхронизации, и центрируем её по окну.
         return h(
           'div',
-          { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+          { className: 'dshs-detail', style: { ...S.container, gap: 12 } },
           h(SyncCard, { view: null }),
         )
       }
@@ -689,58 +947,94 @@ function CollapsedItem({ title, summary, badge, children }) {
 
         return h(
           'div',
-          { style: S.page, className: 'dshs-card' },
+          { className: 'dshs-card dshs-sync-sections', style: S.sections },
 
+          // Итог последнего действия и ошибки — над секциями, чтобы их было
+          // видно сразу после нажатия кнопки.
+          state.notice ? h('div', { style: S.ok }, state.notice) : null,
+          state.error ? h('div', { style: S.error }, state.error) : null,
+
+          // --- синхронизация: состояние, прогресс и запуск ------------------
           h(
-            'div',
-            { style: S.section },
-            h('span', { style: S.title }, h('span', { style: S.accent }), 'Обновление плагина'),
+            Card,
+            { title: t('sectionSync'), hint: 'Состояние зеркала, прогресс копирования и ручной запуск.' },
+            status
+              ? h('span', { style: S.hint }, `Сессий локально: ${status.local}, в зеркале: ${status.mirror}. Только локально: ${status.onlyLocal}, только в зеркале: ${status.onlyMirror}.`)
+              : h('span', { style: S.hint }, state.loading ? 'Читаем состояние…' : 'Состояние пока неизвестно — обновите страницу.'),
             h(
-              'span',
-              { style: S.hint },
-              update === null
-                ? 'Проверяем версию…'
-                : update.status === 'local'
-                  ? 'Локальная установка: свежий код уже на месте, обновлять нечего.'
-                  : update.status === 'behind'
-                    ? `Доступно обновление: ${shortSha(update.installed)} → ${shortSha(update.latest)} — установится автоматически.`
-                    : update.status === 'current'
-                      ? `Актуально (${shortSha(update.installed)})`
-                      : update.detail !== undefined && update.detail !== ''
-                        ? `Проверка не удалась: ${update.detail}`
-                        : 'Состояние неизвестно',
+              'div',
+              { style: { display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, color: 'var(--dsw-alias-label-secondary, inherit)' } },
+              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-success-primary, #2f9e44)' } }), 'синхронизировано'),
+              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-warn-primary, #e8590c)' } }), 'есть изменения'),
+              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-error-primary, #d1242f)' } }), 'не отправлялось'),
             ),
-            update?.status === 'behind'
-              ? h('button', { style: S.button, onClick: () => void applyUpdate() }, 'Обновить')
+            h(SyncProgress, { data }),
+            data?.pending
+              ? h('span', { style: S.note }, 'Есть неотправленные изменения — они уйдут при следующей отправке (не чаще раза в 5 минут) или по кнопке.')
               : null,
-            updateNote !== '' ? h('span', { style: S.note }, updateNote) : null,
-          ),
-
-          h(
-            'div',
-            { style: S.section },
-            h('span', { style: S.title }, h('span', { style: S.accent }), 'Проверка окружения'),
-            checks.length === 0
-              ? h('span', { style: S.hint }, state.loading ? 'Проверка…' : 'Не удалось получить данные от host-части.')
+            status && status.local === 0 && status.mirror > 0
+              ? h(
+                  'span',
+                  { style: S.note },
+                  'На этом устройстве пока нет локальных сессий — они появятся после первой отправки или скачивания из зеркала.',
+                )
               : null,
-            ...checks.map((check) =>
+            h(
+              'div',
+              { style: S.buttons },
               h(
-                'div',
-                { key: check.id, style: S.row },
-                h('span', { style: { ...S.dot, background: check.ok ? '#2f9e44' : '#d1242f' } }),
-                h('span', { style: { minWidth: 150 } }, check.title),
-                h('span', { style: S.meta }, check.detail),
+                'button',
+                { type: 'button', style: S.primary, disabled: busy, onClick: () => void run('sync') },
+                state.busy === 'sync' ? 'Синхронизация…' : 'Синхронизировать',
               ),
+              h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void run('pull') }, 'Только принять'),
+              h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void run('push') }, 'Только отправить'),
+              h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void refresh() }, 'Обновить'),
             ),
-            checks.some((check) => !check.ok)
-              ? h('span', { style: S.note }, checks.filter((check) => !check.ok).map((check) => check.hint).join(' '))
+            last
+              ? h(
+                  'span',
+                  { style: last.ok ? S.ok : S.error },
+                  `${new Date(last.at).toLocaleString('ru-RU')} — ${last.ok ? 'успешно' : 'ошибка'}: ${last.message}`,
+                )
+              : h('span', { style: S.hint }, 'Ещё не запускалось.'),
+            (data?.history?.length ?? 0) > 0
+              ? h(
+                  'div',
+                  { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+                  h('span', { style: S.label }, 'Последние запуски'),
+                  ...data.history.slice(-3).reverse().map((entry, index) =>
+                    h(
+                      'span',
+                      { key: `h${index}`, style: entry.ok ? S.meta : S.error },
+                      `${new Date(entry.at).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} — ${entry.ok ? 'ok' : 'ошибка'}: ${entry.message}`,
+                    ),
+                  ),
+                )
+              : null,
+            h('span', { style: S.hint }, 'После приёма новых сессий перезапустите DSH — список обновляется при старте.'),
+            data?.automation
+              ? h(
+                  'span',
+                  { style: data.automation.lastError ? S.error : S.hint },
+                  data.automation.enabled === false
+                    ? 'Автосинхронизация выключена.'
+                    : `Автосинхронизация: приём раз в ${data.automation.settings?.pullIntervalMinutes ?? 15} мин, отправка при изменениях (не чаще ${data.automation.settings?.pushMinIntervalMinutes ?? 5} мин)`
+                      + (data.automation.lastPushAt
+                        ? `; последняя отправка ${new Date(data.automation.lastPushAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
+                        : '')
+                      + (data.automation.lastError ? `; ошибка: ${data.automation.lastError}` : ''),
+                )
               : null,
           ),
 
+          // --- подключение: где зеркало и какой проект синхронизировать -----
           h(
-            'div',
-            { style: S.section },
-            h('span', { style: S.title }, h('span', { style: S.accent }), 'Настройки'),
+            Card,
+            {
+              title: t('sectionConnection'),
+              hint: 'Хранилище с копией сессий и проект, который синхронизируется с этого компьютера.',
+            },
             h(
               'label',
               { style: S.field },
@@ -778,6 +1072,7 @@ function CollapsedItem({ title, summary, badge, children }) {
                     ? h(
                         'button',
                         {
+                          type: 'button',
                           style: S.button,
                           onClick: () => set({ repoDir: data.suggestedFolder }),
                         },
@@ -804,7 +1099,7 @@ function CollapsedItem({ title, summary, badge, children }) {
                     placeholder: 'xxxx xxxx xxxx xxxx',
                     onChange: (event) => set({ webdavPassword: event.target.value }),
                   }),
-                  h('span', { style: { fontSize: 11, opacity: 0.6, lineHeight: 1.5 } }, "Пароль приложения: Яндекс ID → Безопасность → Пароли приложений → создать для «Файлы»."),
+                  h('span', { style: { fontSize: 11, lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.8))' } }, "Пароль приложения: Яндекс ID → Безопасность → Пароли приложений → создать для «Файлы»."),
                   h('span', { style: S.label }, 'Папка на Диске'),
                   h('input', {
                     style: { ...S.input, colorScheme: themeScheme() },
@@ -819,13 +1114,13 @@ function CollapsedItem({ title, summary, badge, children }) {
                   ),
                   h(
                     'button',
-                    { style: S.button, disabled: busy, onClick: () => void checkYandex() },
+                    { type: 'button', style: S.button, disabled: busy, onClick: () => void checkYandex() },
                     state.busy === 'yandex' ? 'Проверка…' : 'Проверить доступ',
                   ),
                   probe
                     ? h(
                         'span',
-                        { style: { fontSize: 12, color: probe.ok ? '#2f9e44' : '#d1242f' } },
+                        { style: { fontSize: 12, color: probe.ok ? 'var(--dsw-alias-state-success-primary, #2f9e44)' : 'var(--dsw-alias-state-error-primary, #d1242f)' } },
                         probe.text,
                       )
                     : null,
@@ -842,7 +1137,7 @@ function CollapsedItem({ title, summary, badge, children }) {
                     placeholder: 'y0_AgAAAA…',
                     onChange: (event) => set({ yandexToken: event.target.value }),
                   }),
-                  h('span', { style: { fontSize: 11, opacity: 0.6, lineHeight: 1.5 } }, "OAuth-токен выдаётся приложению с доступом к диску: oauth.yandex.ru → «Создать приложение» → права на файлы."),
+                  h('span', { style: { fontSize: 11, lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.8))' } }, "OAuth-токен выдаётся приложению с доступом к диску: oauth.yandex.ru → «Создать приложение» → права на файлы."),
                   h('span', { style: S.label }, 'Папка на Диске'),
                   h('input', {
                     style: { ...S.input, colorScheme: themeScheme() },
@@ -857,13 +1152,13 @@ function CollapsedItem({ title, summary, badge, children }) {
                   ),
                   h(
                     'button',
-                    { style: S.button, disabled: busy, onClick: () => void checkYandex() },
+                    { type: 'button', style: S.button, disabled: busy, onClick: () => void checkYandex() },
                     state.busy === 'yandex' ? 'Проверка…' : 'Проверить доступ',
                   ),
                   probe
                     ? h(
                         'span',
-                        { style: { fontSize: 12, color: probe.ok ? '#2f9e44' : '#d1242f' } },
+                        { style: { fontSize: 12, color: probe.ok ? 'var(--dsw-alias-state-success-primary, #2f9e44)' : 'var(--dsw-alias-state-error-primary, #d1242f)' } },
                         probe.text,
                       )
                     : null,
@@ -901,6 +1196,15 @@ function CollapsedItem({ title, summary, badge, children }) {
                 onChange: (event) => set({ projectId: event.target.value }),
               }),
             ),
+          ),
+
+          // --- дополнительно: вложения, автообновление и резерв ---------------
+          h(
+            Card,
+            {
+              title: t('sectionExtra'),
+              hint: 'Вложения, автообновление плагина и вторая копия зеркала.',
+            },
             h(
               'label',
               { style: S.checkboxRow },
@@ -912,9 +1216,10 @@ function CollapsedItem({ title, summary, badge, children }) {
               h('span', null, 'Синхронизировать вложения (картинки и файлы из чата)'),
             ),
             h(
-              'span',
-              { style: S.hint },
-              'Плагин обновляется сам: проверка раз в 6 часов, при выходе новой версии установка идёт автоматически.',
+              'div',
+              { style: S.row },
+              h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-success-primary, #2f9e44)' } }),
+              h('span', null, 'Автообновление плагина включено: проверка раз в 6 часов, установка новой версии — автоматически.'),
             ),
             h(
               'div',
@@ -970,59 +1275,13 @@ function CollapsedItem({ title, summary, badge, children }) {
                 'Сессии и настройки дублируются в оба места, вложения — только в основное. Если основное хранилище недоступно, приём идёт из резервного.',
               ),
             ),
-            h(
-              'div',
-              { style: S.buttons },
-              h(
-                'button',
-                {
-                  style: S.button,
-                  disabled: busy || data === null,
-                  onClick: () => {
-                    // Сохраняем только на загруженных настройках: иначе пустые
-                    // значения по умолчанию затирают уже настроенное хранилище.
-                    if (data === null) {
-                      publish({ error: 'Настройки ещё загружаются — подождите пару секунд.' });
-                      return;
-                    }
-                    void save(draft);
-                  },
-                },
-                state.busy === 'save' ? 'Сохранение…' : 'Сохранить',
-              ),
-              h(
-                'button',
-                {
-                  style: S.button,
-                  disabled: busy,
-                  title: 'Создать приватный репозиторий dsh-sessions в вашем аккаунте GitHub',
-                  onClick: () => void createRepo(),
-                },
-                state.busy === 'create' ? 'Создание…' : 'Создать репозиторий',
-              ),
-              h(
-                'button',
-                {
-                  style: S.button,
-                  disabled: busy,
-                  title: 'Собрать отчёт о состоянии и скопировать в буфер обмена',
-                  onClick: () => void copyDiagnostics(),
-                },
-                state.busy === 'diag' ? 'Сбор…' : 'Диагностика',
-              ),
-            ),
-            h(
-              'span',
-              { style: S.hint },
-              'Репозиторий создаётся приватным через токен GitHub из хранилища DSH. Если токена нет — создайте репозиторий вручную и вставьте его HTTPS-адрес выше.',
-            ),
           ),
 
+          // --- внешний плагин: предупреждение о двух движках -----------------
           external?.found
             ? h(
-                'div',
-                { style: S.section },
-                h('span', { style: S.title }, h('span', { style: S.accent }), 'Внешний плагин синхронизации'),
+                Card,
+                { title: t('sectionExternal') },
                 h(
                   'span',
                   { style: S.hint },
@@ -1046,83 +1305,127 @@ function CollapsedItem({ title, summary, badge, children }) {
               )
             : null,
 
+          // --- проверка окружения: Node, git, папка и репозиторий ------------
           h(
-            'div',
-            { style: S.section },
-            h('span', { style: S.title }, h('span', { style: S.accent }), 'Синхронизация'),
-            status
-              ? h('span', { style: S.hint }, `Сессий локально: ${status.local}, в зеркале: ${status.mirror}. Только локально: ${status.onlyLocal}, только в зеркале: ${status.onlyMirror}.`)
+            Card,
+            {
+              title: t('sectionChecks'),
+              hint: 'Зелёная точка — проверка пройдена, красная — нужна настройка.',
+            },
+            checks.length === 0
+              ? h('span', { style: S.hint }, state.loading ? 'Проверка…' : 'Не удалось получить данные от host-части.')
               : null,
-            h(
-              'div',
-              { style: { display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, opacity: 0.8 } },
-              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#2f9e44' } }), 'синхронизировано'),
-              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#e8590c' } }), 'есть изменения'),
-              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: '#d1242f' } }), 'не отправлялось'),
+            ...checks.map((check) =>
+              h(
+                'div',
+                { key: check.id, style: S.row },
+                h('span', {
+                  style: {
+                    ...S.dot,
+                    background: check.ok
+                      ? 'var(--dsw-alias-state-success-primary, #2f9e44)'
+                      : 'var(--dsw-alias-state-error-primary, #d1242f)',
+                  },
+                }),
+                h('span', { style: { minWidth: 150 } }, check.title),
+                h('span', { style: S.meta }, check.detail),
+              ),
             ),
-            h(SyncProgress, { data }),
-
-            data?.pending
-              ? h('span', { style: S.note }, 'Есть неотправленные изменения — они уйдут при следующей отправке (не чаще раза в 5 минут) или по кнопке.')
+            checks.some((check) => !check.ok)
+              ? h('span', { style: S.note }, checks.filter((check) => !check.ok).map((check) => check.hint).join(' '))
               : null,
-            status && status.local === 0 && status.mirror > 0
+          ),
+
+          // --- обслуживание: версия плагина и обновление ---------------------
+          h(
+            Card,
+            { title: t('sectionMaintenance'), hint: 'Проверка версии плагина и служебные действия.' },
+            h(
+              'span',
+              { style: S.hint },
+              update === null
+                ? 'Проверяем версию…'
+                : update.status === 'local'
+                  ? 'Локальная установка: свежий код уже на месте, обновлять нечего.'
+                  : update.status === 'behind'
+                    ? `Доступно обновление: ${shortSha(update.installed)} → ${shortSha(update.latest)} — установится автоматически.`
+                    : update.status === 'current'
+                      ? `Актуально (${shortSha(update.installed)})`
+                      : update.detail !== undefined && update.detail !== ''
+                        ? `Проверка не удалась: ${update.detail}`
+                        : 'Состояние неизвестно',
+            ),
+            update?.status === 'behind'
               ? h(
-                  'span',
-                  { style: S.note },
-                  'На этом устройстве пока нет локальных сессий — они появятся после первой отправки или скачивания из зеркала.',
+                  'div',
+                  { style: S.cardActions },
+                  h('button', { type: 'button', style: S.button, onClick: () => void applyUpdate() }, 'Обновить'),
                 )
               : null,
+            updateNote !== '' ? h('span', { style: S.note }, updateNote) : null,
+            h('span', { style: S.hint }, 'Проверка обновлений идёт раз в 6 часов; установленная версия применяется при следующем запуске DSH.'),
+          ),
+
+          // --- панель действий: сохранить, создать репозиторий, диагностика --
+          h(
+            'div',
+            { className: 'dshs-sync-actions', style: S.actions },
+            h(
+              'div',
+              { style: S.actionsText },
+              h('span', { style: S.label }, 'Действия'),
+              h('span', { style: S.meta }, 'Настройки применяются кнопкой «Сохранить».'),
+            ),
             h(
               'div',
               { style: S.buttons },
               h(
                 'button',
-                { style: S.primary, disabled: busy, onClick: () => void run('sync') },
-                state.busy === 'sync' ? 'Синхронизация…' : 'Синхронизировать',
+                {
+                  type: 'button',
+                  style: S.primary,
+                  disabled: busy || data === null,
+                  onClick: () => {
+                    // Сохраняем только на загруженных настройках: иначе пустые
+                    // значения по умолчанию затирают уже настроенное хранилище.
+                    if (data === null) {
+                      publish({ error: 'Настройки ещё загружаются — подождите пару секунд.' });
+                      return;
+                    }
+                    void save(draft);
+                  },
+                },
+                state.busy === 'save' ? 'Сохранение…' : 'Сохранить',
               ),
-              h('button', { style: S.button, disabled: busy, onClick: () => void run('pull') }, 'Только принять'),
-              h('button', { style: S.button, disabled: busy, onClick: () => void run('push') }, 'Только отправить'),
-              h('button', { style: S.button, disabled: busy, onClick: () => void refresh() }, 'Обновить'),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: S.button,
+                  disabled: busy,
+                  title: 'Создать приватный репозиторий dsh-sessions в вашем аккаунте GitHub',
+                  onClick: () => void createRepo(),
+                },
+                state.busy === 'create' ? 'Создание…' : 'Создать репозиторий',
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: S.button,
+                  disabled: busy,
+                  title: 'Собрать отчёт о состоянии и скопировать в буфер обмена',
+                  onClick: () => void copyDiagnostics(),
+                },
+                state.busy === 'diag' ? 'Сбор…' : 'Диагностика',
+              ),
             ),
-            last
-              ? h(
-                  'span',
-                  { style: last.ok ? S.ok : S.error },
-                  `${new Date(last.at).toLocaleString('ru-RU')} — ${last.ok ? 'успешно' : 'ошибка'}: ${last.message}`,
-                )
-              : h('span', { style: S.hint }, 'Ещё не запускалось.'),
-            (data?.history?.length ?? 0) > 0
-              ? h(
-                  'div',
-                  { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
-                  h('span', { style: S.label }, 'Последние запуски'),
-                  ...data.history.slice(-3).reverse().map((entry, index) =>
-                    h(
-                      'span',
-                      { key: `h${index}`, style: entry.ok ? S.meta : S.error },
-                      `${new Date(entry.at).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} — ${entry.ok ? 'ok' : 'ошибка'}: ${entry.message}`,
-                    ),
-                  ),
-                )
-              : null,
-            h('span', { style: S.hint }, 'После приёма новых сессий перезапустите DSH — список обновляется при старте.'),
-            data?.automation
-              ? h(
-                  'span',
-                  { style: data.automation.lastError ? S.error : S.hint },
-                  data.automation.enabled === false
-                    ? 'Автосинхронизация выключена.'
-                    : `Автосинхронизация: приём раз в ${data.automation.settings?.pullIntervalMinutes ?? 15} мин, отправка при изменениях (не чаще ${data.automation.settings?.pushMinIntervalMinutes ?? 5} мин)`
-                      + (data.automation.lastPushAt
-                        ? `; последняя отправка ${new Date(data.automation.lastPushAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
-                        : '')
-                      + (data.automation.lastError ? `; ошибка: ${data.automation.lastError}` : ''),
-                )
-              : null,
           ),
-
-          state.notice ? h('span', { style: S.ok }, state.notice) : null,
-          state.error ? h('span', { style: S.error }, state.error) : null,
+          h(
+            'span',
+            { style: S.hint },
+            'Репозиторий создаётся приватным через токен GitHub из хранилища DSH. Если токена нет — создайте репозиторий вручную и вставьте его HTTPS-адрес выше.',
+          ),
         );
       }
 
@@ -1176,81 +1479,58 @@ function CollapsedItem({ title, summary, badge, children }) {
           })();
         }, []);
 
-        const color = phase === 'ok' ? '#2f9e44' : phase === 'error' ? '#d1242f' : 'rgba(128,128,128,0.45)';
+        const color = phase === 'ok'
+          ? 'var(--dsw-alias-state-success-primary, #2f9e44)'
+          : phase === 'error'
+            ? 'var(--dsw-alias-state-error-primary, #d1242f)'
+            : 'rgba(128,128,128,0.45)';
+        const pageState = useSnapshot();
 
+        // Страница целиком: центрированный контейнер до 940 px, симметричные
+        // поля по краям (на узком экране 16 px — в классе .dshs-sync-page).
         return h(
           'div',
-          {
-            className: 'dshs-card',
-            style: {
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 18,
-              padding: '32px 28px 64px',
-              maxWidth: 700,
-              height: '100%',
-              boxSizing: 'border-box',
-              overflowY: 'auto',
-              overflowX: 'hidden',
-            },
-          },
-          h('span', { style: { fontSize: 19, fontWeight: 600 } }, 'Синхронизация сессий'),
+          { className: 'dshs-card dshs-sync-page', style: S.page },
           h(
             'div',
-            { style: { display: 'flex', alignItems: 'center', gap: 12, fontSize: 14 } },
-            h('span', { style: { width: 12, height: 12, borderRadius: 6, background: color, flex: '0 0 auto' } }),
-            h('span', null, text || 'Готово к синхронизации'),
-          ),
-          detail ? h('span', { style: { fontSize: 12.5, opacity: 0.7, lineHeight: 1.5 } }, detail) : null,
-          h(
-            'button',
-            {
-              type: 'button',
-              onClick: () => void run(),
-              disabled: phase === 'busy',
-              style: {
-                alignSelf: 'flex-start',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                height: 34,
-                padding: '0 16px',
-                borderRadius: 8,
-                border: '1px solid rgba(128,128,128,0.32)',
-                background: 'rgba(128,128,128,0.12)',
-                color: 'inherit',
-                font: 'inherit',
-                fontSize: 13.5,
-                fontWeight: 600,
-                cursor: phase === 'busy' ? 'progress' : 'pointer',
-              },
-            },
-            phase === 'busy' ? 'Синхронизация…' : 'Синхронизировать снова',
-          ),
-          h(
-            'span',
-            { style: { fontSize: 12, opacity: 0.6, lineHeight: 1.6 } },
-            'Автосинхронизация работает в фоне: приём при старте и раз в 15 минут, отправка при изменениях.',
-          ),
-          h(
-            'div',
-            {
-              style: {
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 12,
-                marginTop: 6,
-                paddingTop: 12,
-                borderTop: '1px solid rgba(128,128,128,0.18)',
-                maxWidth: 640,
-              },
-            },
-            h('span', { style: { fontSize: 13.5, fontWeight: 600 } }, 'Настройки'),
+            { className: 'dshs-sync-container', style: S.container },
+            h(SyncPageHeader, { data: pageState?.data ?? null, loading: pageState?.loading !== false }),
+            // Результат автозапуска при открытии страницы: светофор и «Синхронизировать снова».
+            h(
+              'div',
+              { className: 'dshs-sync-status', style: S.statusPanel },
+              h(
+                'div',
+                { style: S.statusRow },
+                h('span', { style: { width: 12, height: 12, borderRadius: 6, background: color, flex: '0 0 auto' } }),
+                h('span', null, text || t('statusIdle')),
+              ),
+              detail ? h('span', { style: S.hint }, detail) : null,
+              h(
+                'div',
+                { style: S.cardActions },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    style: S.button,
+                    onClick: () => void run(),
+                    disabled: phase === 'busy',
+                  },
+                  phase === 'busy' ? t('actionSyncing') : t('actionSyncAgain'),
+                ),
+              ),
+              h(
+                'span',
+                { style: S.hint },
+                'Автосинхронизация работает в фоне: приём при старте и раз в 15 минут, отправка при изменениях.',
+              ),
+            ),
             h(SyncCard, { view: null }),
           ),
-
         );
       }
+
 
       /** Иконка пункта в левой панели: две стрелки по кругу. */
       // Всплывающие карточки: боковая панель отрисована всегда, поэтому

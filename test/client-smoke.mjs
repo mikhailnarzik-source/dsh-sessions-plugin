@@ -1,7 +1,10 @@
 /**
  * Дымовой прогон клиентской половины: загружаем client.js в поддельном окне,
- * вызываем factory с заглушкой React и проверяем, что карточка регистрируется
- * и рендерится без ошибок.
+ * вызываем factory с заглушкой React и проверяем, что компоненты
+ * регистрируются и страница синхронизации рендерится без ошибок.
+ *
+ * Это не модульный тест (npm test гоняет test/*.test.mjs): скрипт удобно
+ * запускать отдельно при правках слотов и клиентской части.
  *
  * Запуск: node test/client-smoke.mjs
  */
@@ -18,19 +21,19 @@ new Function(source)()
 assert.equal(loaded?.id, 'dsh-sessions', 'идентификатор клиента совпадает с именем пакета')
 assert.equal(typeof loaded.factory, 'function')
 
-// Мини-React: ровно то, что использует карточка.
-let stateSlots = []
+// Мини-React: ровно то, что использует клиент.
 globalThis.document = {
   documentElement: { style: {}, dataset: {} },
+  body: {},
   createElement: () => ({ textContent: '', dataset: {}, remove() {} }),
   head: { appendChild() {} },
 }
 const React = {
   Component: class Component {
-    constructor(props) { this.props = props }
+    constructor(props) { this.props = props; this.state = {} }
     setState(next) { this.state = { ...this.state, ...next } }
   },
-  createElement: (type, props, ...children) => ({ type, props, children }),
+  createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
   useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
   useEffect: () => {},
   useReducer: (reducer, initial) => [initial, () => {}],
@@ -68,43 +71,30 @@ const ctx = {
 exported.apply(ctx)
 
 assert.ok(['dshSync', 'sessionDelete'].includes(boundNs), 'пространство имён клиента зарегистрировано')
-assert.equal(registrations.length, 10)
-assert.ok(registrations.some(entry => entry.options.name === 'plugins.detail.section'), 'настройки на странице своего плагина')
-assert.ok(registrations.some(entry => entry.options.name === 'main' && entry.options.key === 'dsh-sessions'), 'страница плагина в main по имени пакета')
-assert.ok(registrations.some(entry => entry.options.name === 'sidebar.panellist'), 'пункт в левой панели')
-assert.ok(registrations.some(entry => entry.options.name === 'sidebar.session.row.leading'), 'индикатор в строке сессии')
-assert.ok(registrations.some(entry => entry.options.name === 'sidebar.footer.action'), 'строка состояния в подвале панели')
-assert.ok(registrations.some(entry => entry.options.name === 'conversation.composer.dock'), 'плашка состояния у поля ввода')
-assert.ok(!registrations.some(entry => entry.options.name === 'conversation.header'), 'шапку беседы не трогаем: слот одиночный')
-const cardRegistration = registrations.find(entry => entry.options.name === 'plugins.item')
-assert.ok(cardRegistration, 'карточка плагина регистрируется')
-const { options, component } = cardRegistration
-assert.equal(options.id, 'dsh-sync')
-assert.equal(options.name, 'plugins.item')
-assert.equal(typeof component, 'function')
-assert.equal(typeof options.label(), 'string')
-assert.ok(effects.length > 0, 'эффект с словарями должен регистрироваться')
+// 6 регистраций карточки синхронизации (main — две, по старому и новому ключу)
+// плюс 2 пункта удаления сессии.
+assert.equal(registrations.length, 8, 'все слоты зарегистрированы')
+const mainEntries = registrations.filter((entry) => entry.options.name === 'main')
+assert.deepEqual(mainEntries.map((entry) => entry.options.key).sort(), ['dsh-sessions', 'dsh-sync'])
+assert.ok(registrations.some((entry) => entry.options.name === 'sidebar.panellist'), 'пункт в левой панели')
+assert.ok(registrations.some((entry) => entry.options.name === 'sidebar.session.row.leading'), 'индикатор в строке сессии')
+assert.ok(registrations.some((entry) => entry.options.name === 'conversation.composer.dock'), 'плашка у поля ввода')
+assert.ok(registrations.some((entry) => entry.options.name === 'plugins.detail.section'), 'секция на странице плагина')
+assert.ok(!registrations.some((entry) => entry.options.name === 'conversation.header'), 'шапку беседы не трогаем: слот одиночный')
+assert.ok(effects.length > 0, 'эффект со словарями должен регистрироваться')
 
-// Рендер сводки и полной карточки на пустом снимке состояния.
-const summary = component({ view: 'summary' })
-assert.equal(summary.type, 'span')
-const page = component({ view: 'page' })
-assert.equal(page.type, 'div')
-assert.ok(page.children.length >= 3, 'страница карточки содержит проверку, настройки и синхронизацию')
-
-// Страница пункта в левой панели и иконка рендерятся без ошибок.
-// Обёртка-перехватчик ошибок — это класс: разворачиваем его до обычного элемента.
+// Обёртка-перехватчик ошибок — это класс: разворачиваем до обычного элемента.
 const unwrap = (node) => {
   let current = node
-  for (let step = 0; step < 5; step += 1) {
+  for (let step = 0; step < 10; step += 1) {
     if (current === null || typeof current !== 'object') return current
     const type = current.type
     if (typeof type === 'function' && type.prototype?.render) {
       current = new type({ ...current.props, children: current.children?.[0] ?? null }).render()
       continue
     }
-    if (typeof type === 'function' && type.name !== '' && step >= 0) {
-      current = type({ ...current.props, children: current.children })
+    if (typeof type === 'function') {
+      current = type({ ...current.props, children: current.children?.length === 1 ? current.children[0] : current.children })
       continue
     }
     return current
@@ -112,20 +102,31 @@ const unwrap = (node) => {
   return current
 }
 
-const panelRegistration = registrations.find(entry => entry.options.name === 'main')
-const panel = unwrap(panelRegistration.component({}))
+// Страница пункта в левой панели: шапка и центрированный контейнер.
+const panel = unwrap(mainEntries[0].component({}))
 assert.equal(panel.type, 'div')
-assert.ok(panel.children.length >= 3, 'страница синхронизации содержит статус и кнопку')
+assert.match(String(panel.props.className), /dshs-sync-page/, 'страница синхронизации с полями по краям')
+assert.ok(panel.children.length >= 1, 'внутри страницы есть контейнер с контентом')
 
-const sidebarRegistration = registrations.find(entry => entry.options.name === 'sidebar.panellist')
-const icon = sidebarRegistration.component({ size: 16 })
+// Секция на странице плагина тоже рендерится без ошибок.
+const detailEntry = registrations.find((entry) => entry.options.name === 'plugins.detail.section')
+const detail = unwrap(detailEntry.component({ subject: { kind: 'bundle', pkg: { name: 'dsh-sessions' } } }))
+assert.equal(detail.type, 'div')
+assert.match(String(detail.props.className), /dshs-detail/)
+
+// Секция чужого плагина не показывает наши настройки.
+assert.equal(detailEntry.component({ subject: { kind: 'bundle', pkg: { name: 'other-plugin' } } }), null)
+
+// Иконка в левой панели: svg в контейнере (обёртка нужна для точки состояния).
+const sidebarRegistration = registrations.find((entry) => entry.options.name === 'sidebar.panellist')
+const icon = unwrap(sidebarRegistration.component({ size: 16 }))
 assert.equal(icon.type, 'span', 'иконка дополнена контейнером для уведомлений')
 assert.ok(icon.children.some((child) => child && child.type === 'svg'), 'внутри остаётся иконка')
 
 // Индикатор без данных ничего не рисует (точка появляется после ответа host).
-const dotRegistration = registrations.find(entry => entry.options.name === 'sidebar.session.row.leading')
+const dotRegistration = registrations.find((entry) => entry.options.name === 'sidebar.session.row.leading')
 assert.equal(dotRegistration.component({ sessionId: 'session-x' }), null)
 
 console.log('client smoke: OK')
-console.log('  слот:', options.name, '| id:', options.id, '| label:', options.label())
-console.log('  элементов на странице:', page.children.length)
+console.log('  регистраций:', registrations.length)
+console.log('  страница синхронизации:', panel.props.className)
