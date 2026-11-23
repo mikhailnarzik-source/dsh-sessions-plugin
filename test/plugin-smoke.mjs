@@ -26,7 +26,7 @@ assert.equal(name, 'dsh-sync')
 assert.deepEqual(inject, ['connection', 'tools', 'sessionPersistence', 'workspaceRegistry'])
 apply(ctx)
 
-assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/restore', '/api/dsh-sync/run', '/api/dsh-sync/secondary-init', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/tombstones', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
+assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/profile/apply', '/api/dsh-sync/restore', '/api/dsh-sync/run', '/api/dsh-sync/secondary-init', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/tombstones', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
 assert.deepEqual([...tools.keys()].sort(), ['sync_run', 'sync_status'])
 
 const call = async (path, payload) => {
@@ -205,6 +205,29 @@ const attach = await call('/api/dsh-sync/profile', { action: 'attach' })
 assert.equal(attach.body.ok, true)
 const manifest = await call('/api/dsh-sync/profile', { action: 'attach-workspace', path: '', sessionIds: [] })
 assert.equal(manifest.status, 400, 'без пути привязка не выполняется')
+// Применение профиля: без плана — понятный отказ, перестроение плана — ok.
+const applyWithoutPlan = await call('/api/dsh-sync/profile/apply', { action: 'apply' })
+assert.equal(applyWithoutPlan.body.ok, false)
+assert.equal(applyWithoutPlan.body.code, 'no-plan')
+const planRefresh = await call('/api/dsh-sync/profile/apply', { action: 'plan' })
+assert.equal(planRefresh.body.ok, true)
+
+// 15b. Полный цикл маршрута: план из зеркала → «Применить» → файл на диске.
+const smokeMirror = join(home, 'dsh-sync', 'repo')
+await mkdir(join(smokeMirror, 'profile', 'settings'), { recursive: true })
+await writeFile(join(smokeMirror, 'profile', 'settings', 'dsh-notify.json'), JSON.stringify({ notifications: true, volume: 70 }, null, 2))
+const planned = await call('/api/dsh-sync/profile/apply', { action: 'plan' })
+assert.equal(planned.body.ok, true)
+assert.equal(planned.body.pending, true, 'план профиля построен по зеркалу')
+assert.ok(planned.body.plan.files >= 1)
+const appliedProfile = await call('/api/dsh-sync/profile/apply', { action: 'apply' })
+assert.equal(appliedProfile.body.ok, true, 'план применён по маршруту')
+assert.ok(appliedProfile.body.applied >= 1)
+const notifySettings = JSON.parse(await readFile(join(home, 'dsh-notify', 'settings.json'), 'utf8'))
+assert.equal(notifySettings.notifications, true, 'настройка из плана записана локально')
+assert.equal(notifySettings.volume, 70)
+const appliedAgain = await call('/api/dsh-sync/profile/apply', { action: 'apply' })
+assert.equal(appliedAgain.body.ok, false, 'повторное применение без плана — понятный отказ')
 
 // 16. браузерные настройки: сохранение и очередь после приёма
 const browserSaved = await call('/api/dsh-sync/browser-settings', { current: { 'dsh-polish': { enabled: true } } })

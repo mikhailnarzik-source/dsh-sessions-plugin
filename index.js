@@ -40,7 +40,7 @@ import {
 import { applyUpdate, checkForUpdate, describeUpdate, updateState } from './lib/update.js'
 import { MODE_LOCAL, readSessionModes, sessionBadge, sessionModeOf, setSessionMode } from './lib/session-modes.mjs'
 import { clearWorkspacePending, planWorkspace, readWorkspacePending } from './lib/workspace.mjs'
-import { clearPendingBrowserSettings, readJournal, readPendingBrowserSettings, readProfileStatus, writeBrowserSettings } from './lib/profile.mjs'
+import { applyPendingProfile, clearPendingBrowserSettings, discardProfilePlan, readJournal, readPendingBrowserSettings, readProfileStatus, refreshProfilePlan, writeBrowserSettings } from './lib/profile.mjs'
 import { QUARANTINE_DAYS, listTombstones, restoreTombstones } from './lib/tombstones.mjs'
 import { createRemote } from './lib/remote.mjs'
 import { hasChanges } from './lib/git.mjs'
@@ -61,6 +61,8 @@ const ACK_UPDATE_PATH = '/api/dsh-sync/ack-update'
 const YANDEX_CHECK_PATH = '/api/dsh-sync/yandex-check'
 const SESSION_MODE_PATH = '/api/dsh-sync/session-mode'
 const PROFILE_PATH = '/api/dsh-sync/profile'
+// «Сначала показать, потом применить»: отдельный маршрут применения плана.
+const PROFILE_APPLY_PATH = '/api/dsh-sync/profile/apply'
 const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings'
 const TOMBSTONES_PATH = '/api/dsh-sync/tombstones'
 const RESTORE_PATH = '/api/dsh-sync/restore'
@@ -800,6 +802,10 @@ async function saveSettings(ctx, payload) {
     }
   }
   if (typeof payload.useExternal === 'boolean') config.useExternal = payload.useExternal
+  // Профильный слой: авто-применение по умолчанию выключено (ручной режим).
+  if (typeof payload.autoApplyProfile === 'boolean') {
+    config.profile = { ...(config.profile ?? { enabled: true }), enabled: true, autoApply: payload.autoApplyProfile }
+  }
   config.projects = { [projectId]: { path: projectPath, title: projectId } }
   await saveConfig(home, config)
   // Резерв настроен заново или изменён — старый отчёт сверки больше не
@@ -1049,6 +1055,9 @@ async function runSync(ctx, action, options = {}) {
       if ((result.pull.localSkipped ?? 0) > 0) messages.push(`локальных сессий пропущено: ${result.pull.localSkipped}`)
       if (result.pull.profile !== undefined && result.pull.profile.skipped !== true) {
         messages.push(`профиль: применено ${result.pull.profile.applied ?? 0}, конфликтов ${result.pull.profile.conflicts ?? 0}`)
+        if (result.pull.profile.pendingPlan === true) {
+          messages.push(`профиль: план ждёт применения в панели (${result.pull.profile.plan?.files ?? 0} файлов)`)
+        }
       }
       if (result.pull.workspace !== undefined) {
         messages.push(`рабочие пространства: к привязке ${result.pull.workspace.toAttach ?? 0}`)
@@ -2252,7 +2261,49 @@ export function apply(ctx) {
         const journal = await readJournal(config.repoDir)
         return json({ ok: true, entries: journal.entries.slice(-50) })
       }
+      if (action === 'plan') {
+        // Перестроить план приёма вручную (например, после обновления зеркала
+        // другим устройством) — локальные файлы не меняются.
+        const config = await loadConfig(home)
+        const { createNeutralizer } = await import('./lib/neutralize.mjs')
+        const neutralizer = createNeutralizer({ home: homedir(), dshHome: home })
+        return json(await refreshProfilePlan({ home, config, neutralizer }))
+      }
+      if (action === 'auto-apply') {
+        // Ручной режим по умолчанию; авто-применение — только явным включением.
+        const config = await loadConfig(home)
+        config.profile = { ...(config.profile ?? { enabled: true }), enabled: true, autoApply: payload.enabled === true }
+        await saveConfig(home, config)
+        return json({ ok: true, autoApply: config.profile.autoApply === true })
+      }
       return json(await profileStatus(ctx))
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  // Применение плана профиля: «сначала показать, потом применить».
+  // action=apply — применить отложенный план, discard — отменить, plan — перестроить.
+  route('profile-apply', PROFILE_APPLY_PATH, async (request) => {
+    try {
+      const payload = await body(request)
+      const action = typeof payload.action === 'string' ? payload.action : 'apply'
+      const home = dshHome()
+      if (action === 'discard') {
+        return json(await discardProfilePlan(home))
+      }
+      const config = await loadConfig(home)
+      const { createNeutralizer } = await import('./lib/neutralize.mjs')
+      const neutralizer = createNeutralizer({ home: homedir(), dshHome: home })
+      if (action === 'plan') {
+        return json(await refreshProfilePlan({ home, config, neutralizer }))
+      }
+      const result = await applyPendingProfile({ home, config, neutralizer })
+      if (result.ok === true && (result.applied ?? 0) > 0) {
+        pushNotice('sync', `Профиль обновлён: применено файлов ${result.applied}`)
+        invalidateSessionStates()
+      }
+      return json(result)
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
     }
@@ -2353,6 +2404,8 @@ export function apply(ctx) {
         lines.push(`профиль: ${profile.available ? profile.profileDir : 'каталог профиля не найден'}`)
         if (profile.available) {
           lines.push(`  патч: ${(profile.patch?.entries ?? []).join(', ') || 'нет безопасных записей'}; плагинов: ${profile.bundles?.count ?? 0}; конфликтов: ${profile.conflictCount ?? 0}`)
+          lines.push(`  доп. данные: расходов ${profile.extras?.expenses ?? 0}, задач ${profile.extras?.schedule ?? 0}, «Входящие»: настроек ${profile.extras?.inbox ?? 0}`)
+          lines.push(`  применение профиля: ${profile.autoApply ? 'авто без конфликтов' : 'вручную (кнопка «Применить»)'}; ${profile.plan?.present ? `план ждёт применения: ${profile.plan.files} файлов` : 'плана нет'}`)
         }
       }
       if (state.workspace?.hints?.length > 0) {

@@ -368,8 +368,8 @@ test('секции режимов сессий и профиля: фильтр, 
   assert.match(textOf(modesSection), /Сделать облачными|Сделать локальными/, 'массовые кнопки режима')
   assert.match(textOf(modesSection), /Привязать непривязанные|Сессии появятся здесь|Под фильтр ничего не попало/, 'список сессий рендерится')
 
-  const profileSection = nodes.find((node) => node.type === 'section' && textOf(node).includes('Профиль и рабочие пространства'))
-  assert.ok(profileSection, 'секция «Профиль и рабочие пространства» есть')
+  const profileSection = nodes.find((node) => node.type === 'section' && textOf(node).includes('Профиль'))
+  assert.ok(profileSection, 'секция «Профиль» есть')
   assert.match(textOf(profileSection), /Профиль|Загрузка состояния профиля/, 'состояние профиля видно')
   assert.match(textOf(profileSection), /Обновить состояние/, 'кнопка обновления состояния профиля')
 })

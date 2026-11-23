@@ -60,6 +60,9 @@ async function makeEnv(prefix) {
   await mkdir(join(profileDir, 'node_modules', 'dsh-notify'), { recursive: true })
   await writeFile(join(profileDir, 'node_modules', 'dsh-notify', 'package.json'), '{"name":"dsh-notify"}')
   const config = { ...defaultConfig(home), backend: 'folder', deviceId: `device-${prefix}`, repoDir: mirror }
+  // Старые сценарии проверяют приём «сразу»: включаем авто-применение явно.
+  // Ручной режим (по умолчанию) проверяется в test/profile-plan.test.mjs.
+  config.profile = { enabled: true, autoApply: true }
   await mkdir(join(home, 'dsh-notify'), { recursive: true })
   await writeFile(join(home, 'dsh-notify', 'settings.json'), JSON.stringify({
     notifications: true,
@@ -435,6 +438,7 @@ test('сквозной сценарий: push/pull переносят профи
         ]))
       }
       const config = { ...defaultConfig(home), backend: 'folder', deviceId, repoDir: shared }
+      config.profile = { enabled: true, autoApply: true }
       config.projects = { alpha: { path: projectPath, title: 'Alpha' } }
       return config
     }

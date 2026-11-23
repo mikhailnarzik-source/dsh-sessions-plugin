@@ -25,6 +25,7 @@ window.__ModuleLoader__.load({
     const UPDATE_APPLY_PATH = '/api/dsh-sync/update/apply';
     const SESSION_MODE_PATH = '/api/dsh-sync/session-mode';
     const PROFILE_PATH = '/api/dsh-sync/profile';
+    const PROFILE_APPLY_PATH = '/api/dsh-sync/profile/apply';
     const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings';
     const TOMBSTONES_PATH = '/api/dsh-sync/tombstones';
     const RESTORE_PATH = '/api/dsh-sync/restore';
@@ -1657,12 +1658,12 @@ function CollapsedItem({ title, summary, badge, children }) {
             h(DeletedSection, { t }),
           ),
 
-          // --- профиль и рабочие пространства -------------------------------
+          // --- профиль: план приёма, применение и рабочие пространства -------
           h(
             Card,
             {
-              title: 'Профиль и рабочие пространства',
-              hint: 'Оформление, язык, включённые плагины и их настройки переезжают на другое устройство; привязка сессий к папкам — тоже.',
+              title: 'Профиль',
+              hint: 'Оформление, язык, плагины, настройки, история расходов и задачи переезжают на другое устройство. Сначала показываем план приёма, применяем — по кнопке.',
             },
             h(ProfileLayerSection, null),
           ),
@@ -3003,7 +3004,14 @@ function CollapsedItem({ title, summary, badge, children }) {
       );
     }
 
-    /** Секция панели: профиль, журнал конфликтов и рабочие пространства. */
+    /** Момент времени для подписи: 2026-11-23 22:30. */
+    const formatMoment = (value) => {
+      const text = typeof value === 'string' ? value : '';
+      if (text === '') return '—';
+      return text.replace('T', ' ').replace('Z', '').slice(0, 16);
+    };
+
+    /** Секция панели: план приёма, применение, журнал и рабочие пространства. */
     function ProfileLayerSection() {
       const [state, setState] = React.useState(null);
       const [note, setNote] = React.useState('');
@@ -3042,9 +3050,77 @@ function CollapsedItem({ title, summary, badge, children }) {
         }
       };
 
+      const applyPlan = async () => {
+        setBusy('apply');
+        setNote('');
+        try {
+          const result = await post(PROFILE_APPLY_PATH, { action: 'apply' });
+          await load();
+          if (result?.ok === true) {
+            const skipped = (result.skipped ?? []).length;
+            setNote(`Применено файлов: ${result.applied ?? 0}${(result.conflicts ?? 0) > 0 ? `, конфликтов: ${result.conflicts}` : ''}${skipped > 0 ? `; пропущено: ${skipped}` : ''}. Резервная копия каждого файла лежит рядом с ним (суффикс .before-sync-).`);
+          } else {
+            setNote(result?.message || 'Применение не удалось.');
+          }
+        } catch (error) {
+          setNote(`Не удалось применить план: ${explain(error)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const refreshPlan = async () => {
+        setBusy('plan');
+        setNote('');
+        try {
+          const result = await post(PROFILE_APPLY_PATH, { action: 'plan' });
+          await load();
+          setNote(result?.pending === true
+            ? `План обновлён: файлов к применению ${result.plan?.files ?? 0}.`
+            : 'Применять нечего: профиль совпадает с зеркалом.');
+        } catch (error) {
+          setNote(`Не удалось обновить план: ${explain(error)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const discardPlan = async () => {
+        setBusy('discard');
+        setNote('');
+        try {
+          await post(PROFILE_APPLY_PATH, { action: 'discard' });
+          await load();
+          setNote('План отменён: локальные файлы не менялись.');
+        } catch (error) {
+          setNote(`Не удалось отменить план: ${explain(error)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const toggleAutoApply = async (enabled) => {
+        setBusy('auto');
+        setNote('');
+        try {
+          const result = await post(PROFILE_PATH, { action: 'auto-apply', enabled });
+          await load();
+          setNote(result?.autoApply === true
+            ? 'Авто-применение включено: план применится сам, только если конфликтов нет.'
+            : 'Авто-применение выключено: план применяется кнопкой «Применить».');
+        } catch (error) {
+          setNote(`Не удалось изменить режим: ${explain(error)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
       const profile = state?.profile ?? null;
       const workspace = state?.workspace ?? null;
       const journal = state?.journal ?? [];
+      const plan = profile?.plan ?? null;
+      const lastApply = profile?.lastApply ?? null;
+      const canApply = busy === '' && plan?.present === true && (plan.files ?? 0) > 0;
 
       return h(
         'div',
@@ -3070,20 +3146,110 @@ function CollapsedItem({ title, summary, badge, children }) {
                     `Патч: ${(profile.patch?.entries ?? []).join(', ') || 'без безопасных записей'} · включено плагинов: ${profile.bundles?.count ?? 0} · настроек плагинов: ${(profile.settings ?? []).length}`,
                   )
                 : null,
+              profile.available
+                ? h(
+                    'span',
+                    { style: S.meta },
+                    `История расходов: ${profile.extras?.expenses ?? 0} записей · задачи автоматизации: ${profile.extras?.schedule ?? 0} · «Входящие»: настроек ${profile.extras?.inbox ?? 0}`,
+                  )
+                : null,
               profile.mirror?.present
                 ? h(
                     'span',
                     { style: S.meta },
-                    `В зеркале: тема/язык/MCP — ${(profile.mirror.patchEntries ?? []).join(', ') || 'нет'} · плагинов ${profile.mirror.bundles ?? 0} · настроек ${(profile.mirror.settings ?? []).length}`,
+                    `В зеркале: тема/язык/MCP — ${(profile.mirror.patchEntries ?? []).join(', ') || 'нет'} · плагинов ${profile.mirror.bundles ?? 0} · настроек ${(profile.mirror.settings ?? []).length} · расходов ${profile.mirror.expenses ?? 0} · задач ${profile.mirror.schedule ?? 0}`,
                   )
                 : h('span', { style: S.hint }, 'В зеркале профильного слоя пока нет: он появится после первой отправки с этого устройства или другого.'),
+              profile.mirror?.manifest?.present
+                ? h(
+                    'span',
+                    { style: S.meta },
+                    `Манифест зеркала: ${formatMoment(profile.mirror.manifest.updatedAt)} · устройство ${profile.mirror.manifest.device || '—'} · файлов ${profile.mirror.manifest.files ?? 0}`,
+                  )
+                : null,
               (profile.patch?.warnings ?? []).length > 0
                 ? h('span', { style: S.note }, `Предупреждения: ${profile.patch.warnings.join('; ')}`)
                 : null,
               (profile.conflictCount ?? 0) > 0
                 ? h('span', { style: S.note }, `Конфликтов в журнале: ${profile.conflictCount}. Локальные настройки при конфликте не затираются.`)
                 : null,
-              h('span', { style: S.hint }, 'Переносятся только тема, язык, шрифт, MCP-серверы и настройки плагинов по белому списку. Секреты, device.json и машинные пути не уезжают.'),
+              h('span', { style: S.hint }, 'Переносятся только тема/язык/шрифт/MCP, настройки плагинов по белому списку, история расходов, задачи автоматизации и настройки «Входящих». Секреты, deviceId/offset/queue и машинные пути не уезжают.'),
+              // --- план приёма: сначала показываем, потом применяем ------------
+              h(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, marginTop: 4 } },
+                h('span', { style: { ...S.row, fontWeight: 600 } }, 'План применения'),
+                plan?.present === true
+                  ? h(
+                      'span',
+                      { style: S.meta },
+                      `Источник: ${plan.source?.device || 'неизвестное устройство'} · зеркало обновлено ${formatMoment(plan.source?.updatedAt)} · к применению: ${plan.files ?? 0} файлов, конфликтов: ${plan.conflictCount ?? 0}`,
+                    )
+                  : h(
+                      'span',
+                      { style: S.hint },
+                      profile.autoApply === true
+                        ? 'Авто-применение включено: при приёме план применится сам, если конфликтов нет.'
+                        : 'Плана нет. При приёме с другого устройства здесь появится список файлов: сначала показываем, потом применяем.',
+                    ),
+                plan?.present === true
+                  ? h(
+                      'div',
+                      { style: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 } },
+                      ...(plan.entries ?? []).slice(-8).map((entry, index) =>
+                        h(
+                          'span',
+                          { key: index, style: S.meta },
+                          `${entry.file} — ${entry.action === 'apply' ? 'применить' : entry.action === 'conflict' ? 'конфликт, локальная копия сохранена' : 'без изменений'}${entry.bytes !== undefined ? ` · ${entry.bytes} Б` : ''}`,
+                        ),
+                      ),
+                    )
+                  : null,
+                (plan?.conflicts ?? []).length > 0
+                  ? h(
+                      'span',
+                      { style: S.note },
+                      `Конфликты: ${(plan.conflicts ?? []).map((item) => `${item.file} — ${item.reason}`).join('; ')}`,
+                    )
+                  : null,
+                plan?.present === true
+                  ? h(
+                      'div',
+                      { style: S.cardActions },
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dshs-btn-primary',
+                          style: S.primary,
+                          disabled: !canApply,
+                          onClick: () => void applyPlan(),
+                        },
+                        busy === 'apply' ? 'Применяем…' : 'Применить',
+                      ),
+                      h('button', { type: 'button', style: S.buttonSmall, disabled: busy !== '', onClick: () => void refreshPlan() }, 'Обновить план'),
+                      h('button', { type: 'button', style: S.buttonSmall, disabled: busy !== '', onClick: () => void discardPlan() }, 'Отменить план'),
+                    )
+                  : null,
+                h(
+                  'label',
+                  { style: { ...S.row, cursor: 'pointer' } },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: profile.autoApply === true,
+                    disabled: busy !== '',
+                    onChange: (event) => void toggleAutoApply(event.target.checked),
+                  }),
+                  h('span', { style: S.hint }, 'Применять автоматически, если конфликтов нет (по умолчанию — вручную)'),
+                ),
+                lastApply?.present
+                  ? h(
+                      'span',
+                      { style: S.meta },
+                      `Последнее применение: ${formatMoment(lastApply.at)} (${lastApply.mode === 'auto' ? 'авто' : 'вручную'}) · файлов ${lastApply.applied ?? 0} · конфликтов ${lastApply.conflicts ?? 0}`,
+                    )
+                  : null,
+              ),
             ),
         workspace !== null
           ? h(
