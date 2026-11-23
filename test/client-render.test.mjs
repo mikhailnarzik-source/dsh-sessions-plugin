@@ -320,6 +320,122 @@ test('кнопки страницы: 36/32, радиус 10, мягкая зал
   assert.equal(headerRefresh.props.style.background, 'transparent')
 })
 
+test('секции режимов сессий и профиля: фильтр, список, рабочие пространства', () => {
+  const modesSection = nodes.find((node) => node.type === 'section' && textOf(node).includes('Сессии и режим синхронизации'))
+  assert.ok(modesSection, 'секция «Сессии и режим синхронизации» есть')
+  assert.match(textOf(modesSection), /Все \(\d+\)/, 'фильтр «Все» с количеством')
+  assert.match(textOf(modesSection), /Облачные \(\d+\)/, 'фильтр «Облачные»')
+  assert.match(textOf(modesSection), /Локальные \(\d+\)/, 'фильтр «Локальные»')
+  assert.match(textOf(modesSection), /Требуют внимания \(\d+\)/, 'фильтр «Требуют внимания»')
+  assert.match(textOf(modesSection), /Сделать облачными|Сделать локальными/, 'массовые кнопки режима')
+  assert.match(textOf(modesSection), /Привязать непривязанные|Сессии появятся здесь|Под фильтр ничего не попало/, 'список сессий рендерится')
+
+  const profileSection = nodes.find((node) => node.type === 'section' && textOf(node).includes('Профиль и рабочие пространства'))
+  assert.ok(profileSection, 'секция «Профиль и рабочие пространства» есть')
+  assert.match(textOf(profileSection), /Профиль|Загрузка состояния профиля/, 'состояние профиля видно')
+  assert.match(textOf(profileSection), /Обновить состояние/, 'кнопка обновления состояния профиля')
+})
+
+test('новые элементы: кнопки 32 px, список сессий со скроллом, пункт меню сессии', () => {
+  const modesSection = nodes.find((node) => node.type === 'section' && textOf(node).includes('Сессии и режим синхронизации'))
+  const chips = walk(modesSection).filter((node) => String(node.props?.className ?? '').includes('dshs-modes-chip'))
+  assert.equal(chips.length, 4, 'четыре чипа фильтра')
+  for (const chip of chips) {
+    assert.equal(chip.props.style.height, 32, 'чип — 32 px')
+    assert.equal(chip.props.style.borderRadius, 10, 'чип — радиус 10')
+    assert.equal(chip.props.style.fontWeight, 600, 'чип — 600')
+  }
+
+  const pageCss = styles.find((text) => typeof text === 'string' && text.includes('.dshs-sync-page'))
+  assert.match(pageCss, /\.dshs-modes-list\{[^}]*overflow-y:auto/, 'список сессий прокручивается внутри')
+  assert.match(pageCss, /\.dshs-modes-list\{[^}]*max-height:320px/, 'у списка ограничена высота')
+  assert.match(pageCss, /\.dshs-modes-row\{[^}]*min-width:0/, 'строки списка не распирают карточку')
+  assert.match(pageCss, /\.dshs-modes-chip\{[^}]*height:32px/, 'чипы оформлены как кнопки')
+  assert.match(pageCss, /\.dshs-menu-item\{[^}]*height:32px/, 'пункт меню сессии — 32 px')
+  assert.match(pageCss, /\.dshs-menu-item:hover/, 'у пункта меню есть hover')
+  assert.match(pageCss, /\.dshs-modes-chip:hover/, 'у чипов есть hover')
+  assert.match(pageCss, /\.dshs-menu-item:focus-visible/, 'у пункта меню есть focus-visible')
+
+  const menuRegistration = registrations.find((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item')
+  assert.ok(menuRegistration, 'пункт меню режима сессии зарегистрирован')
+})
+
+test('список сессий с данными: режимы, значки, действия и пункт меню', () => {
+  assert.ok(exported.__test?.setSessionStates, 'тестовый крючок для состояния сессий доступен')
+  exported.__test.setSessionStates({
+    ok: true,
+    states: {},
+    sessions: [
+      {
+        id: 'session-local-1',
+        title: 'Локальная работа',
+        projectId: 'harness',
+        path: 'C:\\work\\project',
+        mode: 'local',
+        state: 'green',
+        badge: 'local',
+        attached: true,
+      },
+      {
+        id: 'session-cloud-1',
+        title: 'Общая сессия',
+        projectId: 'harness',
+        path: 'C:\\work\\project',
+        mode: 'cloud',
+        state: 'orange',
+        badge: 'pending',
+        attached: true,
+      },
+      {
+        id: 'session-free-1',
+        title: '',
+        projectId: 'harness',
+        path: 'C:\\work\\project',
+        mode: 'cloud',
+        state: 'green',
+        badge: 'unattached',
+        attached: false,
+      },
+    ],
+    modes: { local: 1, cloud: 2 },
+    unattached: 1,
+    cloud: { offline: false, ok: true, at: null, message: '' },
+    attachAvailable: true,
+  })
+
+  const treeWithSessions = resolveNode(main.component({}))
+  const sessionNodes = walk(treeWithSessions)
+  const rows = sessionNodes.filter((node) => String(node.props?.className ?? '').includes('dshs-modes-row'))
+  assert.equal(rows.length, 3, 'все три сессии отрисованы')
+  const rowsText = rows.map(textOf).join('\n')
+  assert.match(rowsText, /Локальная работа/, 'название локальной сессии видно')
+  assert.match(rowsText, /Общая сессия/, 'название облачной сессии видно')
+  assert.match(rowsText, /локальная/, 'у локальной сессии подпись режима')
+  assert.match(rowsText, /облачная/, 'у облачной сессии подпись режима')
+  assert.match(rowsText, /Локальная сессия: не синхронизируется/, 'значок локальной сессии подписан')
+  assert.match(rowsText, /Есть неотправленные изменения/, 'значок «ждёт отправки» подписан')
+  assert.match(rowsText, /не привязана к рабочему пространству/, 'значок «не привязана» подписан')
+  const rowButtons = rows.flatMap((row) => walk(row).filter((node) => node.type === 'button').map(textOf))
+  assert.ok(rowButtons.some((text) => text.includes('В облако')), 'локальную можно вернуть в облако')
+  assert.ok(rowButtons.some((text) => text.includes('Локально')), 'облачную можно сделать локальной')
+  assert.ok(sessionNodes.some((node) => node.type === 'button' && textOf(node).includes('Сделать локальными (0)')), 'массовая кнопка учитывает выбор')
+
+  // Пункт меню для локальной сессии предлагает вернуть её в облако.
+  const menuRegistration = registrations.find((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item')
+  const menuNode = resolveNode(menuRegistration.component({
+    sessionId: 'session-local-1',
+    useMenuOpenState: () => [false, () => {}],
+  }))
+  assert.match(textOf(menuNode), /Сделать облачной/, 'меню локальной сессии предлагает облако')
+  const cloudMenuNode = resolveNode(menuRegistration.component({
+    sessionId: 'session-cloud-1',
+    useMenuOpenState: () => [false, () => {}],
+  }))
+  assert.match(textOf(cloudMenuNode), /Сделать локальной/, 'меню облачной сессии предлагает локальный режим')
+
+  exported.__test.setSessionStates(null)
+})
+
 test('адаптив: flex-wrap кнопок, медиа 900/640, без белого на белом и fixed width', () => {
   const pageCss = styles.find((text) => typeof text === 'string' && text.includes('.dshs-sync-page'))
   assert.ok(pageCss, 'слой оформления страницы внедрён')

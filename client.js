@@ -23,6 +23,9 @@ window.__ModuleLoader__.load({
     const DIAG_PATH = '/api/dsh-sync/diagnostics';
     const UPDATE_PATH = '/api/dsh-sync/update';
     const UPDATE_APPLY_PATH = '/api/dsh-sync/update/apply';
+    const SESSION_MODE_PATH = '/api/dsh-sync/session-mode';
+    const PROFILE_PATH = '/api/dsh-sync/profile';
+    const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings';
     const shortSha = (value) => (value === null || value === undefined || value === '' ? '?' : String(value).slice(0, 7));
 
     // Подписи страницы «Синхронизация сессий». Только тексты интерфейса:
@@ -413,6 +416,20 @@ window.__ModuleLoader__.load({
             '.dshs-sync-card{transition:background-color .15s ease,border-color .15s ease;overflow-wrap:anywhere}',
             '.dshs-sync-card:hover{border-color:var(--dsw-alias-border-l3,rgba(128,128,128,0.35))}',
             '.dshs-sync-chip{transition:background-color .15s ease}',
+            // Пункт меню сессии: локальная/облачная. Тот же вид, что у пунктов
+            // штатного меню, но со своей иконкой и состоянием.
+            '.dshs-menu-item{display:flex;align-items:center;gap:8px;box-sizing:border-box;width:100%;height:32px;padding:0 10px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12.5px;font-weight:500;text-align:left;cursor:pointer;white-space:nowrap}',
+            '.dshs-menu-item:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16))}',
+            '.dshs-menu-item:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:1px}',
+            '.dshs-menu-separator{height:1px;margin:4px 8px;background:var(--dsw-alias-border-l2,rgba(128,128,128,0.22))}',
+            // Chips фильтра и строки списка сессий.
+            '.dshs-modes-chip{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,0.35));background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}',
+            '.dshs-modes-chip[data-active="true"]{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 16%,transparent);border-color:var(--dsw-alias-brand-primary,#4a7dcc)}',
+            '.dshs-modes-chip:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16))}',
+            '.dshs-modes-row{display:flex;align-items:center;gap:10px;min-width:0;padding:7px 10px;border-radius:10px;border:1px solid transparent}',
+            '.dshs-modes-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.1));border-color:var(--dsw-alias-border-l2,rgba(128,128,128,0.22))}',
+            '.dshs-modes-list{display:flex;flex-direction:column;gap:4px;min-width:0;max-height:320px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}',
+            '.dshs-ws-hint{display:flex;flex-direction:column;gap:6px;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.05)}',
           ].join('\n');
           document.head.appendChild(style);
           return () => style.remove();
@@ -1441,6 +1458,26 @@ function CollapsedItem({ title, summary, badge, children }) {
               : null,
           ),
 
+          // --- сессии: режим «локальная / облачная», фильтр и массово -------
+          h(
+            Card,
+            {
+              title: 'Сессии и режим синхронизации',
+              hint: 'Локальная сессия остаётся только на этом устройстве: не отправляется, не принимается и не удаляется отметкой с другого компьютера.',
+            },
+            h(SessionModesSection, null),
+          ),
+
+          // --- профиль и рабочие пространства -------------------------------
+          h(
+            Card,
+            {
+              title: 'Профиль и рабочие пространства',
+              hint: 'Оформление, язык, включённые плагины и их настройки переезжают на другое устройство; привязка сессий к папкам — тоже.',
+            },
+            h(ProfileLayerSection, null),
+          ),
+
           // --- обслуживание: версия плагина и обновление ---------------------
           h(
             Card,
@@ -1633,6 +1670,9 @@ function CollapsedItem({ title, summary, badge, children }) {
               ),
             ),
             h(SyncCard, { view: null }),
+            // Браузерные настройки (dsh-polish, dsh-cards) не видны host-части:
+            // панель отдаёт их наверх и забирает очередь после приёма профиля.
+            h(BrowserSettingsBridge, null),
           ),
         );
       }
@@ -2097,6 +2137,17 @@ function CollapsedItem({ title, summary, badge, children }) {
         console.error('[dsh-sync] индикатор в списке сессий недоступен:', error);
       }
 
+      // Пункт в меню сессии: переключить «локальная / облачная».
+      try {
+        ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
+          name: 'sidebar.workspaces.session.menu.item',
+          id: 'dsh-sync.session-mode',
+          order: 55,
+        }, SessionSyncMenuItem));
+      } catch (error) {
+        console.error('[dsh-sync] пункт меню сессии недоступен:', error);
+      }
+
 
 
       // Плашка над полем ввода: состояние видно в основном окне.
@@ -2212,7 +2263,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       if (!force && Date.now() - sessionStates.at < 20_000) return;
       try {
         const result = await post(SESSIONS_PATH, {});
-        sessionStates.data = result?.states ?? {};
+        sessionStates.data = result ?? null;
         sessionStates.at = Date.now();
         for (const listener of sessionStates.listeners) listener();
       } catch {
@@ -2231,28 +2282,578 @@ function CollapsedItem({ title, summary, badge, children }) {
       return sessionStates.data;
     }
 
+    // Значки состояния сессии: цвет и подпись. Коды приходят от host-части.
+    const SESSION_BADGES = {
+      synced: { color: 'var(--dsw-alias-state-success-primary, #2f9e44)', title: 'Синхронизирована' },
+      pending: { color: '#e8590c', title: 'Есть неотправленные изменения' },
+      never: { color: 'var(--dsw-alias-state-error-primary, #d1242f)', title: 'Ещё не уходила в зеркало' },
+      local: { color: 'rgba(128,128,128,0.85)', title: 'Локальная сессия: не синхронизируется' },
+      conflict: { color: 'var(--dsw-alias-state-error-primary, #d1242f)', title: 'Конфликт: правки на двух устройствах' },
+      offline: { color: '#b58900', title: 'Облако недоступно: последняя синхронизация не удалась' },
+      unattached: { color: '#7048e8', title: 'Сессия не привязана к рабочему пространству' },
+    };
+
+    function badgeOf(code) {
+      return SESSION_BADGES[code] ?? (code === 'green' ? SESSION_BADGES.synced : code === 'red' ? SESSION_BADGES.never : SESSION_BADGES.pending);
+    }
+
+    /** Короткая подпись сессии: название (если пришло) или id без префикса. */
+    function sessionLabel(session) {
+      const id = String(session?.id ?? '').replace(/^session-/, '');
+      const folder = String(session?.path ?? '').split(/[\\/]+/).filter(Boolean).pop() ?? '';
+      const title = String(session?.title ?? '').replace(/\s+/g, ' ').trim();
+      const shortId = id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+      return { id: title === '' ? shortId : title.slice(0, 80), shortId, folder };
+    }
+
     function SyncDot({ sessionId }) {
-      const states = useSessionStates();
-      const state = states[sessionId];
+      const data = useSessionStates();
+      const state = data?.states?.[sessionId];
       if (state === undefined) return null;
-      const color = state === 'green' ? '#2f9e44' : state === 'red' ? '#d1242f' : '#e8590c';
-      const title = state === 'green'
-        ? 'Синхронизировано'
-        : state === 'red'
-          ? 'Не синхронизировано — ещё ни разу не уходило в зеркало'
-          : 'Есть неотправленные изменения';
+      const badge = badgeOf(state);
       return h('span', {
-        title,
+        title: badge.title,
+        'aria-label': badge.title,
         style: {
           display: 'inline-block',
           width: 7,
           height: 7,
           borderRadius: '50%',
-          background: color,
+          background: badge.color,
           marginRight: 4,
           flex: '0 0 auto',
         },
       });
+    }
+
+    function CloudModeIcon({ size = 14 }) {
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          'aria-hidden': 'true',
+          focusable: 'false',
+          style: { flex: '0 0 auto' },
+        },
+        h('path', {
+          d: 'M7 18h10a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.1 9.2 4.5 4.5 0 0 0 7 18Z',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      );
+    }
+
+    function LocalModeIcon({ size = 14 }) {
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          'aria-hidden': 'true',
+          focusable: 'false',
+          style: { flex: '0 0 auto' },
+        },
+        h('rect', {
+          x: 4,
+          y: 5,
+          width: 16,
+          height: 12,
+          rx: 2,
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+        }),
+        h('path', { d: 'M9 20h6', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
+      );
+    }
+
+    /** Пункт меню сессии: переключить «локальная / облачная». */
+    function SessionSyncMenuItem(props) {
+      const sessionId = props.sessionId;
+      const [, setMenuOpen] = typeof props.useMenuOpenState === 'function'
+        ? props.useMenuOpenState()
+        : [false, () => {}];
+      const data = useSessionStates();
+      const session = (data?.sessions ?? []).find((item) => item.id === sessionId);
+      const isLocal = session?.mode === 'local';
+      const [busy, setBusy] = React.useState(false);
+
+      const toggle = async () => {
+        setBusy(true);
+        try {
+          await post(SESSION_MODE_PATH, { id: sessionId, mode: isLocal ? 'cloud' : 'local' });
+          await refreshSessionStates(true);
+          setMenuOpen(false);
+        } catch (error) {
+          console.error('[dsh-sync] режим сессии не переключён:', error);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      return h('div', { style: { minWidth: 0 } }, [
+        h('div', { key: 'separator', className: 'dshs-menu-separator', role: 'separator' }),
+        h(
+          'button',
+          {
+            key: 'item',
+            type: 'button',
+            role: 'menuitem',
+            className: 'dshs-menu-item',
+            disabled: busy,
+            onClick: () => void toggle(),
+          },
+          [
+            h('span', { key: 'icon', style: { display: 'inline-flex', color: 'inherit' } }, isLocal ? h(CloudModeIcon) : h(LocalModeIcon)),
+            h('span', { key: 'label' }, isLocal ? 'Сделать облачной' : 'Сделать локальной'),
+          ],
+        ),
+      ]);
+    }
+
+    /** Секция панели: список сессий, режимы, фильтр и массовое переключение. */
+    function SessionModesSection() {
+      const data = useSessionStates();
+      const sessions = data?.sessions ?? [];
+      const [filter, setFilter] = React.useState('all');
+      const [selected, setSelected] = React.useState(() => new Set());
+      const [busy, setBusy] = React.useState('');
+      const [note, setNote] = React.useState('');
+
+      const visible = sessions.filter((session) => {
+        if (filter === 'cloud') return session.mode !== 'local';
+        if (filter === 'local') return session.mode === 'local';
+        if (filter === 'attention') return session.mode !== 'local' && session.badge !== 'synced';
+        return true;
+      });
+
+      const toggleSelected = (id) => {
+        setSelected((current) => {
+          const next = new Set(current);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+      };
+
+      const selectVisible = () => {
+        setSelected((current) => {
+          const next = new Set(current);
+          const allSelected = visible.length > 0 && visible.every((session) => next.has(session.id));
+          for (const session of visible) {
+            if (allSelected) next.delete(session.id);
+            else next.add(session.id);
+          }
+          return next;
+        });
+      };
+
+      const applyMode = async (mode, ids) => {
+        if (ids.length === 0) return;
+        setBusy(mode);
+        setNote('');
+        try {
+          const result = await post(SESSION_MODE_PATH, { ids, mode });
+          await refreshSessionStates(true);
+          setSelected(new Set());
+          setNote(`Режим изменён: ${result?.changed ?? ids.length}. ${mode === 'local' ? 'Сессии останутся только на этом устройстве.' : 'Сессии снова синхронизируются.'}`);
+        } catch (error) {
+          setNote(`Не удалось переключить режим: ${explain(error)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const counts = sessions.reduce(
+        (total, session) => {
+          total.all += 1;
+          if (session.mode === 'local') total.local += 1;
+          else total.cloud += 1;
+          return total;
+        },
+        { all: 0, local: 0, cloud: 0 },
+      );
+      const attention = sessions.filter((session) => session.mode !== 'local' && session.badge !== 'synced').length;
+      const selectedIds = [...selected];
+
+      return h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 } },
+        h(
+          'div',
+          { style: { ...S.cardActions, gap: 6 } },
+          [
+            ['all', `Все (${counts.all})`],
+            ['cloud', `Облачные (${counts.cloud})`],
+            ['local', `Локальные (${counts.local})`],
+            ['attention', `Требуют внимания (${attention})`],
+          ].map(([key, label]) =>
+            h(
+              'button',
+              {
+                key,
+                type: 'button',
+                className: 'dshs-modes-chip',
+                'data-active': filter === key ? 'true' : 'false',
+                style: {
+                  ...S.buttonSmall,
+                  ...(filter === key
+                    ? {
+                        background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #4a7dcc) 16%, transparent)',
+                        borderColor: 'var(--dsw-alias-brand-primary, #4a7dcc)',
+                      }
+                    : {}),
+                },
+                onClick: () => setFilter(key),
+              },
+              label,
+            ),
+          ),
+        ),
+        h(
+          'div',
+          { style: { ...S.cardActions, gap: 6 } },
+          h('button', { type: 'button', style: S.buttonSmall, onClick: selectVisible, disabled: visible.length === 0 }, selected.size > 0 ? 'Снять выбор' : 'Выбрать видимые'),
+          h(
+            'button',
+            {
+              type: 'button',
+              style: S.buttonSmall,
+              disabled: busy !== '' || selectedIds.length === 0,
+              onClick: () => void applyMode('cloud', selectedIds),
+            },
+            `Сделать облачными (${selectedIds.length})`,
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              style: S.buttonSmall,
+              disabled: busy !== '' || selectedIds.length === 0,
+              onClick: () => void applyMode('local', selectedIds),
+            },
+            `Сделать локальными (${selectedIds.length})`,
+          ),
+          data?.attachAvailable === false
+            ? null
+            : h(
+                'button',
+                {
+                  type: 'button',
+                  style: S.buttonSmall,
+                  disabled: busy !== '' || (data?.unattached ?? 0) === 0,
+                  onClick: async () => {
+                    setBusy('attach');
+                    try {
+                      const result = await post(PROFILE_PATH, { action: 'attach' });
+                      await refreshSessionStates(true);
+                      setNote(`Привязано к рабочим пространствам: ${(result?.attached ?? 0) + (result?.queued ?? 0)}.`);
+                    } catch (error) {
+                      setNote(`Не удалось привязать: ${explain(error)}`);
+                    } finally {
+                      setBusy('');
+                    }
+                  },
+                },
+                `Привязать непривязанные (${data?.unattached ?? 0})`,
+              ),
+        ),
+        note !== '' ? h('span', { style: S.note }, note) : null,
+        visible.length === 0
+          ? h('span', { style: S.hint }, sessions.length === 0 ? 'Сессии появятся здесь после первого запуска синхронизации или настройки проекта.' : 'Под фильтр ничего не попало.')
+          : h(
+              'div',
+              { className: 'dshs-modes-list' },
+              visible.map((session) => {
+                const badge = badgeOf(session.badge);
+                const label = sessionLabel(session);
+                const isLocal = session.mode === 'local';
+                return h(
+                  'div',
+                  { key: session.id, className: 'dshs-modes-row', title: session.id },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: selected.has(session.id),
+                    onChange: () => toggleSelected(session.id),
+                    style: { margin: 0, flex: '0 0 auto', accentColor: 'var(--dsw-alias-brand-primary, #4a7dcc)' },
+                  }),
+                  h('span', { style: { ...S.dot, background: badge.color } }),
+                  h(
+                    'span',
+                    { style: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0, flex: '1 1 auto' } },
+                    h('span', { style: { fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label.id),
+                    h(
+                      'span',
+                      { style: { ...S.meta, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                      `${badge.title}${label.folder === '' ? '' : ` · ${label.folder}`}`,
+                    ),
+                  ),
+                  h(
+                    'span',
+                    {
+                      style: {
+                        ...S.badge,
+                        flex: '0 0 auto',
+                        background: isLocal ? 'rgba(128,128,128,0.16)' : 'rgba(70,130,220,0.16)',
+                      },
+                    },
+                    isLocal ? 'локальная' : 'облачная',
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      style: S.buttonSmall,
+                      disabled: busy !== '',
+                      onClick: (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        void applyMode(isLocal ? 'cloud' : 'local', [session.id]);
+                      },
+                    },
+                    isLocal ? 'В облако' : 'Локально',
+                  ),
+                );
+              }),
+            ),
+      );
+    }
+
+    /** Секция панели: профиль, журнал конфликтов и рабочие пространства. */
+    function ProfileLayerSection() {
+      const [state, setState] = React.useState(null);
+      const [note, setNote] = React.useState('');
+      const [busy, setBusy] = React.useState('');
+
+      const load = async () => {
+        try {
+          const result = await post(PROFILE_PATH, { action: 'status' });
+          setState(result);
+        } catch (error) {
+          setNote(`Статус профиля не получен: ${explain(error)}`);
+        }
+      };
+
+      React.useEffect(() => {
+        void load();
+      }, []);
+
+      const attachWorkspace = async (hint) => {
+        setBusy('attach');
+        setNote('');
+        try {
+          const result = await post(PROFILE_PATH, {
+            action: 'attach-workspace',
+            projectId: hint.projectId ?? '',
+            path: hint.path,
+            sessionIds: hint.sessionIds ?? [],
+          });
+          await load();
+          await refreshSessionStates(true);
+          setNote(`Привязано сессий: ${result?.attached ?? 0}.`);
+        } catch (error) {
+          setNote(`Не удалось привязать: ${explain(error)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const profile = state?.profile ?? null;
+      const workspace = state?.workspace ?? null;
+      const journal = state?.journal ?? [];
+
+      return h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 } },
+        profile === null
+          ? h('span', { style: S.hint }, 'Загрузка состояния профиля…')
+          : h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
+              h(
+                'div',
+                { style: S.row },
+                h('span', {
+                  style: { ...S.dot, background: profile.available ? 'var(--dsw-alias-state-success-primary, #2f9e44)' : 'rgba(128,128,128,0.6)' },
+                }),
+                h('span', { style: { fontWeight: 600 } }, profile.available ? 'Профиль найден' : 'Профиль не найден'),
+                h('span', { style: S.meta }, profile.profileDir || 'каталог профиля не определён'),
+              ),
+              profile.available
+                ? h(
+                    'span',
+                    { style: S.meta },
+                    `Патч: ${(profile.patch?.entries ?? []).join(', ') || 'без безопасных записей'} · включено плагинов: ${profile.bundles?.count ?? 0} · настроек плагинов: ${(profile.settings ?? []).length}`,
+                  )
+                : null,
+              profile.mirror?.present
+                ? h(
+                    'span',
+                    { style: S.meta },
+                    `В зеркале: тема/язык/MCP — ${(profile.mirror.patchEntries ?? []).join(', ') || 'нет'} · плагинов ${profile.mirror.bundles ?? 0} · настроек ${(profile.mirror.settings ?? []).length}`,
+                  )
+                : h('span', { style: S.hint }, 'В зеркале профильного слоя пока нет: он появится после первой отправки с этого устройства или другого.'),
+              (profile.patch?.warnings ?? []).length > 0
+                ? h('span', { style: S.note }, `Предупреждения: ${profile.patch.warnings.join('; ')}`)
+                : null,
+              (profile.conflictCount ?? 0) > 0
+                ? h('span', { style: S.note }, `Конфликтов в журнале: ${profile.conflictCount}. Локальные настройки при конфликте не затираются.`)
+                : null,
+              h('span', { style: S.hint }, 'Переносятся только тема, язык, шрифт, MCP-серверы и настройки плагинов по белому списку. Секреты, device.json и машинные пути не уезжают.'),
+            ),
+        workspace !== null
+          ? h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
+              h('span', { style: { ...S.row, fontWeight: 600 } }, 'Рабочие пространства'),
+              h(
+                'span',
+                { style: S.meta },
+                `В зеркале: ${workspace.mirrorWorkspaces ?? 0} · здесь: ${workspace.localWorkspaces ?? 0} · совпало: ${workspace.matched ?? 0} · к привязке: ${workspace.toAttach ?? 0}`,
+              ),
+              (workspace.hints ?? []).map((hint, index) =>
+                h(
+                  'div',
+                  { key: `${hint.title}-${index}`, className: 'dshs-ws-hint' },
+                  h('span', { style: { fontSize: 12.5, fontWeight: 600 } }, hint.title || 'Без названия'),
+                  h('span', { style: S.meta }, `${hint.path} · сессий: ${(hint.sessionIds ?? []).length}`),
+                  h(
+                    'span',
+                    { style: S.hint },
+                    hint.projectId !== ''
+                      ? `Рабочее пространство с другого устройства: сессии привяжутся к локальному пути проекта «${hint.projectId}».`
+                      : 'Рабочее пространство с другого устройства, а проект не настроен в плагине: укажите путь в «Подключении» или откройте эту папку в DSH.',
+                  ),
+                  h(
+                    'div',
+                    { style: S.cardActions },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        style: S.buttonSmall,
+                        disabled: busy !== '' || (hint.sessionIds ?? []).length === 0,
+                        onClick: () => void attachWorkspace(hint),
+                      },
+                      'Привязать',
+                    ),
+                  ),
+                ),
+              ),
+              (workspace.hints ?? []).length === 0
+                ? h('span', { style: S.hint }, 'Все рабочие пространства из зеркала нашлись на этом устройстве.')
+                : null,
+            )
+          : null,
+        journal.length > 0
+          ? h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 } },
+              h('span', { style: { ...S.row, fontWeight: 600 } }, 'Журнал конфликтов'),
+              journal.slice(-5).map((entry, index) =>
+                h(
+                  'span',
+                  { key: index, style: S.meta },
+                  `${entry.file}: ${entry.reason} — ${entry.resolution}`,
+                ),
+              ),
+            )
+          : null,
+        h(
+          'div',
+          { style: S.cardActions },
+          h('button', { type: 'button', style: S.buttonSmall, disabled: busy !== '', onClick: () => void load() }, 'Обновить состояние'),
+        ),
+        note !== '' ? h('span', { style: S.note }, note) : null,
+      );
+    }
+
+    /**
+     * Мост браузерных настроек: localStorage не виден host-части, поэтому
+     * панель отдаёт значения dsh-polish/dsh-cards наверх и забирает очередь
+     * после приёма профильного слоя с другого устройства.
+     */
+    const BROWSER_SETTING_KEYS = {
+      'dsh-polish': {
+        enabled: ['dsh-polish:enabled', (value) => (value === true ? '1' : '0')],
+        panelVisibility: ['dsh-polish:panel-visibility', (value) => JSON.stringify(value)],
+      },
+      'dsh-cards': {
+        panelVisibility: ['dsh-polish:panel-visibility', (value) => JSON.stringify(value)],
+      },
+    };
+
+    function readBrowserSettingsSnapshot() {
+      const result = {};
+      for (const [plugin, keys] of Object.entries(BROWSER_SETTING_KEYS)) {
+        const values = {};
+        for (const [field, [storageKey, encode]] of Object.entries(keys)) {
+          try {
+            const raw = localStorage.getItem(storageKey);
+            if (raw === null || raw === undefined) continue;
+            if (field === 'panelVisibility') {
+              const parsed = JSON.parse(raw);
+              if (parsed !== null && typeof parsed === 'object') values[field] = parsed;
+            } else {
+              values[field] = encode === undefined ? raw : raw === '1' || raw === 'true';
+            }
+          } catch {
+            // значение не читается — пропускаем
+          }
+        }
+        if (Object.keys(values).length > 0) result[plugin] = values;
+      }
+      return result;
+    }
+
+    function applyBrowserSettings(settings) {
+      for (const [plugin, fields] of Object.entries(settings ?? {})) {
+        const keys = BROWSER_SETTING_KEYS[plugin];
+        if (keys === undefined) continue;
+        for (const [field, value] of Object.entries(fields ?? {})) {
+          const entry = keys[field];
+          if (entry === undefined) continue;
+          try {
+            localStorage.setItem(entry[0], entry[1](value));
+          } catch {
+            // хранилище недоступно — настройка применится в следующий раз
+          }
+        }
+      }
+      try {
+        window.dispatchEvent(new CustomEvent('dsh-polish:panels-changed'));
+      } catch {
+        // событие — необязательное
+      }
+    }
+
+    function BrowserSettingsBridge() {
+      React.useEffect(() => {
+        let alive = true;
+        (async () => {
+          try {
+            const current = readBrowserSettingsSnapshot();
+            const result = await post(BROWSER_SETTINGS_PATH, { current });
+            const pending = result?.pending?.settings ?? {};
+            if (alive && pending !== null && typeof pending === 'object' && Object.keys(pending).length > 0) {
+              applyBrowserSettings(pending);
+              await post(BROWSER_SETTINGS_PATH, { applied: true });
+            }
+          } catch {
+            // браузерные настройки — вспомогательная часть профиля
+          }
+        })();
+        return () => {
+          alive = false;
+        };
+      }, []);
+      return null;
     }
 
 
@@ -3248,6 +3849,20 @@ function CollapsedItem({ title, summary, badge, children }) {
     };
     exports.inject = ['slots', 'locale'];
     exports.NS = NS;
+    // Внутренний крючок для headless-тестов (`npm test`): позволяет отрисовать
+    // список сессий с данными без настоящего React и сети. На поведение
+    // интерфейса не влияет и ничего не регистрирует в DSH.
+    exports.__test = {
+      setSessionStates: (value) => {
+        sessionStates.data = value ?? null;
+        sessionStates.at = Date.now();
+        for (const listener of sessionStates.listeners) listener();
+      },
+      readSessionStates: () => sessionStates.data,
+      sessionLabel,
+      badgeOf,
+      SESSION_BADGES,
+    };
     return module.exports;
   },
 });

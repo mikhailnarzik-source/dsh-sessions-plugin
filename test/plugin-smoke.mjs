@@ -4,7 +4,7 @@
  *
  * Запуск: node test/plugin-smoke.mjs
  */
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
@@ -26,7 +26,7 @@ assert.equal(name, 'dsh-sync')
 assert.deepEqual(inject, ['connection', 'tools', 'sessionPersistence', 'workspaceRegistry'])
 apply(ctx)
 
-assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/run', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
+assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/run', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
 assert.deepEqual([...tools.keys()].sort(), ['sync_run', 'sync_status'])
 
 const call = async (path, payload) => {
@@ -170,6 +170,41 @@ assert.equal(typeof states.body.states, 'object')
 const yandexProbe = await call('/api/dsh-sync/yandex-check', { backend: 'webdav' })
 assert.equal(yandexProbe.body.ok, false)
 assert.match(String(yandexProbe.body.message), /логин|пароль/)
+
+// 14. режим сессии: переключение по одной и массово
+const modeLocal = await call('/api/dsh-sync/session-mode', { id: 'session-smoke-1', mode: 'local' })
+assert.equal(modeLocal.body.ok, true)
+assert.equal(modeLocal.body.changed, 1)
+const modeFile = JSON.parse(await readFile(join(home, 'dsh-sync', 'session-modes.json'), 'utf8'))
+assert.equal(modeFile.sessions['session-smoke-1'], 'local')
+const modeCloud = await call('/api/dsh-sync/session-mode', { ids: ['session-smoke-1', 'session-smoke-2'], mode: 'cloud' })
+assert.equal(modeCloud.body.ok, true)
+assert.equal(modeCloud.body.changed, 1, 'облако — режим по умолчанию, меняется только локальная')
+const sessionsAfterMode = await call('/api/dsh-sync/sessions', {})
+assert.equal(sessionsAfterMode.body.ok, true)
+assert.equal(Array.isArray(sessionsAfterMode.body.sessions), true)
+assert.equal(typeof sessionsAfterMode.body.modes.local, 'number')
+
+// 15. профильный слой: статус и действия (профиль desktop создан выше в тесте 9)
+const profileStatusBody = await call('/api/dsh-sync/profile', { action: 'status' })
+assert.equal(profileStatusBody.body.ok, true)
+assert.equal(profileStatusBody.body.profile.available, true)
+assert.equal(profileStatusBody.body.profile.profileDir.startsWith(home), true)
+assert.equal(typeof profileStatusBody.body.profile.enabled, 'boolean')
+assert.equal(Array.isArray(profileStatusBody.body.workspace.hints), true)
+const attach = await call('/api/dsh-sync/profile', { action: 'attach' })
+assert.equal(attach.body.ok, true)
+const manifest = await call('/api/dsh-sync/profile', { action: 'attach-workspace', path: '', sessionIds: [] })
+assert.equal(manifest.status, 400, 'без пути привязка не выполняется')
+
+// 16. браузерные настройки: сохранение и очередь после приёма
+const browserSaved = await call('/api/dsh-sync/browser-settings', { current: { 'dsh-polish': { enabled: true } } })
+assert.equal(browserSaved.body.ok, true)
+assert.equal(browserSaved.body.stored, true)
+const browserFile = JSON.parse(await readFile(join(home, 'dsh-sync', 'browser-settings.json'), 'utf8'))
+assert.equal(browserFile.settings['dsh-polish'].enabled, true)
+const browserApplied = await call('/api/dsh-sync/browser-settings', { applied: true })
+assert.equal(browserApplied.body.applied, true)
 
 console.log('plugin smoke: OK')
 console.log('  маршруты:', [...routes.keys()].join(', '))

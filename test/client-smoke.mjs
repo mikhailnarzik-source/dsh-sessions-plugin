@@ -72,12 +72,13 @@ exported.apply(ctx)
 
 assert.ok(['dshSync', 'sessionDelete'].includes(boundNs), 'пространство имён клиента зарегистрировано')
 // 6 регистраций карточки синхронизации (main — две, по старому и новому ключу)
-// плюс 2 пункта удаления сессии.
-assert.equal(registrations.length, 8, 'все слоты зарегистрированы')
+// плюс 2 пункта удаления сессии и пункт меню режима сессии.
+assert.equal(registrations.length, 9, 'все слоты зарегистрированы')
 const mainEntries = registrations.filter((entry) => entry.options.name === 'main')
 assert.deepEqual(mainEntries.map((entry) => entry.options.key).sort(), ['dsh-sessions', 'dsh-sync'])
 assert.ok(registrations.some((entry) => entry.options.name === 'sidebar.panellist'), 'пункт в левой панели')
 assert.ok(registrations.some((entry) => entry.options.name === 'sidebar.session.row.leading'), 'индикатор в строке сессии')
+assert.ok(registrations.some((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item'), 'пункт меню режима сессии')
 assert.ok(registrations.some((entry) => entry.options.name === 'conversation.composer.dock'), 'плашка у поля ввода')
 assert.ok(registrations.some((entry) => entry.options.name === 'plugins.detail.section'), 'секция на странице плагина')
 assert.ok(!registrations.some((entry) => entry.options.name === 'conversation.header'), 'шапку беседы не трогаем: слот одиночный')
@@ -107,6 +108,38 @@ const panel = unwrap(mainEntries[0].component({}))
 assert.equal(panel.type, 'div')
 assert.match(String(panel.props.className), /dshs-sync-page/, 'страница синхронизации с полями по краям')
 assert.ok(panel.children.length >= 1, 'внутри страницы есть контейнер с контентом')
+
+// Глубокий разбор дерева: рендерим и вложенные компоненты, чтобы поймать
+// ошибки в новых секциях (список сессий, профиль, рабочие пространства).
+const deepExpand = (node, depth = 0) => {
+  if (depth > 16) return '<max-depth>'
+  if (Array.isArray(node)) return node.map((child) => deepExpand(child, depth + 1))
+  if (node === null || node === undefined) return null
+  if (typeof node !== 'object') return node
+  const type = node.type
+  const props = { ...(node.props ?? {}) }
+  const children = node.children?.length === 1 ? node.children[0] : node.children
+  if (typeof type === 'function') {
+    let rendered
+    if (type.prototype?.render) rendered = new type({ ...props, children }).render()
+    else rendered = type({ ...props, children })
+    return deepExpand(rendered, depth + 1)
+  }
+  return { type, props, children: deepExpand(node.children, depth + 1) }
+}
+const pageTree = JSON.stringify(deepExpand(mainEntries[0].component({})))
+assert.match(pageTree, /Сессии и режим синхронизации/, 'секция режимов сессий на странице')
+assert.match(pageTree, /Профиль и рабочие пространства/, 'секция профиля и рабочих пространств')
+assert.match(pageTree, /Синхронизирована|Локальная сессия|Сессии появятся/, 'у секции режимов есть содержимое')
+
+// Пункт меню сессии рендерится и подписан режимом по умолчанию (облако).
+const menuRegistration = registrations.find((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item')
+const menuItem = deepExpand(menuRegistration.component({
+  sessionId: 'session-smoke',
+  useMenuOpenState: () => [false, () => {}],
+}))
+const menuTree = JSON.stringify(menuItem)
+assert.match(menuTree, /Сделать локальной/, 'меню предлагает сделать сессию локальной')
 
 // Секция на странице плагина тоже рендерится без ошибок.
 const detailEntry = registrations.find((entry) => entry.options.name === 'plugins.detail.section')

@@ -30,6 +30,9 @@ import { matchProjectPath } from './lib/mirror-meta.mjs'
 import { listLocalSessions, listMirrorSessions, sessionsOfProject, splitLog } from './lib/store.mjs'
 import { pullReplicated, pushReplicated } from './lib/replica.mjs'
 import { applyUpdate, checkForUpdate, describeUpdate, updateState } from './lib/update.js'
+import { MODE_LOCAL, readSessionModes, sessionBadge, sessionModeOf, setSessionMode } from './lib/session-modes.mjs'
+import { clearWorkspacePending, planWorkspace, readWorkspacePending } from './lib/workspace.mjs'
+import { clearPendingBrowserSettings, readJournal, readPendingBrowserSettings, readProfileStatus, writeBrowserSettings } from './lib/profile.mjs'
 
 export const name = 'dsh-sync'
 // sessionPersistence даёт список сессий с путями к логам: обходим каталог
@@ -45,6 +48,9 @@ const SESSIONS_PATH = '/api/dsh-sync/sessions'
 const NOTIFICATIONS_PATH = '/api/dsh-sync/notifications'
 const ACK_UPDATE_PATH = '/api/dsh-sync/ack-update'
 const YANDEX_CHECK_PATH = '/api/dsh-sync/yandex-check'
+const SESSION_MODE_PATH = '/api/dsh-sync/session-mode'
+const PROFILE_PATH = '/api/dsh-sync/profile'
+const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings'
 
 // --- уведомления -----------------------------------------------------------
 // Кольцевой буфер: клиент забирает всё, что появилось после его курсора, и
@@ -470,6 +476,23 @@ async function readState(ctx) {
     void writeStatus({ debug: { home, sessionsScanned: scanned, cwds: [...cwds], projectPath: project?.path ?? '' } })
   }
 
+  // Профильный слой и рабочие пространства: краткая сводка для панели.
+  let profile = null
+  let workspace = null
+  try {
+    profile = await profileStatus(ctx)
+    workspace = profile.workspace
+  } catch (error) {
+    profile = { ok: false, message: error instanceof Error ? error.message : String(error) }
+  }
+  let modes = { local: 0, cloud: 0 }
+  try {
+    const sessionModes = await readSessionModes(home)
+    modes = { local: Object.keys(sessionModes.sessions).length, cloud: local }
+  } catch {
+    // режимы — вспомогательные данные
+  }
+
   return {
     ok: true,
     deviceId: config.deviceId,
@@ -490,12 +513,17 @@ async function readState(ctx) {
       repoDir: config.repoDir,
       attachments: config.attachments === true,
       useExternal: config.useExternal !== false,
+      profile: config.profile ?? { enabled: true },
+      workspace: config.workspace ?? { enabled: true },
       projectId: projectId ?? '',
       projectPath: project?.path ?? '',
     },
     checks,
     ready: checks.every(check => check.ok),
     status: { local, mirror, onlyLocal, onlyMirror, subagents, subagentsAvailable },
+    modes,
+    profile,
+    workspace,
     suggestedFolder,
     version: packageVersion,
     updatedFrom: pendingUpdate?.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
@@ -539,7 +567,19 @@ async function localSessionsFor(ctx, home, projectPath) {
         total += 1
         if (typeof path !== 'string') continue
         if (projectPath === '' || !samePath(header.cwd, projectPath)) continue
-        sessions.push({ id: header.id, cwd: header.cwd, path, parent: header.parentSession ?? '' })
+        sessions.push({
+          id: header.id,
+          cwd: header.cwd,
+          path,
+          parent: header.parentSession ?? '',
+          // Заголовок сессии может прийти от презентационного слоя DSH; если
+          // его нет, панель покажет короткий идентификатор.
+          title: typeof snapshot.title === 'string'
+            ? snapshot.title
+            : typeof snapshot.displayTitle === 'string'
+              ? snapshot.displayTitle
+              : '',
+        })
       }
       return { sessions, total, source: 'persistence', error: '' }
     } catch (error) {
@@ -876,6 +916,11 @@ async function runSync(ctx, action, options = {}) {
           viaChild.message = `${viaChild.message}; привязано к рабочему пространству: ${attached}`
           await writeLastRun({ ...viaChild })
         }
+        const queued = await applyWorkspacePending(ctx, config)
+        if (queued > 0) {
+          viaChild.message = `${viaChild.message}; привязано из зеркала: ${queued}`
+          await writeLastRun({ ...viaChild })
+        }
         const deletedIds = viaChild.pull?.deletedIds ?? []
         if (deletedIds.length > 0) {
           const detached = await detachSessions(ctx, deletedIds)
@@ -886,6 +931,7 @@ async function runSync(ctx, action, options = {}) {
         // привязка — вспомогательный шаг, синхронизация уже прошла
       }
     }
+    invalidateSessionStates()
     return viaChild
   }
 
@@ -913,6 +959,15 @@ async function runSync(ctx, action, options = {}) {
       // лежало на диске после прошлых синхронизаций.
       const attached = await attachAllProjects(ctx, config)
       if (attached > 0) messages.push(`привязано к рабочему пространству: ${attached}`)
+      const queued = await applyWorkspacePending(ctx, config)
+      if (queued > 0) messages.push(`привязано из зеркала: ${queued}`)
+      if ((result.pull.localSkipped ?? 0) > 0) messages.push(`локальных сессий пропущено: ${result.pull.localSkipped}`)
+      if (result.pull.profile !== undefined && result.pull.profile.skipped !== true) {
+        messages.push(`профиль: применено ${result.pull.profile.applied ?? 0}, конфликтов ${result.pull.profile.conflicts ?? 0}`)
+      }
+      if (result.pull.workspace !== undefined) {
+        messages.push(`рабочие пространства: к привязке ${result.pull.workspace.toAttach ?? 0}`)
+      }
       const deletedIds = result.pull?.deletedIds ?? []
       if (deletedIds.length > 0) {
         const detached = await detachSessions(ctx, deletedIds)
@@ -929,6 +984,10 @@ async function runSync(ctx, action, options = {}) {
         messages.push(`не прочитано: ${result.push.failures.length} (${first.id}: ${first.message})`)
       }
       if ((result.push.removed ?? 0) > 0) messages.push(`удалено из зеркала: ${result.push.removed} — ${result.push.removedReason ?? ''}`)
+      if ((result.push.localSkipped ?? 0) > 0) messages.push(`локальных сессий не отправлено: ${result.push.localSkipped}`)
+      if (result.push.profile !== undefined) messages.push(`профиль: записей ${result.push.profile.patchEntries ?? 0}`)
+      if (result.push.profileError !== undefined) messages.push(`профиль не отправлен: ${result.push.profileError}`)
+      if (result.push.workspace !== undefined) messages.push(`рабочие пространства: ${result.push.workspace.workspaces ?? 0}`)
       if (result.push.requireConfirmation !== undefined) messages.push(`удаление ${result.push.requireConfirmation.removed} сессий ждёт подтверждения`)
       if (result.push.warning) messages.push(result.push.warning)
     }
@@ -956,6 +1015,7 @@ async function runSync(ctx, action, options = {}) {
     removed,
     removedIds: removedIds.slice(0, 100),
     removedReason,
+    conflictIds: (result.pull?.conflictDetails ?? []).map(item => item.id),
     requireConfirmation: result.push?.requireConfirmation,
     guarded: (result.push?.guarded ?? []).length,
     pull: result.pull
@@ -966,6 +1026,7 @@ async function runSync(ctx, action, options = {}) {
       : null,
   }
   await writeLastRun(record)
+  invalidateSessionStates()
   return record
 }
 
@@ -1410,10 +1471,39 @@ async function createRepository(ctx) {
 
 /**
  * Состояние каждой сессии для индикатора в списке: зелёный — совпадает с
- * зеркалом, оранжевый — есть неотправленные изменения, красный — ещё не уезжала.
- * Результат кэшируется на несколько секунд: список перерисовывается часто.
+ * зеркалом, оранжевый — есть неотправленные изменения, красный — ещё не
+ * уезжала, серый — локальная (не синхронизируется). Дополнительно панель
+ * получает режим, признак привязки к рабочему пространству и сведения о
+ * последнем запуске. Результат кэшируется на несколько секунд: список
+ * перерисовывается часто.
  */
 let sessionStatesCache = { at: 0, value: undefined }
+
+/** Все сессии, привязанные к рабочим пространствам (или undefined без реестра). */
+function workspaceAttachedIds(ctx) {
+  try {
+    const registry = ctx?.get?.('workspaceRegistry')
+    if (registry === undefined || registry === null || typeof registry.list !== 'function') return undefined
+    const ids = new Set()
+    for (const workspace of registry.list() ?? []) {
+      for (const id of workspace?.sessionIds ?? []) {
+        if (typeof id === 'string') ids.add(id)
+      }
+    }
+    return ids
+  } catch {
+    return undefined
+  }
+}
+
+/** Последний запуск синхронизации из журнала. */
+async function readLastRunInfo(home) {
+  try {
+    return JSON.parse(await readFile(join(home, 'dsh-sync', LAST_RUN_FILE), 'utf8'))
+  } catch {
+    return null
+  }
+}
 
 async function sessionStates(ctx) {
   if (sessionStatesCache.value !== undefined && Date.now() - sessionStatesCache.at < 5_000) {
@@ -1423,9 +1513,15 @@ async function sessionStates(ctx) {
   const home = dshHome()
   const config = await loadConfig(home)
   const ledger = await readLedger(home)
+  const modes = await readSessionModes(home)
+  const attached = workspaceAttachedIds(ctx)
+  const lastRun = await readLastRunInfo(home)
+  const offline = lastRun !== null && lastRun.ok === false
+  const conflictIds = new Set(Array.isArray(lastRun?.conflictIds) ? lastRun.conflictIds : [])
   const states = {}
+  const sessions = []
 
-  for (const entry of Object.values(config.projects ?? {})) {
+  for (const [projectId, entry] of Object.entries(config.projects ?? {})) {
     const projectPath = typeof entry?.path === 'string' ? entry.path : ''
     if (projectPath === '') continue
     let located
@@ -1442,13 +1538,98 @@ async function sessionStates(ctx) {
       } catch {
         info = undefined
       }
-      states[session.id] = sessionState(session.id, info, ledger)
+      const baseState = sessionState(session.id, info, ledger)
+      const mode = sessionModeOf(modes, session.id)
+      const unattached = attached !== undefined && !attached.has(session.id)
+      const badge = sessionBadge({
+        mode,
+        state: baseState,
+        offline,
+        conflict: conflictIds.has(session.id),
+        unattached,
+      })
+      states[session.id] = badge
+      sessions.push({
+        id: session.id,
+        title: typeof session.title === 'string' ? session.title : '',
+        projectId,
+        path: projectPath,
+        mode,
+        state: baseState,
+        badge,
+        attached: attached === undefined ? null : !unattached,
+      })
     }
   }
 
-  const value = { ok: true, states }
+  const localCount = sessions.filter(session => session.mode === MODE_LOCAL).length
+  const unattached = sessions.filter(session => session.badge === 'unattached').length
+  const value = {
+    ok: true,
+    states,
+    sessions,
+    modes: { local: localCount, cloud: sessions.length - localCount },
+    unattached,
+    cloud: {
+      offline,
+      at: lastRun?.at ?? null,
+      ok: lastRun === null ? true : lastRun.ok !== false,
+      message: lastRun?.message ?? '',
+    },
+    attachAvailable: attached !== undefined,
+  }
   sessionStatesCache = { at: Date.now(), value }
   return value
+}
+
+/** Сбросить кеш состояний: после смены режима значки должны обновиться сразу. */
+export function invalidateSessionStates() {
+  sessionStatesCache = { at: 0, value: undefined }
+}
+
+/**
+ * Применить очередь привязки из workspace.json через реестр DSH.
+ * Очередь строится в `lib/workspace.mjs` при приёме зеркала.
+ */
+async function applyWorkspacePending(ctx, config) {
+  const pending = await readWorkspacePending(dshHome())
+  if (pending.pendingAttach.length === 0) return 0
+  let attached = 0
+  for (const item of pending.pendingAttach) {
+    if (typeof item.path !== 'string' || !Array.isArray(item.sessionIds)) continue
+    attached += await attachSessions(ctx, item.path, item.sessionIds)
+  }
+  if (attached > 0) {
+    await clearWorkspacePending(dshHome())
+    invalidateSessionStates()
+  }
+  return attached
+}
+
+/** Заметки профильного слоя для главной карточки: статус и план привязки. */
+async function profileStatus(ctx) {
+  const home = dshHome()
+  const config = await loadConfig(home)
+  const profile = await readProfileStatus({ home, config })
+  let workspace = { mirrorWorkspaces: 0, localWorkspaces: 0, matched: 0, toAttach: 0, hints: [], pending: 0 }
+  try {
+    const { createNeutralizer } = await import('./lib/neutralize.mjs')
+    const neutralizer = createNeutralizer({ home: homedir(), dshHome: home })
+    const plan = await planWorkspace({ home, config, repoDir: config.repoDir, neutralizer })
+    const pending = await readWorkspacePending(home)
+    workspace = {
+      mirrorWorkspaces: plan.mirrorWorkspaces,
+      localWorkspaces: plan.localWorkspaces,
+      matched: plan.matched.length,
+      toAttach: plan.pendingAttach.reduce((total, item) => total + item.sessionIds.length, 0),
+      hints: plan.hints.slice(0, 20),
+      pending: pending.pendingAttach.length,
+    }
+  } catch (error) {
+    workspace.error = error instanceof Error ? error.message : String(error)
+  }
+  const journal = typeof config.repoDir === 'string' && config.repoDir !== '' ? await readJournal(config.repoDir) : { entries: [] }
+  return { ok: true, profile, workspace, journal: journal.entries.slice(-20) }
 }
 
 /**
@@ -1778,6 +1959,83 @@ export function apply(ctx) {
     }
   })
 
+  // Режим «локальная / облачная»: одна сессия или группа (массово).
+  route('session-mode', SESSION_MODE_PATH, async (request) => {
+    try {
+      const payload = await body(request)
+      const ids = Array.isArray(payload.ids) ? payload.ids : payload.id !== undefined ? [payload.id] : []
+      const mode = payload.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud'
+      const result = await setSessionMode(dshHome(), ids, mode)
+      invalidateSessionStates()
+      return json({ ok: true, ...result })
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  route('profile', PROFILE_PATH, async (request) => {
+    try {
+      const payload = await body(request)
+      const action = typeof payload.action === 'string' ? payload.action : 'status'
+      const home = dshHome()
+      if (action === 'attach') {
+        // «Привязать»: добираем сессии, которых нет ни в одном пространстве.
+        const config = await loadConfig(home)
+        const attachedTotal = await attachAllProjects(ctx, config)
+        const queued = await applyWorkspacePending(ctx, config)
+        invalidateSessionStates()
+        return json({ ok: true, attached: attachedTotal, queued })
+      }
+      if (action === 'attach-workspace') {
+        const config = await loadConfig(home)
+        const projectId = typeof payload.projectId === 'string' ? payload.projectId : ''
+        const requested = typeof payload.path === 'string' ? payload.path : ''
+        // Запись из зеркала может ссылаться на проект, путь которого здесь
+        // другой: привязываем к локальному пути проекта, а не к пути из зеркала.
+        const configured = projectId !== '' ? config.projects?.[projectId]?.path : undefined
+        const path = typeof configured === 'string' && configured !== '' ? configured : requested
+        const ids = Array.isArray(payload.sessionIds) ? payload.sessionIds.filter(id => typeof id === 'string') : []
+        if (path === '' || ids.length === 0) return json({ ok: false, message: 'нужен путь и список сессий' }, 400)
+        const attached = await attachSessions(ctx, path, ids)
+        await applyWorkspacePending(ctx, config)
+        invalidateSessionStates()
+        return json({ ok: true, attached })
+      }
+      if (action === 'apply-pending') {
+        const queued = await applyWorkspacePending(ctx, await loadConfig(home))
+        return json({ ok: true, queued })
+      }
+      if (action === 'journal') {
+        const config = await loadConfig(home)
+        const journal = await readJournal(config.repoDir)
+        return json({ ok: true, entries: journal.entries.slice(-50) })
+      }
+      return json(await profileStatus(ctx))
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  // Браузерные настройки (dsh-polish, dsh-cards): localStorage не виден host-части,
+  // поэтому клиент приносит значения сам и забирает очередь после приёма.
+  route('browser-settings', BROWSER_SETTINGS_PATH, async (request) => {
+    try {
+      const payload = await body(request)
+      const home = dshHome()
+      if (payload.applied === true) {
+        await clearPendingBrowserSettings(home)
+        return json({ ok: true, applied: true })
+      }
+      if (payload.current !== undefined) {
+        await writeBrowserSettings(home, payload.current)
+      }
+      const pending = await readPendingBrowserSettings(home)
+      return json({ ok: true, stored: payload.current !== undefined, pending })
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
   route('yandex-check', YANDEX_CHECK_PATH, async (request) => {
     try {
       const payload = await body(request)
@@ -1844,6 +2102,19 @@ export function apply(ctx) {
       }
       if (state.status) {
         lines.push(`сессий локально: ${state.status.local}, в зеркале: ${state.status.mirror}`)
+      }
+      if (state.modes) {
+        lines.push(`режимы сессий: локальных ${state.modes.local}, облачных ${state.modes.cloud}`)
+      }
+      if (state.profile?.profile !== undefined) {
+        const profile = state.profile.profile
+        lines.push(`профиль: ${profile.available ? profile.profileDir : 'каталог профиля не найден'}`)
+        if (profile.available) {
+          lines.push(`  патч: ${(profile.patch?.entries ?? []).join(', ') || 'нет безопасных записей'}; плагинов: ${profile.bundles?.count ?? 0}; конфликтов: ${profile.conflictCount ?? 0}`)
+        }
+      }
+      if (state.workspace?.hints?.length > 0) {
+        lines.push(`не привязано рабочих пространств: ${state.workspace.hints.length}`)
       }
       if (state.lastRun) {
         lines.push(`последний запуск: ${state.lastRun.at} — ${state.lastRun.ok ? 'успешно' : 'ошибка'}: ${state.lastRun.message}`)
