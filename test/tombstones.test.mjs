@@ -72,11 +72,18 @@ test('удаление сессии доезжает до другого уст�
     const dirB = localSessionDir(homeB, env.project, id)
     assert.ok(existsSync(dirB), 'сессия приехала на B')
 
-    // A удаляет сессию и отправляет — из зеркала она уходит, отметка остаётся.
+    // A удаляет сессию и отправляет — из зеркала она уходит в карантин,
+    // отметка остаётся. Единственная известная сессия — больше 20%: нужна
+    // подтверждённая отправка.
     await rm(localSessionDir(homeA, env.project, id), { recursive: true, force: true })
-    const removed = await push({ home: homeA, config: env.configA })
+    const blocked = await push({ home: homeA, config: env.configA })
+    assert.equal(blocked.removed, 0)
+    assert.ok(blocked.requireConfirmation, 'удаление ждёт подтверждения')
+
+    const removed = await push({ home: homeA, config: env.configA, confirmPrune: true })
     assert.equal(removed.removed, 1)
     assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'p', id)), false, 'из зеркала удалена')
+    assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'p', '_deleted', id, 'session.v4.jsonl.zstd')), true, 'карантин на месте')
 
     const tomb = JSON.parse(await readFile(join(env.configA.repoDir, 'tombstones.json'), 'utf8'))
     assert.ok(tomb.sessions[id], 'надгробие записано')
@@ -106,7 +113,7 @@ test('вернувшаяся сессия снимает надгробие', as
     const dir = await writeSession(homeA, env.project, id)
     await push({ home: homeA, config: env.configA })
     await rm(dir, { recursive: true, force: true })
-    await push({ home: homeA, config: env.configA })
+    await push({ home: homeA, config: env.configA, confirmPrune: true })
 
     // Сессия «восстановлена» на устройстве и снова уходит в зеркало.
     await writeSession(homeA, env.project, id)

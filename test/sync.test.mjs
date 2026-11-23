@@ -196,7 +196,7 @@ test('push без адреса репозитория говорит об это
   }
 })
 
-test('push удаляет из зеркала сессии, удалённые локально', async () => {
+test('push удаляет из зеркала сессии, удалённые локально (с подтверждением и карантином)', async () => {
   const env = await makeEnvironment()
   try {
     const keep = `session-${randomUUID()}`
@@ -207,9 +207,22 @@ test('push удаляет из зеркала сессии, удалённые �
     assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'alpha', drop, 'session.v4.jsonl.zstd')), true)
 
     await rm(dropDir, { recursive: true, force: true })
-    const result = await push({ home: env.homeA, config: env.configA })
+    // Одна удалённая сессия из двух известных — больше 20%: порог останавливает
+    // удаление, пока не будет явного подтверждения.
+    const blocked = await push({ home: env.homeA, config: env.configA })
+    assert.equal(blocked.removed, 0)
+    assert.ok(blocked.requireConfirmation, 'удаление ждёт подтверждения')
+    assert.equal(blocked.requireConfirmation.removed, 1)
+    assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'alpha', drop, 'session.v4.jsonl.zstd')), true, 'без подтверждения зеркало не тронуто')
+
+    const result = await push({ home: env.homeA, config: env.configA, confirmPrune: true })
     assert.equal(result.removed, 1)
+    assert.deepEqual(result.removedIds, [drop])
+    assert.equal(result.removedReason, 'удалено локально')
+    // Живая копия исчезла, карантин на 30 дней — на месте.
     assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'alpha', drop, 'session.v4.jsonl.zstd')), false)
+    assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'alpha', '_deleted', drop, 'session.v4.jsonl.zstd')), true)
+    assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'alpha', '_deleted', drop, 'deleted-at.json')), true)
     assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'alpha', keep, 'session.v4.jsonl.zstd')), true)
   } finally {
     await rm(env.root, { recursive: true, force: true })

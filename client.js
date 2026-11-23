@@ -474,10 +474,10 @@ window.__ModuleLoader__.load({
         }
       };
 
-      const run = async (action) => {
+      const run = async (action, extra = {}) => {
         publish({ busy: action, notice: '', error: '' });
         try {
-          const result = await post(RUN_PATH, { action });
+          const result = await post(RUN_PATH, { action, ...extra });
           if (result?.ok === true) {
             publish({ busy: '', notice: result.message || 'Готово' });
           } else {
@@ -1026,7 +1026,12 @@ function CollapsedItem({ title, summary, badge, children }) {
             Card,
             { title: t('sectionSync'), hint: 'Состояние зеркала, прогресс копирования и ручной запуск.' },
             status
-              ? h('span', { style: S.hint }, `Сессий локально: ${status.local}, в зеркале: ${status.mirror}. Только локально: ${status.onlyLocal}, только в зеркале: ${status.onlyMirror}.`)
+              ? h(
+                  'span',
+                  { style: S.hint },
+                  `Сессий локально: ${status.local}, в зеркале: ${status.mirror}. Только локально: ${status.onlyLocal}, только в зеркале: ${status.onlyMirror}.`
+                  + ((status.subagents ?? 0) > 0 ? ` Субагентов: ${status.subagents}, доступны ${status.subagentsAvailable ?? 0}.` : ''),
+                )
               : h('span', { style: S.hint }, state.loading ? 'Читаем состояние…' : 'Состояние пока неизвестно — обновите страницу.'),
             h(
               'div',
@@ -1065,6 +1070,39 @@ function CollapsedItem({ title, summary, badge, children }) {
                   `${new Date(last.at).toLocaleString('ru-RU')} — ${last.ok ? 'успешно' : 'ошибка'}: ${last.message}`,
                 )
               : h('span', { style: S.hint }, 'Ещё не запускалось.'),
+            (last?.removed ?? 0) > 0
+              ? h(
+                  'span',
+                  { style: S.note },
+                  `Удалено: ${last.removed} — ${last.removedReason !== undefined && last.removedReason !== '' ? last.removedReason : 'причина не указана'}.`,
+                )
+              : null,
+            last?.requireConfirmation !== undefined && last.requireConfirmation !== null
+              ? h(
+                  'div',
+                  { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                  h(
+                    'span',
+                    { style: S.error },
+                    `Удаление ${last.requireConfirmation.removed ?? 0} сессий превышает порог (${last.requireConfirmation.maxCount ?? 5} сессий или ${Math.round((last.requireConfirmation.maxRatio ?? 0.2) * 100)}% известных) — оно остановлено.`,
+                  ),
+                  h(
+                    'div',
+                    { style: S.buttons },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        style: S.danger,
+                        disabled: busy,
+                        title: 'Удалить из зеркала именно эти сессии (в карантин на 30 дней)',
+                        onClick: () => void run('push', { confirmPrune: true }),
+                      },
+                      `Подтвердить удаление (${last.requireConfirmation.removed ?? 0})`,
+                    ),
+                  ),
+                )
+              : null,
             (data?.history?.length ?? 0) > 0
               ? h(
                   'div',

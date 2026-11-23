@@ -27,7 +27,7 @@ import { probeWebdav } from './lib/webdav.mjs'
 import { backupProgress } from './lib/progress.mjs'
 import { apply as applyDeletePlugin } from './delete/index.js'
 import { matchProjectPath } from './lib/mirror-meta.mjs'
-import { listLocalSessions, listMirrorSessions, sessionsOfProject } from './lib/store.mjs'
+import { listLocalSessions, listMirrorSessions, sessionsOfProject, splitLog } from './lib/store.mjs'
 import { pullReplicated, pushReplicated } from './lib/replica.mjs'
 import { applyUpdate, checkForUpdate, describeUpdate, updateState } from './lib/update.js'
 
@@ -57,14 +57,16 @@ let noticeSeq = 0
 let announcedVersion = null
 const noticeDedupe = new Map()
 
-/** Токен GitHub из хранилища DSH — для проверки обновлений. */
+/** Токен GitHub из хранилища DSH (или окружения) — для git и обновлений. */
 async function resolveGitHubToken(ctx) {
+  const fromEnv = (process.env.GITHUB_TOKEN ?? '').trim()
+  if (fromEnv !== '') return fromEnv
   try {
     const credentials = ctx?.get?.('credentials')
     const hit = await credentials?.resolve?.('GITHUB_TOKEN')
-    return typeof hit?.value === 'string' && hit.value.length > 0 ? hit.value : undefined
+    return typeof hit?.value === 'string' && hit.value.length > 0 ? hit.value : ''
   } catch {
-    return undefined
+    return ''
   }
 }
 
@@ -226,6 +228,7 @@ async function runCapture(command, args, options = {}) {
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', ...options.env },
         stdio: ['ignore', out.fd, err.fd],
         windowsHide: true,
+        shell: false,
       })
       const timer = options.timeoutMs === undefined
         ? undefined
@@ -390,6 +393,8 @@ async function readState(ctx) {
   let mirror = 0
   let onlyLocal = 0
   let onlyMirror = 0
+  let subagents = 0
+  let subagentsAvailable = 0
   let scanned = 0
   let scanError = ''
   const cwds = new Set()
@@ -409,6 +414,22 @@ async function readState(ctx) {
       const mirrorIds = new Set(mirrored.map(session => session.id))
       onlyLocal = mine.filter(session => !mirrorIds.has(session.id)).length
       onlyMirror = mirrored.filter(session => !localIds.has(session.id)).length
+      // Субагенты: сессии с родителем в заголовке. «Доступны» — те, что уже
+      // лежат локально.
+      subagents = 0
+      subagentsAvailable = 0
+      for (const item of mirrored) {
+        let parent
+        try {
+          parent = splitLog(item.bytes).header.parentSession
+        } catch {
+          parent = undefined
+        }
+        if (typeof parent === 'string' && parent !== '') {
+          subagents += 1
+          if (localIds.has(item.id)) subagentsAvailable += 1
+        }
+      }
     }
   } catch {
     // счётчики — вспомогательная информация, карточка работает и без них
@@ -474,7 +495,7 @@ async function readState(ctx) {
     },
     checks,
     ready: checks.every(check => check.ok),
-    status: { local, mirror, onlyLocal, onlyMirror },
+    status: { local, mirror, onlyLocal, onlyMirror, subagents, subagentsAvailable },
     suggestedFolder,
     version: packageVersion,
     updatedFrom: pendingUpdate?.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
@@ -707,14 +728,23 @@ async function resolveNodeWithZstd() {
 /**
  * Выполнить синхронизацию в отдельном процессе на штатном Node: там доступны и
  * полный файловый обход, и zstd. Возвращает undefined, если подходящего Node нет.
+ * extraEnv дополняет окружение дочернего процесса (токен GitHub и т. п.);
+ * options.confirmPrune снимает порог защиты от массового удаления.
  */
-async function runViaChild(action) {
+async function runViaChild(action, extraEnv = {}, options = {}) {
   const node = await resolveNodeWithZstd()
   if (node === null) return undefined
   const childPath = fileURLToPath(new URL('./lib/sync-child.mjs', import.meta.url))
+  const args = [childPath, action]
+  if (options?.confirmPrune === true) args.push('--confirm-prune')
+  // Версия DSH читается из app.asar только в host-процессе: дочернему Node
+  // она передаётся через окружение, чтобы сверка версий работала и там.
+  const versionEnv = { ...(extraEnv ?? {}) }
+  const dshVersion = await hostDshVersion()
+  if (dshVersion !== undefined) versionEnv.DSH_SYNC_DSH_VERSION = dshVersion
 
   const started = Date.now()
-  const result = await runCapture(node.path, [childPath, action], { env: node.env, timeoutMs: 600_000 })
+  const result = await runCapture(node.path, args, { env: { ...node.env, ...versionEnv }, timeoutMs: 600_000 })
   const line = result.stdout.trim().split('\n').filter(part => part.trim().startsWith('{')).pop()
 
   let parsed
@@ -816,9 +846,12 @@ async function appendLog(kind, ok, text) {
   }
 }
 
-async function runSync(ctx, action) {
+async function runSync(ctx, action, options = {}) {
   const home = dshHome()
+  const confirmPrune = options?.confirmPrune === true
   const config = await applySecret(ctx, await loadConfig(home))
+  const githubToken = await resolveGitHubToken(ctx)
+  if (githubToken !== '') process.env.GITHUB_TOKEN = githubToken
   const projectEntries = Object.keys(config.projects ?? {})
   if (projectEntries.length === 0) {
     return { ok: false, message: 'Сначала укажите проект в настройках плагина.' }
@@ -832,7 +865,7 @@ async function runSync(ctx, action) {
 
   // Основной путь — отдельный процесс: в host-процессе DSH файловый обход и
   // разбор логов могут вести себя иначе, чем в обычном Node.
-  const viaChild = await runViaChild(action)
+  const viaChild = await runViaChild(action, githubToken === '' ? {} : { GITHUB_TOKEN: githubToken }, { confirmPrune })
   if (viaChild !== undefined) {
     // Приём выполняет дочерний процесс, а привязать новые сессии к рабочему
     // пространству может только host-часть: у неё есть реестр.
@@ -860,15 +893,18 @@ async function runSync(ctx, action) {
   const result = { pull: null, push: null }
   const messages = []
   try {
+    const dshVersion = await hostDshVersion()
     if (action !== 'push') {
-      result.pull = await pull({ home, config })
+      result.pull = await pull({ home, config, dshVersion })
       messages.push(`принято: ${result.pull.imported}, обновлено: ${result.pull.updated}, конфликтов: ${result.pull.conflicts}`)
       if (result.pull.errors?.length) messages.push(`ошибок чтения: ${result.pull.errors.length} (${result.pull.errors[0].message})`)
+      if ((result.pull.deleted ?? 0) > 0) messages.push(`удалено по отметкам других устройств: ${result.pull.deleted}`)
+      if (result.pull.warning) messages.push(result.pull.warning)
 
       // В зеркале могут быть проекты, которых здесь ещё нет: подхватываем по имени.
       const adopted = await adoptMirrorProjects(ctx, config, result.pull)
       if (adopted > 0) {
-        result.pull = await pullReplicated({ home, config })
+        result.pull = await pullReplicated({ home, config, dshVersion })
         messages.push(`подхвачено проектов из зеркала: ${adopted}; принято: ${result.pull.imported}`)
         if (result.pull.errors?.length) messages.push(`ошибок чтения: ${result.pull.errors.length} (${result.pull.errors[0].message})`)
       }
@@ -886,12 +922,14 @@ async function runSync(ctx, action) {
     if (action !== 'pull') {
       const entry = Object.values(config.projects ?? {})[0]
       const located = await localSessionsFor(ctx, home, entry?.path ?? '')
-      result.push = await pushReplicated({ home, config, sessions: located.sessions })
+      result.push = await pushReplicated({ home, config, sessions: located.sessions, confirmPrune, dshVersion })
       messages.push(`отправлено: ${result.push.pushed}${result.push.committed ? ', коммит создан' : ', изменений нет'}`)
       if (result.push.failures?.length) {
         const first = result.push.failures[0]
         messages.push(`не прочитано: ${result.push.failures.length} (${first.id}: ${first.message})`)
       }
+      if ((result.push.removed ?? 0) > 0) messages.push(`удалено из зеркала: ${result.push.removed} — ${result.push.removedReason ?? ''}`)
+      if (result.push.requireConfirmation !== undefined) messages.push(`удаление ${result.push.requireConfirmation.removed} сессий ждёт подтверждения`)
       if (result.push.warning) messages.push(result.push.warning)
     }
   } catch (error) {
@@ -902,6 +940,12 @@ async function runSync(ctx, action) {
     return record
   }
 
+  const pullDeletions = result.pull?.deletedIds ?? []
+  const pushDeletions = result.push?.removedIds ?? []
+  const removedIds = [...pullDeletions, ...pushDeletions]
+  const removed = (result.pull?.deleted ?? 0) + (result.push?.removed ?? 0)
+  const removedReason = [result.pull?.deletedReason, result.push?.removedReason].filter(reason => typeof reason === 'string' && reason !== '').join(', ')
+
   const record = {
     ok: true,
     at: new Date().toISOString(),
@@ -909,6 +953,11 @@ async function runSync(ctx, action) {
     mode: 'host',
     message: `дочерний Node не найден, работал host-процесс. ${messages.join('; ')}`,
     durationMs: Date.now() - started,
+    removed,
+    removedIds: removedIds.slice(0, 100),
+    removedReason,
+    requireConfirmation: result.push?.requireConfirmation,
+    guarded: (result.push?.guarded ?? []).length,
     pull: result.pull
       ? { imported: result.pull.imported, updated: result.pull.updated, conflicts: result.pull.conflicts, attachments: result.pull.attachments?.restored ?? 0 }
       : null,
@@ -1058,6 +1107,26 @@ async function clearPendingUpdate() {
 
 async function writeLastRun(record) {
   await recordRun(dshHome(), record)
+}
+
+/**
+ * Версия DSH, в котором работает host-часть. Читается из package.json пакета
+ * `@deepseek-ai/dsh` по DSH_INSTALL_DIR (внутри app.asar доступно только
+ * host-процессу Electron); дочернему процессу передаётся через окружение.
+ */
+async function hostDshVersion() {
+  const env = [process.env.DSH_VERSION, process.env.DSH_SYNC_DSH_VERSION].find(value => typeof value === 'string' && value.trim() !== '')
+  if (env !== undefined) return env.trim()
+  const dir = process.env.DSH_INSTALL_DIR
+  if (typeof dir === 'string' && dir !== '') {
+    try {
+      const manifest = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'))
+      if (typeof manifest?.version === 'string' && manifest.version !== '') return manifest.version
+    } catch {
+      // версию не знаем — предупреждения не будет
+    }
+  }
+  return undefined
 }
 
 function json(value, status = 200) {
@@ -1676,7 +1745,7 @@ export function apply(ctx) {
     const payload = await body(request)
     const action = ['sync', 'pull', 'push'].includes(payload.action) ? payload.action : 'sync'
     try {
-      return json(await runSync(ctx, action))
+      return json(await runSync(ctx, action, { confirmPrune: payload.confirmPrune === true }))
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
     }

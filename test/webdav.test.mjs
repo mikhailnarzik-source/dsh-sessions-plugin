@@ -115,13 +115,67 @@ test('WebDAV переносит файлы и удаляет исчезнувш�
   }
 })
 
-test('неверный пароль приложения даёт понятную ошибку', async () => {
+test('неверный пароль приложения даёт понятную ошибку без повторов', async () => {
   const disk = fakeWebdav()
-  globalThis.fetch = disk.handler
+  let calls = 0
+  globalThis.fetch = async (url, init) => {
+    calls += 1
+    return disk.handler(url, init)
+  }
   const root = await mkdtemp(join(tmpdir(), 'dsh-webdav-'))
   try {
     const backend = createWebdavBackend({ backend: 'webdav', repoDir: root, webdavLogin: 'user', webdavPassword: 'bad', webdavPath: 'dsh-sync' })
     await assert.rejects(() => backend.sync(), /не принял логин или пароль/)
+    assert.equal(calls, 1)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    delete globalThis.fetch
+  }
+})
+
+test('WebDAV повторяет запрос при сетевом сбое (fetch failed) и доводит до конца', async () => {
+  const disk = fakeWebdav()
+  let calls = 0
+  globalThis.fetch = async (url, init) => {
+    calls += 1
+    if (calls <= 2) throw new TypeError('fetch failed')
+    return disk.handler(url, init)
+  }
+  const root = await mkdtemp(join(tmpdir(), 'dsh-webdav-'))
+  try {
+    const backend = createWebdavBackend(
+      { backend: 'webdav', repoDir: root, webdavLogin: 'user', webdavPassword: 'app-pass', webdavPath: 'dsh-sync' },
+      { retryBaseMs: 5 },
+    )
+    await backend.sync()
+    assert.equal(calls, 3)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    delete globalThis.fetch
+  }
+})
+
+test('WebDAV повторяет загрузку при обрыве TLS (schannel) и загружает файл', async () => {
+  const disk = fakeWebdav()
+  let calls = 0
+  globalThis.fetch = async (url, init) => {
+    calls += 1
+    if (calls === 1) throw new TypeError('fetch failed', { cause: new Error('schannel: next InitializeSecurityContext failed') })
+    return disk.handler(url, init)
+  }
+  const root = await mkdtemp(join(tmpdir(), 'dsh-webdav-'))
+  const cache = join(root, 'a')
+  try {
+    await mkdir(join(cache, 'sessions', 'p', 's-1'), { recursive: true })
+    await writeFile(join(cache, 'sessions', 'p', 's-1', 'session.v4.jsonl.zstd'), 'лог')
+    const backend = createWebdavBackend(
+      { backend: 'webdav', repoDir: cache, webdavLogin: 'user', webdavPassword: 'app-pass', webdavPath: 'dsh-sync' },
+      { retryBaseMs: 5 },
+    )
+    const result = await backend.commit()
+    assert.equal(result.uploaded, 1)
+    assert.ok(disk.files.has('/dsh-sync/sessions/p/s-1/session.v4.jsonl.zstd'))
+    assert.ok(calls > 1, 'сетевой сбой повторялся')
   } finally {
     await rm(root, { recursive: true, force: true })
     delete globalThis.fetch
