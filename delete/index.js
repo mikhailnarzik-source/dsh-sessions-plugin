@@ -106,33 +106,55 @@ async function handleInspect(ctx, request) {
  * из репозитория. Надгробие уносится при обычной отправке и удаляет сессию на
  * остальных устройствах, поэтому вызывается только по явному согласию.
  *
+ * Группа удаляется вместе: за родителем уходят его субагенты. На каждого
+ * ребёнка пишется метка с причиной `children` и ссылкой `parent`, поэтому
+ * другое устройство снимает всю группу одной отправкой, а панель
+ * «Удалённые» показывает «вместе с родителем» и может вернуть всю группу.
+ *
  * Пометка честно говорит, откуда она: reason=manual/by=owner (решение
- * пользователя) и название сессии для панели «Удалённые», откуда её можно
- * вернуть в течение 30 дней.
+ * пользователя), `size` — сколько сессий было в группе, название — для панели
+ * «Удалённые», откуда её можно вернуть в течение 30 дней.
  *
  * @param sessionId удалённая сессия.
  * @param title название сессии на момент удаления (может быть пустым).
- * @returns true, если пометка записана.
+ * @param options.descendants — субагенты, удалённые вместе с родителем.
+ * @param options.titles — Map id → название субагента (до удаления).
+ * @returns {{ marked: boolean, descendants: number }}
  */
-async function markDeletedInMirror(sessionId, title = '') {
+async function markDeletedInMirror(sessionId, title = '', options = {}) {
   try {
     const config = await loadConfig(resolveDshHome())
-    if (config === undefined || typeof config.repoDir !== 'string') return false
+    if (config === undefined || typeof config.repoDir !== 'string') return { marked: false, descendants: 0 }
     if (config.remote === undefined || config.remote === '') {
       // Без удалённого хранилища помечать нечего.
-      return false
+      return { marked: false, descendants: 0 }
     }
+    const descendants = (Array.isArray(options.descendants) ? options.descendants : [])
+      .filter(id => typeof id === 'string' && id !== '' && id !== sessionId)
+    const titles = options.titles instanceof Map ? options.titles : new Map()
+    const device = config.deviceId ?? 'device'
+    const size = 1 + descendants.length
     const tombstones = await readTombstones(config.repoDir)
-    addTombstone(tombstones, sessionId, config.deviceId ?? 'device', {
+    addTombstone(tombstones, sessionId, device, {
       reason: 'manual',
       by: 'owner',
       title,
+      size,
     })
+    for (const childId of descendants) {
+      addTombstone(tombstones, childId, device, {
+        reason: 'children',
+        by: 'owner',
+        parent: sessionId,
+        title: titles.get(childId) ?? '',
+        size,
+      })
+    }
     await writeTombstones(config.repoDir, tombstones)
-    return true
+    return { marked: true, descendants: descendants.length }
   } catch (error) {
     console.error('[session-delete] не удалось пометить сессию в зеркале:', error)
-    return false
+    return { marked: false, descendants: 0 }
   }
 }
 
@@ -156,9 +178,23 @@ async function handleDelete(ctx, request) {
     } catch {
       title = ''
     }
+    // Субагенты исчезнут вместе с родителем: их названия и идентификаторы нужны
+    // пометкам удаления, пока логи ещё на месте.
+    const descendantCandidates = await descendantIds(ctx, decoded.sessionId).catch(() => [])
+    const descendantTitles = await sessionTitles(ctx, descendantCandidates).catch(() => new Map())
     const result = await deleteSession(ctx, decoded.sessionId, { deleteFiles })
-    const marked = localOnly || result.ok !== true ? false : await markDeletedInMirror(decoded.sessionId, title)
-    return json({ ...result, markedInMirror: marked, localOnly }, result.ok ? 200 : 409)
+    const mirrorMark = localOnly || result.ok !== true
+      ? { marked: false, descendants: 0 }
+      : await markDeletedInMirror(decoded.sessionId, title, {
+          descendants: result.descendantIds ?? [],
+          titles: descendantTitles,
+        })
+    return json({
+      ...result,
+      markedInMirror: mirrorMark.marked,
+      markedDescendants: mirrorMark.descendants,
+      localOnly,
+    }, result.ok ? 200 : 409)
   } catch (error) {
     console.error(`[session-delete] deleting ${decoded.sessionId} failed:`, error)
     return json({
@@ -321,6 +357,9 @@ async function deleteSession(ctx, sessionId, options) {
     workspaceRemoved,
     removedFiles: removedFiles.length,
     descendantsRemoved: childrenRemoved.length,
+    // Идентификаторы удалённых субагентов: по ним пишутся метки удаления, и
+    // группа восстанавливается целиком.
+    descendantIds: childrenRemoved,
     descendantsSkipped: childrenSkipped,
     projectFilesDeleted: projectFileResult.deleted,
     projectFilesFailed: projectFileResult.failed,

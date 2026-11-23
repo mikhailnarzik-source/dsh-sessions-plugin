@@ -21,7 +21,7 @@ import { readFile as readFileText } from 'node:fs/promises'
 import { defaultConfig, loadConfig, saveConfig } from './lib/config.mjs'
 import { encodeSegment, projectKey, samePath } from './lib/format.mjs'
 import { collectDiagnostics } from './lib/diagnostics.mjs'
-import { readHistory, recordRun, removalDetails } from './lib/history.mjs'
+import { readHistory, recordRun, removalDetails, subagentStats } from './lib/history.mjs'
 import { readLedger, sessionState } from './lib/ledger.mjs'
 import { probeYandex } from './lib/yandex.mjs'
 import { probeWebdav } from './lib/webdav.mjs'
@@ -30,6 +30,7 @@ import { backupProgress } from './lib/progress.mjs'
 import { apply as applyDeletePlugin } from './delete/index.js'
 import { matchProjectPath } from './lib/mirror-meta.mjs'
 import { listLocalSessions, listMirrorSessions, sessionsOfProject, splitLog } from './lib/store.mjs'
+import { buildSessionGroups } from './lib/session-groups.mjs'
 import { pullReplicated, pushReplicated, secondaryConfig } from './lib/replica.mjs'
 import {
   initializeSecondaryChannel,
@@ -1035,7 +1036,9 @@ async function runSync(ctx, action, options = {}) {
       result.pull = await pull({ home, config, dshVersion })
       messages.push(`принято: ${result.pull.imported}, обновлено: ${result.pull.updated}, конфликтов: ${result.pull.conflicts}`)
       if (result.pull.errors?.length) messages.push(`ошибок чтения: ${result.pull.errors.length} (${result.pull.errors[0].message})`)
-      if ((result.pull.deleted ?? 0) > 0) messages.push(`удалено по отметкам других устройств: ${result.pull.deleted}`)
+      if ((result.pull.deleted ?? 0) > 0) messages.push(`удалено по отметкам других устройств: ${result.pull.deleted}${(result.pull.childrenDeleted ?? 0) > 0 ? ` (субагентов вместе с родителями: ${result.pull.childrenDeleted})` : ''}`)
+      if ((result.pull.subagents ?? 0) > 0) messages.push(`субагентов принято: ${result.pull.subagents}`)
+      if (result.pull.childrenMissing?.length) messages.push(`субагентов нет локально: ${result.pull.childrenMissing.length} (защищены от удаления)`)
       if (result.pull.warning) messages.push(result.pull.warning)
 
       // В зеркале могут быть проекты, которых здесь ещё нет: подхватываем по имени.
@@ -1078,6 +1081,9 @@ async function runSync(ctx, action, options = {}) {
         messages.push(`не прочитано: ${result.push.failures.length} (${first.id}: ${first.message})`)
       }
       if ((result.push.removed ?? 0) > 0) messages.push(`удалено из зеркала: ${result.push.removed} — ${result.push.removedReason ?? ''}`)
+      if ((result.push.childrenQuarantined ?? 0) > 0) messages.push(`субагентов ушли в карантин вместе с родителями: ${result.push.childrenQuarantined}`)
+      if (result.push.childrenMissing?.length) messages.push(`субагентов нет локально: ${result.push.childrenMissing.length} (в зеркале оставлены)`)
+      if (result.push.orphansProtected?.length) messages.push(`осиротевших субагентов не удаляем: ${result.push.orphansProtected.length}`)
       if ((result.push.localSkipped ?? 0) > 0) messages.push(`локальных сессий не отправлено: ${result.push.localSkipped}`)
       if (result.push.profile !== undefined) messages.push(`профиль: записей ${result.push.profile.patchEntries ?? 0}`)
       if (result.push.profileError !== undefined) messages.push(`профиль не отправлен: ${result.push.profileError}`)
@@ -1104,12 +1110,16 @@ async function runSync(ctx, action, options = {}) {
   // Коды причин и авторов удаления — отдельно от человекочитаемого текста:
   // по ним видно, удалил пользователь (manual/owner) или автоочистка (prune/sync).
   const removal = removalDetails(result)
+  // Единица обмена «родитель + субагенты»: сколько сессий и субагентов
+  // обменяно и каких детей не хватило локально (см. history.jsonl).
+  const groups = subagentStats(result)
 
   const record = {
     ok: true,
     at: new Date().toISOString(),
     action,
     mode: 'host',
+    ...groups,
     message: `дочерний Node не найден, работал host-процесс. ${messages.join('; ')}`,
     durationMs: Date.now() - started,
     removed,
@@ -2216,7 +2226,18 @@ export function apply(ctx) {
       const payload = await body(request)
       const ids = Array.isArray(payload.ids) ? payload.ids : payload.id !== undefined ? [payload.id] : []
       const mode = payload.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud'
-      const result = await setSessionMode(dshHome(), ids, mode)
+      const home = dshHome()
+      // Режим группы: вместе с родителем переключаются его субагенты, иначе
+      // ребёнок уехал бы в зеркало без родителя. Связи берём из заголовков
+      // сессий (host-часть отдаёт `parent` без чтения логов).
+      const located = await localSessionsFor(ctx, home, '')
+      const groups = buildSessionGroups(located.sessions.map((session) => ({
+        id: session.id,
+        header: typeof session.parent === 'string' && session.parent !== ''
+          ? { id: session.id, parentSession: session.parent }
+          : undefined,
+      })))
+      const result = await setSessionMode(home, ids, mode, { groups })
       invalidateSessionStates()
       return json({ ok: true, ...result })
     } catch (error) {

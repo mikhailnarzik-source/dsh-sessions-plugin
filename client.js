@@ -1166,6 +1166,12 @@ function CollapsedItem({ title, summary, badge, children }) {
                   `Удалено: ${last.removed} — ${last.removedReason !== undefined && last.removedReason !== '' ? last.removedReason : 'причина не указана'}.`,
                 )
               : null,
+            (last?.childrenQuarantined ?? 0) > 0
+              ? h('span', { style: S.note }, `Вместе с родителями ушли в карантин субагентов: ${last.childrenQuarantined}.`)
+              : null,
+            (Array.isArray(last?.childrenMissing) ? last.childrenMissing.length : 0) > 0
+              ? h('span', { style: S.note }, `Субагентов нет локально: ${last.childrenMissing.length} — их копии в зеркале защищены от удаления.`)
+              : null,
             last?.requireConfirmation !== undefined && last.requireConfirmation !== null
               ? h(
                   'div',
@@ -1173,8 +1179,18 @@ function CollapsedItem({ title, summary, badge, children }) {
                   h(
                     'span',
                     { style: S.error },
-                    `Удаление ${last.requireConfirmation.removed ?? 0} сессий превышает порог (${last.requireConfirmation.maxCount ?? 5} сессий или ${Math.round((last.requireConfirmation.maxRatio ?? 0.2) * 100)}% известных) — оно остановлено.`,
+                    `Удаление ${last.requireConfirmation.removed ?? 0} сессий остановлено: `
+                    + ((last.requireConfirmation.subagents ?? 0) > 0
+                      ? 'удаляется родитель с субагентами — подтвердите удаление вместе с ними.'
+                      : `превышен порог (${last.requireConfirmation.maxCount ?? 5} сессий или ${Math.round((last.requireConfirmation.maxRatio ?? 0.2) * 100)}% известных).`),
                   ),
+                  (last.requireConfirmation.subagents ?? 0) > 0
+                    ? h(
+                        'span',
+                        { style: S.note },
+                        `Вместе с родителем уйдут субагенты: ${last.requireConfirmation.subagents} — их копии попадут в карантин, восстановить можно вместе.`,
+                      )
+                    : null,
                   h(
                     'div',
                     { style: S.buttons },
@@ -2507,6 +2523,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       expired: 'срок истёк',
       replaced: 'заменено',
       restored: 'восстановлено',
+      children: 'вместе с родителем',
     };
     const DELETED_BY_LABELS = {
       owner: 'пользователь',
