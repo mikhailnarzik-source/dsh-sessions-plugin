@@ -18,11 +18,15 @@ import { pull, push } from '../lib/sync.mjs'
 import {
   MODE_CLOUD,
   MODE_LOCAL,
+  MODES_VERSION,
+  applyWorkspaceDefaults,
   isLocalSession,
   readSessionModes,
   sessionBadge,
   sessionModeOf,
   setSessionMode,
+  setWorkspaceDefaultMode,
+  workspaceDefaultMode,
   writeSessionModes,
 } from '../lib/session-modes.mjs'
 
@@ -217,5 +221,151 @@ test('битый файл режимов не ломает синхрониза�
     assert.equal(isLocalSession(again, 'session-x'), true)
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+/** Стор рабочих пространств DSH: только то, что нужно режимам по умолчанию. */
+async function writeWorkspaceStore(home, workspaces) {
+  const file = join(home, 'storages', 'workspace.json')
+  await mkdir(join(home, 'storages'), { recursive: true })
+  const table = {}
+  for (const [id, record] of Object.entries(workspaces)) {
+    table[id] = { path: record.path, title: record.title ?? id, sessionIds: record.sessionIds ?? [] }
+  }
+  await writeFile(file, JSON.stringify({ version: 1, tables: { workspaces: table } }, null, 2), 'utf8')
+}
+
+test('режим по умолчанию рабочего пространства: новые сессии наследуют, явный выбор сильнее', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-modes-ws-'))
+  try {
+    const home = join(root, 'home')
+    await mkdir(home, { recursive: true })
+    const first = await setWorkspaceDefaultMode(home, 'ws-alpha', MODE_LOCAL)
+    assert.equal(first.changed, 1)
+    assert.equal(first.mode, MODE_LOCAL)
+    let modes = await readSessionModes(home)
+    assert.equal(workspaceDefaultMode(modes, 'ws-alpha'), MODE_LOCAL)
+    assert.equal(modes.version, MODES_VERSION)
+    assert.deepEqual(modes.workspaces, { 'ws-alpha': MODE_LOCAL })
+
+    // Первая материализация: новая сессия пространства становится локальной.
+    const applied = await applyWorkspaceDefaults(home, { workspaceIdBySession: { 'session-new-1': 'ws-alpha', 'session-new-2': 'ws-other' } })
+    assert.equal(applied.changed, 1)
+    assert.deepEqual(applied.inherited, ['session-new-1'])
+    assert.equal(isLocalSession(applied.modes, 'session-new-1'), true)
+    assert.equal(isLocalSession(applied.modes, 'session-new-2'), false, 'умолчание «облако» записи не создаёт')
+    assert.equal(explicitRecord(applied.modes, 'session-new-2'), undefined)
+
+    // Повторный проход идемпотентен: уже записанную сессию не переписываем.
+    const again = await applyWorkspaceDefaults(home, { workspaceIdBySession: { 'session-new-1': 'ws-alpha' } })
+    assert.equal(again.changed, 0)
+
+    // Явный выбор «облачная» сильнее умолчания пространства.
+    await setSessionMode(home, ['session-new-1'], MODE_CLOUD)
+    const afterCloud = await applyWorkspaceDefaults(home, { workspaceIdBySession: { 'session-new-1': 'ws-alpha' } })
+    assert.equal(afterCloud.changed, 0)
+    assert.equal(sessionModeOf(afterCloud.modes, 'session-new-1'), MODE_CLOUD)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+/** Явная запись режима сессии (внутренний вид файла). */
+function explicitRecord(modes, sessionId) {
+  return modes.sessions[sessionId.startsWith('session-') ? sessionId : `session-${sessionId}`]
+}
+
+test('смена умолчания пространства закрепляет режим существующих сессий', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-modes-pin-'))
+  try {
+    const home = join(root, 'home')
+    await mkdir(home, { recursive: true })
+    await setWorkspaceDefaultMode(home, 'ws-1', MODE_LOCAL)
+    // В пространстве уже есть две сессии: одна с явной записью, одна без.
+    await setSessionMode(home, ['session-explicit'], MODE_LOCAL)
+    const shifted = await setWorkspaceDefaultMode(home, 'ws-1', MODE_CLOUD, {
+      sessionIds: ['session-explicit', 'session-implicit'],
+    })
+    assert.equal(shifted.previous, MODE_LOCAL)
+    assert.equal(shifted.changed, 1)
+    assert.equal(shifted.pinned, 1, 'закреплена только сессия без явной записи')
+    const modes = await readSessionModes(home)
+    assert.equal(workspaceDefaultMode(modes, 'ws-1'), MODE_CLOUD)
+    assert.deepEqual(modes.workspaces, {}, 'облако — встроенное умолчание, запись не нужна')
+    assert.equal(sessionModeOf(modes, 'session-implicit'), MODE_LOCAL, 'существующая сессия осталась локальной')
+    assert.equal(sessionModeOf(modes, 'session-explicit'), MODE_LOCAL)
+    // Новая сессия после смены умолчания — уже облачная.
+    const fresh = await applyWorkspaceDefaults(home, { workspaceIdBySession: { 'session-fresh': 'ws-1' } })
+    assert.equal(fresh.changed, 0)
+    assert.equal(sessionModeOf(fresh.modes, 'session-fresh'), MODE_CLOUD)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('файл версии 1 читается: локальные записи живут, умолчаний нет', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-modes-v1-'))
+  try {
+    const home = join(root, 'home')
+    await mkdir(join(home, 'dsh-sync'), { recursive: true })
+    await writeFile(join(home, 'dsh-sync', 'session-modes.json'), JSON.stringify({
+      version: 1,
+      updatedAt: '2026-11-01T00:00:00.000Z',
+      sessions: { 'session-old-local': 'local' },
+    }), 'utf8')
+    const modes = await readSessionModes(home)
+    assert.equal(modes.version, MODES_VERSION)
+    assert.equal(isLocalSession(modes, 'session-old-local'), true)
+    assert.deepEqual(modes.workspaces, {})
+    // Запись сохраняет обе части в формате v2.
+    await setWorkspaceDefaultMode(home, 'ws-v1', MODE_LOCAL)
+    const saved = JSON.parse(await readFile(join(home, 'dsh-sync', 'session-modes.json'), 'utf8'))
+    assert.equal(saved.version, MODES_VERSION)
+    assert.equal(saved.sessions['session-old-local'], MODE_LOCAL)
+    assert.deepEqual(saved.workspaces, { 'ws-v1': MODE_LOCAL })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('push и pull уважают умолчание рабочего пространства для новых сессий', async () => {
+  const env = await makeEnvironment()
+  try {
+    const cloudId = `session-${randomUUID()}`
+    const defaultLocalId = `session-${randomUUID()}`
+    await writeSession(env.homeA, env.projectPathA, cloudId, makeLog(headerFor(env.projectPathA, cloudId), [{ type: 'text', seq: 0 }]))
+    await writeSession(env.homeA, env.projectPathA, defaultLocalId, makeLog(headerFor(env.projectPathA, defaultLocalId), [{ type: 'text', seq: 0 }]))
+    // Пространство с умолчанием «локальная»: сессия явно не переключалась.
+    await writeWorkspaceStore(env.homeA, {
+      'ws-alpha': { path: env.projectPathA, title: 'alpha', sessionIds: [defaultLocalId] },
+    })
+    await setWorkspaceDefaultMode(env.homeA, 'ws-alpha', MODE_LOCAL)
+
+    const summary = await push({ home: env.homeA, config: env.configA })
+    assert.equal(summary.pushed, 1, 'в облако ушла только сессия из облачного умолчания')
+    assert.equal(summary.localSkipped, 1)
+    assert.equal(existsSync(join(env.shared, 'sessions', 'alpha', defaultLocalId)), false)
+    const modes = await readSessionModes(env.homeA)
+    assert.equal(isLocalSession(modes, defaultLocalId), true, 'новая сессия получила умолчание при отправке')
+
+    // Явное «облако» возвращает сессию в обмен, несмотря на умолчание.
+    await setSessionMode(env.homeA, [defaultLocalId], MODE_CLOUD)
+    const second = await push({ home: env.homeA, config: env.configA })
+    assert.equal(second.pushed, 1)
+    assert.equal(second.localSkipped, 0)
+
+    // Устройство B: та же сессия приходит из зеркала, но пространство по
+    // умолчанию локальное — приём её пропускает.
+    await writeWorkspaceStore(env.homeB, {
+      'ws-beta': { path: env.projectPathB, title: 'alpha', sessionIds: [defaultLocalId] },
+    })
+    await setWorkspaceDefaultMode(env.homeB, 'ws-beta', MODE_LOCAL)
+    const pulled = await pull({ home: env.homeB, config: env.configB })
+    assert.equal(pulled.localSkipped, 1)
+    assert.equal(pulled.imported, 1, 'принимается только облачная сессия')
+    assert.equal(existsSync(join(localSessionDir(env.homeB, env.projectPathB, defaultLocalId), 'session.v4.jsonl.zstd')), false)
+    assert.equal(existsSync(join(localSessionDir(env.homeB, env.projectPathB, cloudId), 'session.v4.jsonl.zstd')), true)
+  } finally {
+    await rm(env.root, { recursive: true, force: true })
   }
 })

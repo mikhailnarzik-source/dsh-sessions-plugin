@@ -24,6 +24,7 @@ window.__ModuleLoader__.load({
     const UPDATE_PATH = '/api/dsh-sync/update';
     const UPDATE_APPLY_PATH = '/api/dsh-sync/update/apply';
     const SESSION_MODE_PATH = '/api/dsh-sync/session-mode';
+    const SESSION_CLOUD_COPY_PATH = '/api/dsh-sync/session-cloud-copy';
     const PROFILE_PATH = '/api/dsh-sync/profile';
     const PROFILE_APPLY_PATH = '/api/dsh-sync/profile/apply';
     const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings';
@@ -450,6 +451,47 @@ window.__ModuleLoader__.load({
             '.dshs-modes-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.1));border-color:var(--dsw-alias-border-l2,rgba(128,128,128,0.22))}',
             '.dshs-modes-list{display:flex;flex-direction:column;gap:4px;min-width:0;max-height:320px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}',
             '.dshs-ws-hint{display:flex;flex-direction:column;gap:6px;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.05)}',
+            // --- индикатор синхронизации сессии по макету -------------------
+            // Облако 26×18 со свечением + полоса 24×3 (радиус 1.5) под ним.
+            // Локальная сессия — монитор 20×16 без полосы. Свечение и анимации
+            // выключаются при prefers-reduced-motion, заполнение остаётся.
+            '.dshs-ind{position:relative;display:inline-flex;flex-direction:column;align-items:center;gap:2px;flex:0 0 auto;width:26px;padding:0;border:0;background:transparent;line-height:0;outline:none}',
+            '.dshs-ind:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:2px;border-radius:6px}',
+            '.dshs-ind-cloud{position:relative;display:block;width:26px;height:18px;filter:drop-shadow(0 0 2.5px var(--dshs-ind-glow,transparent))}',
+            '.dshs-ind[data-state="synced"]{--dshs-ind-glow:rgba(72,130,255,0.55)}',
+            '.dshs-ind[data-state="pending"]{--dshs-ind-glow:rgba(247,190,76,0.45)}',
+            '.dshs-ind[data-state="exchanging"]{--dshs-ind-glow:rgba(72,130,255,0.6)}',
+            '.dshs-ind[data-state="conflict"]{--dshs-ind-glow:rgba(236,96,100,0.6)}',
+            '.dshs-ind[data-state="offline"]{--dshs-ind-glow:transparent}',
+            '.dshs-ind[data-state="local"]{--dshs-ind-glow:transparent}',
+            '.dshs-ind svg{display:block;overflow:visible}',
+            '.dshs-ind-bar{position:relative;display:block;width:24px;height:3px;border-radius:1.5px;background:rgba(126,134,148,0.28);overflow:hidden}',
+            '.dshs-ind-bar>span{display:block;height:100%;border-radius:1.5px}',
+            '.dshs-ind-bar-fill-synced,.dshs-ind-bar-fill-exchanging{background:linear-gradient(90deg,#6EE2FF,#4882FF)}',
+            '.dshs-ind-bar-fill-pending{background:#F7BE4C}',
+            '.dshs-ind-bar-fill-conflict{background:#EC6064}',
+            '.dshs-ind-bar-fill-offline{background:#7E8694}',
+            '.dshs-ind-dot{position:absolute;top:1px;right:0;width:4px;height:4px;border-radius:50%;background:#F7BE4C;opacity:.95}',
+            // «!» у конфликта остаётся и при reduced-motion: одну красную
+            // заливку без анимации иначе не отличить от synced.
+            '.dshs-ind-bang{position:absolute;right:0;top:-1px;font-size:10px;line-height:12px;font-weight:800;color:#EC6064;text-shadow:0 0 6px rgba(236,96,100,.75)}',
+            '.dshs-ind-run{position:absolute;top:0;left:0;width:3px;height:3px;border-radius:50%;background:#EAF6FF}',
+            '.dshs-ind-tip{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);z-index:5;max-width:240px;padding:5px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,0.35));background:var(--dsw-alias-bg-layer-2,#22242a);color:var(--dsw-alias-label-primary,#f2f2f2);font-size:11px;line-height:15px;font-weight:500;white-space:normal;text-align:left;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease}',
+            '.dshs-ind:hover .dshs-ind-tip,.dshs-ind:focus-visible .dshs-ind-tip{opacity:1;visibility:visible}',
+            '@keyframes dshs-ind-pulse{0%,100%{opacity:.95;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}',
+            '@keyframes dshs-ind-run{0%{transform:translateX(0)}100%{transform:translateX(21px)}}',
+            '@keyframes dshs-ind-breathe{0%,100%{filter:drop-shadow(0 0 2px rgba(236,96,100,.45))}50%{filter:drop-shadow(0 0 6px rgba(236,96,100,.95))}}',
+            '.dshs-ind[data-state="pending"] .dshs-ind-dot{animation:dshs-ind-pulse 1.6s ease-in-out infinite}',
+            '.dshs-ind[data-state="exchanging"] .dshs-ind-run{animation:dshs-ind-run 1.1s linear infinite}',
+            '.dshs-ind[data-state="conflict"] .dshs-ind-cloud{animation:dshs-ind-breathe 2.4s ease-in-out infinite}',
+            '@media(prefers-reduced-motion:reduce){.dshs-ind-dot,.dshs-ind-run,.dshs-ind-cloud{animation:none !important}.dshs-ind-tip{transition:none}}',
+            // Режим по умолчанию для рабочих пространств и подсказка об
+            // облачной копии локальной сессии.
+            '.dshs-ws-defaults{display:flex;flex-direction:column;gap:6px;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.05)}',
+            '.dshs-ws-default-row{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}',
+            '.dshs-ws-default-row>span{flex:1 1 160px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+            '.dshs-cloud-copy{display:flex;flex-direction:column;gap:4px;min-width:0;padding:7px 9px;border-radius:8px;border:1px dashed var(--dsw-alias-border-l3,rgba(128,128,128,0.35));background:rgba(247,190,76,0.08)}',
+            '.dshs-cloud-copy-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}',
             // «Удалённые»: строки карантина и кнопка восстановления.
             '.dshs-deleted-list{display:flex;flex-direction:column;gap:4px;min-width:0;max-height:260px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}',
             '.dshs-deleted-row{display:flex;align-items:center;gap:10px;min-width:0;padding:7px 10px;border-radius:10px;border:1px solid transparent}',
@@ -1172,6 +1214,17 @@ function CollapsedItem({ title, summary, badge, children }) {
             (Array.isArray(last?.childrenMissing) ? last.childrenMissing.length : 0) > 0
               ? h('span', { style: S.note }, `Субагентов нет локально: ${last.childrenMissing.length} — их копии в зеркале защищены от удаления.`)
               : null,
+            // Режим «локальная»: сколько сессий удержал от обмена и сколько
+            // копий в зеркале защищено от prune (history: skippedLocal).
+            (last?.skippedLocal ?? 0) > 0
+              ? h(
+                  'span',
+                  { style: S.note },
+                  `Локальных сессий пропущено: ${last.skippedLocal}`
+                  + ((last?.localMirrorProtected ?? 0) > 0 ? ` (копий в зеркале защищено: ${last.localMirrorProtected})` : '')
+                  + '.',
+                )
+              : null,
             last?.requireConfirmation !== undefined && last.requireConfirmation !== null
               ? h(
                   'div',
@@ -1217,7 +1270,7 @@ function CollapsedItem({ title, summary, badge, children }) {
                     h(
                       'span',
                       { key: `h${index}`, style: entry.ok ? S.meta : S.error },
-                      `${new Date(entry.at).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} — ${entry.ok ? 'ok' : 'ошибка'}: ${entry.message}`,
+                      `${new Date(entry.at).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} — ${entry.ok ? 'ok' : 'ошибка'}: ${entry.message}${(entry.skippedLocal ?? 0) > 0 ? ` · локальных пропущено: ${entry.skippedLocal}` : ''}`,
                     ),
                   ),
                 )
@@ -2332,13 +2385,13 @@ function CollapsedItem({ title, summary, badge, children }) {
         console.error('[dsh-sync] пункт в левой панели недоступен:', error);
       }
 
-      // Индикатор перед названием сессии: точка состояния синхронизации.
+      // Индикатор перед названием сессии: облако/монитор по макету.
       try {
         ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({
           name: 'sidebar.session.row.leading',
           id: 'dsh-sync',
           order: 60,
-        }, SyncDot));
+        }, SessionSyncIndicator));
       } catch (error) {
         console.error('[dsh-sync] индикатор в списке сессий недоступен:', error);
       }
@@ -2539,7 +2592,8 @@ function CollapsedItem({ title, summary, badge, children }) {
       return `в карантине ещё ${days} дн.`;
     }
 
-    // Значки состояния сессии: цвет и подпись. Коды приходят от host-части.
+    // Значки состояния сессии: подпись и цвет точки для старых мест списка.
+    // Коды приходят от host-части (session-modes.mjs → sessionBadge).
     const SESSION_BADGES = {
       synced: { color: 'var(--dsw-alias-state-success-primary, #2f9e44)', title: 'Синхронизирована' },
       pending: { color: '#e8590c', title: 'Есть неотправленные изменения' },
@@ -2548,6 +2602,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       conflict: { color: 'var(--dsw-alias-state-error-primary, #d1242f)', title: 'Конфликт: правки на двух устройствах' },
       offline: { color: '#b58900', title: 'Облако недоступно: последняя синхронизация не удалась' },
       unattached: { color: '#7048e8', title: 'Сессия не привязана к рабочему пространству' },
+      exchanging: { color: '#4882FF', title: 'Идёт обмен с облаком' },
     };
 
     function badgeOf(code) {
@@ -2563,24 +2618,241 @@ function CollapsedItem({ title, summary, badge, children }) {
       return { id: title === '' ? shortId : title.slice(0, 80), shortId, folder };
     }
 
-    function SyncDot({ sessionId }) {
-      const data = useSessionStates();
-      const state = data?.states?.[sessionId];
-      if (state === undefined) return null;
-      const badge = badgeOf(state);
-      return h('span', {
-        title: badge.title,
-        'aria-label': badge.title,
-        style: {
-          display: 'inline-block',
-          width: 7,
-          height: 7,
-          borderRadius: '50%',
-          background: badge.color,
-          marginRight: 4,
-          flex: '0 0 auto',
+    // --- индикатор синхронизации по макету ----------------------------------
+    // Облако 26×18 со свечением и полоса 24×3 под ним; локальная сессия —
+    // монитор 20×16 без полосы. Проценты — заполнение полосы (и заливки облака):
+    // synced 100 % синяя, pending 55 % янтарная + пульс, exchanging 70 % синяя +
+    // бегущая точка, conflict 100 % красная с «дыханием», offline 25 % серая с
+    // перечёркнутым облаком. Цвета — бренд #6EE2FF→#4882FF, amber #F7BE4C,
+    // red #EC6064, gray #7E8694.
+    const INDICATOR_COLORS = {
+      brandFrom: '#6EE2FF',
+      brandTo: '#4882FF',
+      amber: '#F7BE4C',
+      red: '#EC6064',
+      gray: '#7E8694',
+    };
+
+    /**
+     * Состояния индикатора: вид, заполнение полосы, цвет и анимация.
+     * `dot`: 'pulse' — пульсирующая точка у облака, 'run' — бегущая по полосе.
+     * `breathe` — «дыхание» свечения у конфликта, `crossed` — облако перечёркнуто.
+     */
+    const INDICATOR_STATES = {
+      synced: { kind: 'cloud', percent: 100, fill: 'gradient', color: INDICATOR_COLORS.brandTo, glow: true, title: 'Синхронизирована' },
+      pending: { kind: 'cloud', percent: 55, fill: 'amber', color: INDICATOR_COLORS.amber, dot: 'pulse', title: 'Ждёт синхронизации' },
+      exchanging: { kind: 'cloud', percent: 70, fill: 'gradient', color: INDICATOR_COLORS.brandTo, dot: 'run', title: 'Обмен с облаком' },
+      conflict: { kind: 'cloud', percent: 100, fill: 'red', color: INDICATOR_COLORS.red, breathe: true, bang: true, title: 'Конфликт: правки на двух устройствах' },
+      offline: { kind: 'cloud', percent: 25, fill: 'gray', color: INDICATOR_COLORS.gray, crossed: true, title: 'Облако недоступно' },
+      local: { kind: 'monitor', percent: 0, color: INDICATOR_COLORS.gray, title: 'Локальная сессия: не синхронизируется' },
+    };
+
+    /**
+     * Состояние индикатора строки сессии.
+     * Код значка от host-части → визуальное состояние макета. Значки `never` и
+     * `unattached` показываются янтарным «ждёт»: у макета нет отдельных цветов,
+     * а подсказка объясняет причину точнее.
+     */
+    function indicatorStateOf(session, data) {
+      if (session === null || session === undefined) return 'pending';
+      if (session.mode === 'local') return 'local';
+      if (session.badge === 'conflict') return 'conflict';
+      if (data?.syncing === true) return 'exchanging';
+      if (session.badge === 'offline') return 'offline';
+      if (session.badge === 'synced') return 'synced';
+      return 'pending';
+    }
+
+    /** Размер в коротком виде: 12,3 КБ. */
+    function formatBytesShort(bytes) {
+      const value = Number(bytes);
+      if (!Number.isFinite(value) || value <= 0) return '';
+      if (value < 1024) return `${Math.round(value)} Б`;
+      if (value < 1024 * 1024) return `${(value / 1024).toFixed(1).replace('.', ',')} КБ`;
+      return `${(value / (1024 * 1024)).toFixed(1).replace('.', ',')} МБ`;
+    }
+
+    /**
+     * Подсказка индикатора (title/aria): режим, дата последней синхронизации,
+     * размер. Дополнительно — состояние и наличие облачной копии.
+     */
+    function indicatorTip(session, data) {
+      const code = indicatorStateOf(session, data);
+      const spec = INDICATOR_STATES[code] ?? INDICATOR_STATES.pending;
+      const badge = badgeOf(session?.badge);
+      const modeLabel = session?.mode === 'local' ? 'Локальная' : 'Облачная';
+      let stateLabel;
+      if (code === 'local') stateLabel = badge.title;
+      else if (badge.title.startsWith(spec.title)) stateLabel = badge.title;
+      else stateLabel = `${spec.title} (${badge.title})`;
+      const size = formatBytesShort(session?.bytes);
+      let sync = 'ещё не синхронизировалась';
+      if (session?.mode === 'local') sync = 'синхронизация отключена, данные только здесь';
+      else if (session?.syncedAt) sync = `последняя синхронизация ${formatMoment(session.syncedAt)}`;
+      const parts = [`${modeLabel} сессия`, stateLabel, sync];
+      if (size !== '') parts.push(`размер ${size}`);
+      if (session?.mode === 'local' && session?.cloudCopy === true) parts.push('в облаке есть копия');
+      return parts.join(' · ');
+    }
+
+    /** Короткий id для DOM-id подсказки. */
+    function indicatorTipId(session) {
+      const raw = String(session?.id ?? 'session').replace(/[^A-Za-z0-9_-]+/g, '-');
+      return `dshs-ind-tip-${raw}`;
+    }
+
+    /** SVG облака 26×18 с заполнением по проценту и свечением состояния. */
+    function syncCloudShape(session, spec, code) {
+      const percent = Math.max(0, Math.min(100, Number(spec.percent) || 0));
+      const rawId = String(session?.id ?? 'session').replace(/[^A-Za-z0-9_-]+/g, '');
+      const fillId = `dshs-ind-fill-${rawId}`;
+      const clipId = `dshs-ind-clip-${rawId}`;
+      const path = 'M7 18h10a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.1 9.2 4.5 4.5 0 0 0 7 18Z';
+      const fill = spec.fill === 'gradient'
+        ? `url(#${fillId})`
+        : spec.fill === 'amber' ? INDICATOR_COLORS.amber
+          : spec.fill === 'red' ? INDICATOR_COLORS.red
+            : INDICATOR_COLORS.gray;
+      return h(
+        'svg',
+        {
+          width: 26,
+          height: 18,
+          viewBox: '0 0 24 24',
+          preserveAspectRatio: 'none',
+          'aria-hidden': 'true',
+          focusable: 'false',
         },
-      });
+        h(
+          'defs',
+          { key: 'defs' },
+          h(
+            'linearGradient',
+            { id: fillId, x1: '0', y1: '0', x2: '1', y2: '0' },
+            h('stop', { offset: '0', stopColor: INDICATOR_COLORS.brandFrom }),
+            h('stop', { offset: '1', stopColor: INDICATOR_COLORS.brandTo }),
+          ),
+          h('clipPath', { id: clipId }, h('rect', { x: 0, y: 0, width: (percent / 100) * 24, height: 24 })),
+        ),
+        h('path', {
+          key: 'outline',
+          d: path,
+          fill: 'rgba(126,134,148,0.14)',
+          stroke: 'rgba(126,134,148,0.55)',
+          strokeWidth: 1.3,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+        h('path', {
+          key: 'fill',
+          d: path,
+          fill,
+          'clip-path': `url(#${clipId})`,
+          opacity: code === 'offline' ? 0.9 : 1,
+        }),
+        spec.crossed === true
+          ? h('path', {
+              key: 'cross',
+              d: 'M4.5 3.5 19.5 20.5',
+              stroke: INDICATOR_COLORS.gray,
+              strokeWidth: 1.8,
+              strokeLinecap: 'round',
+            })
+          : null,
+        spec.crossed === true
+          ? h('path', {
+              key: 'cross2',
+              d: 'M19.5 3.5 4.5 20.5',
+              stroke: INDICATOR_COLORS.gray,
+              strokeWidth: 1.8,
+              strokeLinecap: 'round',
+            })
+          : null,
+      );
+    }
+
+    /** Монитор 20×16 для локальной сессии: полосы у неё нет. */
+    function syncMonitorShape() {
+      return h(
+        'svg',
+        {
+          width: 20,
+          height: 16,
+          viewBox: '0 0 20 16',
+          'aria-hidden': 'true',
+          focusable: 'false',
+        },
+        h('rect', {
+          key: 'screen',
+          x: 1.5,
+          y: 1,
+          width: 17,
+          height: 11,
+          rx: 2,
+          fill: 'none',
+          stroke: INDICATOR_COLORS.gray,
+          strokeWidth: 1.5,
+        }),
+        h('path', {
+          key: 'stand',
+          d: 'M7 15h6',
+          stroke: INDICATOR_COLORS.gray,
+          strokeWidth: 1.5,
+          strokeLinecap: 'round',
+        }),
+      );
+    }
+
+    /**
+     * Индикатор сессии: облако + полоса (или монитор для локальной).
+     * Доступен с клавиатуры (tabIndex 0), подсказка в title/aria и во всплывающем
+     * блоке при наведении и фокусе. При prefers-reduced-motion анимации
+     * отключаются, но заполнение и «!»/перечёркивание остаются.
+     */
+    function SessionSyncIndicator({ sessionId, session: providedSession }) {
+      const data = useSessionStates();
+      const session = providedSession ?? (data?.sessions ?? []).find((item) => item.id === sessionId);
+      if (session === undefined || session === null) return null;
+      const code = indicatorStateOf(session, data);
+      const spec = INDICATOR_STATES[code] ?? INDICATOR_STATES.pending;
+      const tip = indicatorTip(session, data);
+      const tipId = indicatorTipId(session);
+      return h(
+        'span',
+        {
+          className: 'dshs-ind',
+          'data-state': code,
+          role: 'img',
+          tabIndex: 0,
+          title: tip,
+          'aria-label': tip,
+          'aria-describedby': tipId,
+        },
+        h(
+          'span',
+          { key: 'cloud', className: 'dshs-ind-cloud', 'aria-hidden': 'true' },
+          spec.kind === 'monitor' ? syncMonitorShape() : syncCloudShape(session, spec, code),
+          spec.dot === 'pulse' ? h('span', { key: 'dot', className: 'dshs-ind-dot' }) : null,
+          spec.bang === true ? h('span', { key: 'bang', className: 'dshs-ind-bang', 'aria-hidden': 'true' }, '!') : null,
+        ),
+        spec.kind === 'monitor'
+          ? null
+          : h(
+              'span',
+              { key: 'bar', className: 'dshs-ind-bar', 'aria-hidden': 'true' },
+              h('span', {
+                className: `dshs-ind-bar-fill dshs-ind-bar-fill-${code}`,
+                style: { width: `${spec.percent}%` },
+              }),
+              spec.dot === 'run' ? h('span', { key: 'run', className: 'dshs-ind-run' }) : null,
+            ),
+        h('span', { key: 'tip', id: tipId, className: 'dshs-ind-tip', role: 'tooltip' }, tip),
+      );
+    }
+
+    /** Прежний слот индикатора зовёт SyncDot — оставляем имя совместимым. */
+    function SyncDot(props) {
+      return h(SessionSyncIndicator, { sessionId: props?.sessionId });
     }
 
     function CloudModeIcon({ size = 14 }) {
@@ -2640,6 +2912,8 @@ function CollapsedItem({ title, summary, badge, children }) {
       const session = (data?.sessions ?? []).find((item) => item.id === sessionId);
       const isLocal = session?.mode === 'local';
       const [busy, setBusy] = React.useState(false);
+      const [copyConfirm, setCopyConfirm] = React.useState(false);
+      const [copyNote, setCopyNote] = React.useState('');
 
       const toggle = async () => {
         setBusy(true);
@@ -2649,6 +2923,25 @@ function CollapsedItem({ title, summary, badge, children }) {
           setMenuOpen(false);
         } catch (error) {
           console.error('[dsh-sync] режим сессии не переключён:', error);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      // Удаление только облачной копии локальной сессии: подтверждение —
+      // второй клик в этом же меню, локальный лог не трогается.
+      const removeCloudCopy = async () => {
+        setBusy(true);
+        setCopyNote('');
+        try {
+          const result = await post(SESSION_CLOUD_COPY_PATH, { id: sessionId, confirm: true });
+          setCopyNote(result?.ok === true
+            ? 'облачная копия удалена, локальная сессия осталась'
+            : String(result?.message ?? 'не удалось удалить копию'));
+          await refreshSessionStates(true);
+          setCopyConfirm(false);
+        } catch (error) {
+          setCopyNote(`не удалось удалить копию: ${explain(error)}`);
         } finally {
           setBusy(false);
         }
@@ -2671,6 +2964,36 @@ function CollapsedItem({ title, summary, badge, children }) {
             h('span', { key: 'label' }, isLocal ? 'Сделать облачной' : 'Сделать локальной'),
           ],
         ),
+        isLocal && session?.cloudCopy === true
+          ? h('div', { key: 'cloud-copy', style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } }, [
+              h('div', { key: 'sep2', className: 'dshs-menu-separator', role: 'separator' }),
+              copyConfirm
+                ? h('button', {
+                    key: 'confirm',
+                    type: 'button',
+                    role: 'menuitem',
+                    className: 'dshs-menu-item',
+                    disabled: busy,
+                    onClick: () => void removeCloudCopy(),
+                  }, [
+                    h('span', { key: 'icon', style: { display: 'inline-flex', color: 'inherit' } }, h(CloudModeIcon)),
+                    h('span', { key: 'label' }, 'Да, удалить копию из облака'),
+                  ])
+                : h('button', {
+                    key: 'ask',
+                    type: 'button',
+                    role: 'menuitem',
+                    className: 'dshs-menu-item',
+                    disabled: busy,
+                    onClick: () => setCopyConfirm(true),
+                  }, [
+                    h('span', { key: 'icon', style: { display: 'inline-flex', color: 'inherit' } }, h(CloudModeIcon)),
+                    h('span', { key: 'label' }, 'Удалить копию из облака'),
+                  ]),
+              h('span', { key: 'hint', style: { ...S.meta, padding: '0 10px 4px' } }, 'в облаке есть копия, локальная сессия останется'),
+              copyNote !== '' ? h('span', { key: 'note', style: { ...S.meta, padding: '0 10px 4px' } }, copyNote) : null,
+            ])
+          : null,
       ]);
     }
 
@@ -2678,9 +3001,12 @@ function CollapsedItem({ title, summary, badge, children }) {
     function SessionModesSection() {
       const data = useSessionStates();
       const sessions = data?.sessions ?? [];
+      const workspaces = Array.isArray(data?.workspaces) ? data.workspaces : [];
       const [filter, setFilter] = React.useState('all');
       const [selected, setSelected] = React.useState(() => new Set());
       const [busy, setBusy] = React.useState('');
+      const [workspaceBusy, setWorkspaceBusy] = React.useState('');
+      const [cloudConfirm, setCloudConfirm] = React.useState('');
       const [note, setNote] = React.useState('');
 
       const visible = sessions.filter((session) => {
@@ -2722,6 +3048,44 @@ function CollapsedItem({ title, summary, badge, children }) {
           setNote(`Режим изменён: ${result?.changed ?? ids.length}. ${mode === 'local' ? 'Сессии останутся только на этом устройстве.' : 'Сессии снова синхронизируются.'}`);
         } catch (error) {
           setNote(`Не удалось переключить режим: ${explain(error)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      // Умолчание режима на уровне рабочего пространства: новые сессии этого
+      // пространства получат его, уже существующие остаются как есть.
+      const setWorkspaceDefault = async (workspaceId, mode) => {
+        setWorkspaceBusy(`ws:${workspaceId}`);
+        setNote('');
+        try {
+          const result = await post(SESSION_MODE_PATH, { workspaceId, mode });
+          await refreshSessionStates(true);
+          const pinned = Number(result?.pinned ?? 0);
+          setNote(`Умолчание пространства: ${mode === 'local' ? 'локальная' : 'облачная'} — для новых сессий${pinned > 0 ? `; у существующих закреплён прежний режим: ${pinned}` : ''}.`);
+        } catch (error) {
+          setNote(`Не удалось сохранить умолчание: ${explain(error)}`);
+        } finally {
+          setWorkspaceBusy('');
+        }
+      };
+
+      // «Удалить копию из облака»: только зеркальная копия локальной сессии,
+      // локальный лог остаётся. Подтверждение — второй клик (сначала спросить).
+      const removeCloudCopy = async (sessionId) => {
+        setBusy(`copy:${sessionId}`);
+        setNote('');
+        try {
+          const result = await post(SESSION_CLOUD_COPY_PATH, { id: sessionId, confirm: true });
+          if (result?.ok === true) {
+            setNote(`Облачная копия удалена (карантин 30 дней), локальная сессия осталась.${result.warning ? ` ${result.warning}` : ''}`);
+            setCloudConfirm('');
+          } else {
+            setNote(result?.message ?? 'Не удалось удалить облачную копию.');
+          }
+          await refreshSessionStates(true);
+        } catch (error) {
+          setNote(`Не удалось удалить копию: ${explain(error)}`);
         } finally {
           setBusy('');
         }
@@ -2821,6 +3185,37 @@ function CollapsedItem({ title, summary, badge, children }) {
                 `Привязать непривязанные (${data?.unattached ?? 0})`,
               ),
         ),
+        workspaces.length > 0
+          ? h(
+              'div',
+              { className: 'dshs-ws-defaults' },
+              h('span', { style: S.label }, 'Режим по умолчанию для рабочих пространств'),
+              h('span', { style: S.hint }, 'Действует для новых сессий; уже переключённые сессии не меняются.'),
+              workspaces.map((workspace) =>
+                h(
+                  'div',
+                  { key: workspace.id, className: 'dshs-ws-default-row' },
+                  h(
+                    'span',
+                    { style: S.meta, title: workspace.path ?? '' },
+                    `${workspace.title || workspace.path || workspace.id} · сессий: ${workspace.sessions ?? 0}`,
+                  ),
+                  h(
+                    'select',
+                    {
+                      value: workspace.defaultMode === 'local' ? 'local' : 'cloud',
+                      disabled: busy !== '' || workspaceBusy !== '',
+                      'aria-label': `Режим по умолчанию для ${workspace.title || workspace.path || workspace.id}`,
+                      onChange: (event) => void setWorkspaceDefault(workspace.id, event.target.value),
+                      style: { ...S.input, width: 'auto', height: 32, flex: '0 0 auto' },
+                    },
+                    h('option', { value: 'cloud' }, 'Облачная'),
+                    h('option', { value: 'local' }, 'Локальная'),
+                  ),
+                ),
+              ),
+            )
+          : null,
         note !== '' ? h('span', { style: S.note }, note) : null,
         visible.length === 0
           ? h('span', { style: S.hint }, sessions.length === 0 ? 'Сессии появятся здесь после первого запуска синхронизации или настройки проекта.' : 'Под фильтр ничего не попало.')
@@ -2840,7 +3235,8 @@ function CollapsedItem({ title, summary, badge, children }) {
                     onChange: () => toggleSelected(session.id),
                     style: { margin: 0, flex: '0 0 auto', accentColor: 'var(--dsw-alias-brand-primary, #4a7dcc)' },
                   }),
-                  h('span', { style: { ...S.dot, background: badge.color } }),
+                  // Индикатор по макету: облако/монитор, полоса и подсказка.
+                  h(SessionSyncIndicator, { key: 'ind', sessionId: session.id, session }),
                   h(
                     'span',
                     { style: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0, flex: '1 1 auto' } },
@@ -2850,6 +3246,69 @@ function CollapsedItem({ title, summary, badge, children }) {
                       { style: { ...S.meta, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                       `${badge.title}${label.folder === '' ? '' : ` · ${label.folder}`}`,
                     ),
+                    // Локальная сессия, у которой в облаке осталась копия:
+                    // подсказка и отдельное действие с подтверждением.
+                    isLocal && session.cloudCopy === true
+                      ? h(
+                          'div',
+                          { key: 'cloud-copy', className: 'dshs-cloud-copy' },
+                          h(
+                            'span',
+                            { style: S.meta },
+                            `В облаке есть копия${session.cloudCopyBytes ? ` (${formatBytesShort(session.cloudCopyBytes)})` : ''}, локально отключена — сессия остаётся здесь.`,
+                          ),
+                          cloudConfirm === session.id
+                            ? h(
+                                'div',
+                                { className: 'dshs-cloud-copy-actions' },
+                                h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    style: S.buttonSmall,
+                                    disabled: busy !== '',
+                                    onClick: (event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      void removeCloudCopy(session.id);
+                                    },
+                                  },
+                                  'Да, удалить копию',
+                                ),
+                                h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    style: S.buttonSmall,
+                                    onClick: (event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      setCloudConfirm('');
+                                    },
+                                  },
+                                  'Отмена',
+                                ),
+                              )
+                            : h(
+                                'div',
+                                { className: 'dshs-cloud-copy-actions' },
+                                h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    style: S.buttonSmall,
+                                    disabled: busy !== '',
+                                    onClick: (event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      setCloudConfirm(session.id);
+                                    },
+                                  },
+                                  'Удалить копию из облака',
+                                ),
+                              ),
+                        )
+                      : null,
                   ),
                   h(
                     'span',
@@ -4420,6 +4879,13 @@ function CollapsedItem({ title, summary, badge, children }) {
         for (const listener of sessionStates.listeners) listener();
       },
       readSessionStates: () => sessionStates.data,
+      // Состояние host-части для тестов панели: в живом интерфейсе его
+      // приносит опрос STATE_PATH (раз в 30 секунд).
+      setHostState: (value) => {
+        snapshot = { ...snapshot, loading: false, data: value ?? null, error: '' };
+        for (const listener of listeners) listener();
+      },
+      readHostState: () => snapshot.data,
       setTombstones: (value) => {
         tombstonesState.data = value ?? null;
         tombstonesState.at = Date.now();
@@ -4429,6 +4895,13 @@ function CollapsedItem({ title, summary, badge, children }) {
       sessionLabel,
       badgeOf,
       SESSION_BADGES,
+      INDICATOR_STATES,
+      INDICATOR_COLORS,
+      indicatorStateOf,
+      indicatorTip,
+      formatBytesShort,
+      SessionSyncIndicator,
+      SyncDot,
       DELETED_REASON_LABELS,
       DELETED_BY_LABELS,
     };

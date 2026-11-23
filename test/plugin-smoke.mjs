@@ -5,6 +5,7 @@
  * Запуск: node test/plugin-smoke.mjs
  */
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
@@ -26,7 +27,7 @@ assert.equal(name, 'dsh-sync')
 assert.deepEqual(inject, ['connection', 'tools', 'sessionPersistence', 'workspaceRegistry'])
 apply(ctx)
 
-assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/profile/apply', '/api/dsh-sync/restore', '/api/dsh-sync/run', '/api/dsh-sync/secondary-init', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/tombstones', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
+assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/profile/apply', '/api/dsh-sync/restore', '/api/dsh-sync/run', '/api/dsh-sync/secondary-init', '/api/dsh-sync/session-cloud-copy', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/tombstones', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
 assert.deepEqual([...tools.keys()].sort(), ['sync_run', 'sync_status'])
 
 const call = async (path, payload) => {
@@ -193,6 +194,64 @@ const sessionsAfterMode = await call('/api/dsh-sync/sessions', {})
 assert.equal(sessionsAfterMode.body.ok, true)
 assert.equal(Array.isArray(sessionsAfterMode.body.sessions), true)
 assert.equal(typeof sessionsAfterMode.body.modes.local, 'number')
+assert.equal(Array.isArray(sessionsAfterMode.body.workspaces), true, 'панель получает список рабочих пространств')
+
+// 14b. Умолчание режима на уровне рабочего пространства (для новых сессий).
+const wsLocal = await call('/api/dsh-sync/session-mode', { workspaceId: 'ws-smoke', mode: 'local' })
+assert.equal(wsLocal.body.ok, true)
+assert.equal(wsLocal.body.scope, 'workspace')
+assert.equal(wsLocal.body.changed, 1)
+assert.equal(wsLocal.body.mode, 'local')
+const modesAfterWs = JSON.parse(await readFile(join(home, 'dsh-sync', 'session-modes.json'), 'utf8'))
+assert.equal(modesAfterWs.version, 2, 'файл режимов в версии 2')
+assert.equal(modesAfterWs.workspaces['ws-smoke'], 'local')
+const wsCloud = await call('/api/dsh-sync/session-mode', { workspaceId: 'ws-smoke', mode: 'cloud' })
+assert.equal(wsCloud.body.ok, true)
+assert.equal(wsCloud.body.changed, 1)
+const modesAfterWsCloud = JSON.parse(await readFile(join(home, 'dsh-sync', 'session-modes.json'), 'utf8'))
+assert.equal(modesAfterWsCloud.workspaces['ws-smoke'], undefined, 'облако — встроенное умолчание')
+
+// 14c. «Удалить копию из облака»: только у локальной сессии и с подтверждением.
+const smokeMirrorCopy = join(home, 'mirror-cloud-copy')
+const mirrorCopySession = 'session-smoke-local'
+await mkdir(join(smokeMirrorCopy, 'sessions', 'harness-test', mirrorCopySession), { recursive: true })
+await writeFile(join(smokeMirrorCopy, 'sessions', 'harness-test', mirrorCopySession, 'session.v4.jsonl.zstd'), 'copy')
+await call('/api/dsh-sync/config', {
+  backend: 'folder',
+  repoDir: smokeMirrorCopy,
+  projectPath,
+  projectId: 'harness-test',
+})
+await call('/api/dsh-sync/session-mode', { id: mirrorCopySession, mode: 'local' })
+const noConfirm = await call('/api/dsh-sync/session-cloud-copy', { id: mirrorCopySession })
+assert.equal(noConfirm.status, 409)
+assert.equal(noConfirm.body.code, 'confirm-required', 'без подтверждения действие не выполняется')
+const notLocalCopy = await call('/api/dsh-sync/session-cloud-copy', { id: 'session-smoke-2', confirm: true })
+assert.equal(notLocalCopy.status, 409)
+assert.equal(notLocalCopy.body.code, 'not-local')
+const copyDeleted = await call('/api/dsh-sync/session-cloud-copy', { id: mirrorCopySession, confirm: true })
+assert.equal(copyDeleted.status, 200)
+assert.equal(copyDeleted.body.ok, true)
+assert.deepEqual(copyDeleted.body.reasons, ['manual'], 'журнал: причина manual')
+assert.deepEqual(copyDeleted.body.by, ['owner'], 'журнал: автор owner')
+assert.equal(copyDeleted.body.quarantined, true)
+const copyTombstones = JSON.parse(await readFile(join(smokeMirrorCopy, 'tombstones.json'), 'utf8'))
+assert.equal(copyTombstones.sessions[mirrorCopySession].reason, 'manual')
+assert.equal(copyTombstones.sessions[mirrorCopySession].by, 'owner')
+assert.equal(existsSync(join(smokeMirrorCopy, 'sessions', 'harness-test', '_deleted', mirrorCopySession)), true, 'копия в карантине')
+assert.equal(existsSync(join(smokeMirrorCopy, 'sessions', 'harness-test', mirrorCopySession)), false, 'активной копии нет')
+const modesAfterCopy = JSON.parse(await readFile(join(home, 'dsh-sync', 'session-modes.json'), 'utf8'))
+assert.equal(modesAfterCopy.sessions[mirrorCopySession], 'local', 'локальный режим сохранён')
+const lastRunAfterCopy = JSON.parse(await readFile(join(home, 'dsh-sync', 'last-run.json'), 'utf8'))
+assert.equal(lastRunAfterCopy.action, 'cloud-copy-delete')
+assert.equal(lastRunAfterCopy.skippedLocal, undefined)
+// Вернуть зеркало в состояние, на которое рассчитаны следующие проверки.
+await call('/api/dsh-sync/config', {
+  backend: 'folder',
+  repoDir: join(home, 'dsh-sync', 'repo'),
+  projectPath,
+  projectId: 'harness-test',
+})
 
 // 15. профильный слой: статус и действия (профиль desktop создан выше в тесте 9)
 const profileStatusBody = await call('/api/dsh-sync/profile', { action: 'status' })

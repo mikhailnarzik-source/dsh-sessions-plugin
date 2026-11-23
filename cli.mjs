@@ -26,6 +26,8 @@ import { readMeta, writeMeta } from './lib/mirror-meta.mjs'
 import { createRemote } from './lib/remote.mjs'
 import { hasChanges } from './lib/git.mjs'
 import { listTombstones, restoreTombstones } from './lib/tombstones.mjs'
+import { applyWorkspaceDefaults } from './lib/session-modes.mjs'
+import { LAST_RUN_FILE } from './lib/history.mjs'
 
 const VALUE_FLAGS = new Set(['home', 'remote', 'repo', 'branch', 'path', 'title', 'project', 'backend', 'months', 'yandex-token', 'yandex-path'])
 
@@ -294,10 +296,29 @@ async function cmdStatus(opts) {
   const dshHome = home(opts)
   const config = await loadConfig(dshHome)
   const local = await listLocalSessions(dshHome)
+  // Новые сессии получают умолчание рабочего пространства и в CLI.
+  const modes = (await applyWorkspaceDefaults(dshHome)).modes
+  const localModes = Object.values(modes.sessions).filter(mode => mode === 'local').length
   console.log(`устройство: ${config.deviceId}`)
   console.log(`бэкенд:     ${config.backend ?? 'git'}`)
   console.log(`зеркало:    ${config.repoDir}${existsSync(config.repoDir) ? '' : ' (ещё не создано)'}`)
   console.log(`remote:     ${config.remote || '(не задан)'}`)
+  console.log(`режимы:     локальных ${localModes}, явных записей ${Object.keys(modes.sessions).length}`)
+  const workspaceDefaults = Object.entries(modes.workspaces ?? {})
+  if (workspaceDefaults.length > 0) {
+    console.log(`умолчания пространств: ${workspaceDefaults.map(([id, mode]) => `${id}=${mode}`).join(', ')}`)
+  }
+  try {
+    const lastRun = JSON.parse(await readFile(join(dshHome, 'dsh-sync', LAST_RUN_FILE), 'utf8'))
+    if (lastRun?.at) {
+      console.log(`последний запуск: ${lastRun.at} — ${lastRun.ok ? 'успешно' : 'ошибка'}: ${lastRun.message ?? ''}`)
+    }
+    if ((lastRun?.skippedLocal ?? 0) > 0) {
+      console.log(`локальных сессий пропущено: ${lastRun.skippedLocal}${(lastRun.localMirrorProtected ?? 0) > 0 ? ` (копий в зеркале защищено: ${lastRun.localMirrorProtected})` : ''}`)
+    }
+  } catch {
+    // истории ещё нет — не ошибка
+  }
   console.log('')
   for (const [id, entry] of Object.entries(config.projects)) {
     const mine = sessionsOfProject(local, entry.path)

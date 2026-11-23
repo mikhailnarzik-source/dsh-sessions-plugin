@@ -597,3 +597,343 @@ test('секция «Удалённые»: список со сроком кар
 
   exported.__test.setTombstones(null)
 })
+
+// ---- индикаторы по макету, умолчания пространств, облачная копия ----------
+
+test('индикатор: маппинг состояний полосы и цвета', () => {
+  const testApi = exported.__test
+  assert.ok(testApi.indicatorStateOf, 'маппинг состояний доступен тестам')
+  const states = testApi.INDICATOR_STATES
+  assert.ok(states, 'описание состояний индикатора есть')
+
+  // Точные проценты и цвета из макета.
+  assert.equal(states.synced.percent, 100)
+  assert.equal(states.synced.fill, 'gradient')
+  assert.equal(states.pending.percent, 55)
+  assert.equal(states.pending.fill, 'amber')
+  assert.equal(states.pending.dot, 'pulse')
+  assert.equal(states.exchanging.percent, 70)
+  assert.equal(states.exchanging.fill, 'gradient')
+  assert.equal(states.exchanging.dot, 'run')
+  assert.equal(states.conflict.percent, 100)
+  assert.equal(states.conflict.fill, 'red')
+  assert.equal(states.conflict.breathe, true)
+  assert.equal(states.conflict.bang, true, '«!» у конфликта остаётся без анимации')
+  assert.equal(states.offline.percent, 25)
+  assert.equal(states.offline.fill, 'gray')
+  assert.equal(states.offline.crossed, true)
+  assert.equal(states.local.kind, 'monitor')
+  assert.equal(states.local.percent, 0)
+
+  // Цвета бренда/янтарный/красный/серый — как в макете.
+  assert.equal(testApi.INDICATOR_COLORS.brandFrom, '#6EE2FF')
+  assert.equal(testApi.INDICATOR_COLORS.brandTo, '#4882FF')
+  assert.equal(testApi.INDICATOR_COLORS.amber, '#F7BE4C')
+  assert.equal(testApi.INDICATOR_COLORS.red, '#EC6064')
+  assert.equal(testApi.INDICATOR_COLORS.gray, '#7E8694')
+
+  // Код значка от host-части → визуальное состояние.
+  assert.equal(testApi.indicatorStateOf({ mode: 'cloud', badge: 'synced' }, {}), 'synced')
+  assert.equal(testApi.indicatorStateOf({ mode: 'cloud', badge: 'pending' }, {}), 'pending')
+  assert.equal(testApi.indicatorStateOf({ mode: 'cloud', badge: 'never' }, {}), 'pending')
+  assert.equal(testApi.indicatorStateOf({ mode: 'cloud', badge: 'unattached' }, {}), 'pending')
+  assert.equal(testApi.indicatorStateOf({ mode: 'cloud', badge: 'conflict' }, {}), 'conflict')
+  assert.equal(testApi.indicatorStateOf({ mode: 'cloud', badge: 'offline' }, {}), 'offline')
+  assert.equal(testApi.indicatorStateOf({ mode: 'local', badge: 'local' }, {}), 'local')
+  // Идёт обмен — синее облако с бегущей точкой, даже если прошлый значок «synced».
+  assert.equal(testApi.indicatorStateOf({ mode: 'cloud', badge: 'synced' }, { syncing: true }), 'exchanging')
+  // Конфликт важнее идущего обмена.
+  assert.equal(testApi.indicatorStateOf({ mode: 'cloud', badge: 'conflict' }, { syncing: true }), 'conflict')
+})
+
+test('индикатор: подсказка — режим, дата последней синхронизации, размер', () => {
+  const testApi = exported.__test
+  const tip = testApi.indicatorTip({
+    id: 'session-1',
+    mode: 'cloud',
+    badge: 'synced',
+    bytes: 2048,
+    syncedAt: '2026-11-23T20:41:00.000Z',
+  }, {})
+  assert.match(tip, /Облачная сессия/)
+  assert.match(tip, /Синхронизирована/)
+  assert.match(tip, /последняя синхронизация 2026-11-23 20:41/)
+  assert.match(tip, /размер 2,0 КБ/)
+
+  const localTip = testApi.indicatorTip({
+    id: 'session-2',
+    mode: 'local',
+    badge: 'local',
+    bytes: 512,
+    cloudCopy: true,
+  }, {})
+  assert.match(localTip, /Локальная сессия: не синхронизируется/)
+  assert.match(localTip, /синхронизация отключена/)
+  assert.match(localTip, /размер 512 Б/)
+  assert.match(localTip, /в облаке есть копия/)
+
+  // Неизвестное состояние — «ждёт синхронизации», без выдуманных дат.
+  const unknown = testApi.indicatorTip({ id: 'session-3', mode: 'cloud', badge: 'offline' }, {})
+  assert.match(unknown, /Облако недоступно/)
+  assert.match(unknown, /ещё не синхронизировалась/)
+  assert.equal(testApi.formatBytesShort(1024), '1,0 КБ')
+  assert.equal(testApi.formatBytesShort(0), '')
+})
+
+test('индикатор в списке: облако 26×18 + полоса 24×3, монитор 20×16, фокус и подсказка', () => {
+  const testApi = exported.__test
+  testApi.setSessionStates({
+    ok: true,
+    syncing: false,
+    states: {},
+    sessions: [
+      { id: 'session-ind-synced', title: 'Синхронная', projectId: 'harness', path: 'C:\\work\\project', mode: 'cloud', state: 'green', badge: 'synced', attached: true, bytes: 4096, syncedAt: '2026-11-23T20:41:00.000Z' },
+      { id: 'session-ind-pending', title: 'Ждёт', projectId: 'harness', path: 'C:\\work\\project', mode: 'cloud', state: 'orange', badge: 'pending', attached: true, bytes: 1000, syncedAt: '2026-11-20T10:00:00.000Z' },
+      { id: 'session-ind-conflict', title: 'Конфликт', projectId: 'harness', path: 'C:\\work\\project', mode: 'cloud', state: 'green', badge: 'conflict', attached: true, bytes: 1000, syncedAt: null },
+      { id: 'session-ind-offline', title: 'Офлайн', projectId: 'harness', path: 'C:\\work\\project', mode: 'cloud', state: 'orange', badge: 'offline', attached: true, bytes: 1000, syncedAt: null },
+      { id: 'session-ind-local', title: 'Локальная', projectId: 'harness', path: 'C:\\work\\project', mode: 'local', state: 'green', badge: 'local', attached: true, bytes: 2048, syncedAt: null },
+    ],
+    modes: { local: 1, cloud: 4 },
+    unattached: 0,
+    workspaces: [],
+    cloud: { offline: false, ok: true, at: null, message: '', skippedLocal: 0 },
+    attachAvailable: true,
+  })
+
+  const treeWithIndicators = resolveNode(main.component({}))
+  const indicatorNodes = walk(treeWithIndicators).filter((node) => String(node.props?.className ?? '') === 'dshs-ind')
+  assert.equal(indicatorNodes.length, 5, 'у каждой строки свой индикатор')
+
+  const byState = new Map(indicatorNodes.map((node) => [node.props['data-state'], node]))
+  assert.deepEqual([...byState.keys()].sort(), ['conflict', 'local', 'offline', 'pending', 'synced'])
+
+  // Облако — ровно 26×18, полоса — 24×3 (размеры заданы в CSS).
+  const clouds = indicatorNodes
+    .filter((node) => node.props['data-state'] !== 'local')
+    .flatMap((node) => walk(node).filter((child) => child.type === 'svg'))
+  assert.equal(clouds.length, 4, 'у четырёх облачных состояний есть облако')
+  for (const cloud of clouds) {
+    assert.equal(cloud.props.width, 26, 'облако 26 px')
+    assert.equal(cloud.props.height, 18, 'облако 18 px')
+    assert.equal(cloud.props.viewBox, '0 0 24 24')
+  }
+  const monitor = walk(byState.get('local')).find((node) => node.type === 'svg')
+  assert.equal(monitor.props.width, 20, 'монитор 20 px')
+  assert.equal(monitor.props.height, 16, 'монитор 16 px')
+  assert.equal(walk(byState.get('local')).some((node) => String(node.props?.className ?? '') === 'dshs-ind-bar'), false, 'у локальной сессии полосы нет')
+  assert.equal(walk(byState.get('synced')).some((node) => String(node.props?.className ?? '') === 'dshs-ind-bar'), true, 'у облачной есть полоса')
+
+  // Заполнение полосы — проценты макета.
+  const barWidth = (state) => {
+    const bar = walk(byState.get(state)).find((node) => String(node.props?.className ?? '') === `dshs-ind-bar-fill dshs-ind-bar-fill-${state}`)
+    assert.ok(bar, `заливка полосы ${state} нарисована`)
+    return bar.props.style.width
+  }
+  assert.equal(barWidth('synced'), '100%')
+  assert.equal(barWidth('pending'), '55%')
+  assert.equal(barWidth('conflict'), '100%')
+  assert.equal(barWidth('offline'), '25%')
+
+  // Пульс, бегущая точка и «!» — отдельные элементы.
+  assert.equal(walk(byState.get('pending')).some((node) => String(node.props?.className ?? '') === 'dshs-ind-dot'), true, 'пульсирующая точка pending')
+  assert.equal(walk(byState.get('conflict')).some((node) => textOf(node) === '!'), true, '«!» у конфликта')
+  const offlinePaths = walk(byState.get('offline')).filter((node) => node.type === 'path' && node.props.stroke === '#7E8694' && node.props.strokeWidth === 1.8)
+  assert.equal(offlinePaths.length, 2, 'облако offline перечёркнуто')
+
+  // Клавиатурный фокус и подсказка (title + aria) у каждого индикатора.
+  for (const node of indicatorNodes) {
+    assert.equal(node.props.tabIndex, 0, 'индикатор доступен с клавиатуры')
+    assert.equal(node.props.role, 'img')
+    assert.equal(typeof node.props.title, 'string')
+    assert.ok(node.props.title.length > 10, 'подсказка содержательна')
+    assert.equal(node.props['aria-label'], node.props.title, 'aria совпадает с title')
+    assert.match(node.props.title, /Облачная сессия|Локальная сессия/)
+    const tipNode = walk(node).find((child) => String(child.props?.className ?? '') === 'dshs-ind-tip')
+    assert.ok(tipNode, 'всплывающая подсказка отрисована')
+    assert.equal(tipNode.props.id, node.props['aria-describedby'])
+  }
+  const syncedTip = walk(byState.get('synced')).find((node) => String(node.props?.className ?? '') === 'dshs-ind-tip')
+  assert.match(textOf(syncedTip), /последняя синхронизация 2026-11-23 20:41/)
+  assert.match(textOf(syncedTip), /размер 4,0 КБ/)
+
+  // Обмен с облаком: 70 % + бегущая точка.
+  testApi.setSessionStates({
+    ok: true,
+    syncing: true,
+    states: {},
+    sessions: [
+      { id: 'session-ind-exchanging', title: 'Обмен', projectId: 'harness', path: 'C:\\work\\project', mode: 'cloud', state: 'green', badge: 'synced', attached: true, bytes: 1000, syncedAt: null },
+    ],
+    modes: { local: 0, cloud: 1 },
+    unattached: 0,
+    workspaces: [],
+    cloud: { offline: false, ok: true },
+    attachAvailable: true,
+  })
+  const exchangingTree = resolveNode(main.component({}))
+  const exchanging = walk(exchangingTree).find((node) => String(node.props?.className ?? '') === 'dshs-ind')
+  assert.equal(exchanging.props['data-state'], 'exchanging')
+  const exchangingFill = walk(exchanging).find((node) => String(node.props?.className ?? '').includes('dshs-ind-bar-fill-exchanging'))
+  assert.equal(exchangingFill.props.style.width, '70%')
+  assert.equal(walk(exchanging).some((node) => String(node.props?.className ?? '') === 'dshs-ind-run'), true, 'бегущая точка exchanging')
+
+  // Слот левой панели отдаёт тот же индикатор, а не прежнюю точку.
+  const indicatorSlot = registrations.find((entry) => entry.options.name === 'sidebar.session.row.leading')
+  assert.ok(indicatorSlot, 'слот индикатора в списке сессий зарегистрирован')
+  testApi.setSessionStates({
+    ok: true,
+    syncing: false,
+    states: {},
+    sessions: [
+      { id: 'session-slot-1', mode: 'cloud', badge: 'synced', state: 'green', attached: true, bytes: 10 },
+    ],
+    modes: { local: 0, cloud: 1 },
+    unattached: 0,
+    workspaces: [],
+    cloud: { offline: false, ok: true },
+    attachAvailable: true,
+  })
+  const slotNode = resolveNode(indicatorSlot.component({ sessionId: 'session-slot-1' }))
+  assert.equal(slotNode.type, 'span')
+  assert.equal(slotNode.props.className, 'dshs-ind')
+  assert.equal(slotNode.props['data-state'], 'synced')
+
+  testApi.setSessionStates(null)
+})
+
+test('reduced-motion: анимации выключены, заполнение и «!» остаются', () => {
+  const pageCss = styles.find((text) => typeof text === 'string' && text.includes('.dshs-ind'))
+  assert.ok(pageCss, 'стили индикатора внедрены')
+  assert.match(pageCss, /@keyframes dshs-ind-pulse/)
+  assert.match(pageCss, /@keyframes dshs-ind-run/)
+  assert.match(pageCss, /@keyframes dshs-ind-breathe/)
+  assert.match(pageCss, /@media\(prefers-reduced-motion:reduce\)\{/, 'есть медиа reduced-motion')
+  assert.match(pageCss, /@media\(prefers-reduced-motion:reduce\)\{[^}]*animation:none !important/, 'при reduced-motion анимации выключены')
+  // Размеры и заполнение — не в анимации: полоса и проценты остаются.
+  assert.match(pageCss, /\.dshs-ind-bar\{[^}]*width:24px/, 'полоса 24 px')
+  assert.match(pageCss, /\.dshs-ind-bar\{[^}]*height:3px/, 'полоса 3 px')
+  assert.match(pageCss, /\.dshs-ind-bar\{[^}]*border-radius:1\.5px/, 'радиус полосы 1.5')
+  assert.match(pageCss, /\.dshs-ind-bar-fill-synced[^{]*\{[^}]*linear-gradient\(90deg,#6EE2FF,#4882FF\)/, 'синяя заливка бренда')
+  assert.match(pageCss, /\.dshs-ind-bar-fill-pending\{background:#F7BE4C\}/)
+  assert.match(pageCss, /\.dshs-ind-bar-fill-conflict\{background:#EC6064\}/)
+  assert.match(pageCss, /\.dshs-ind-bar-fill-offline\{background:#7E8694\}/)
+  assert.match(pageCss, /\.dshs-ind-bang\{[^}]*color:#EC6064/, '«!» конфликта виден и без анимации')
+  assert.match(pageCss, /\.dshs-ind:focus-visible\{outline:/, 'у индикатора есть focus-visible')
+  assert.match(pageCss, /\.dshs-ind:hover \.dshs-ind-tip,\.dshs-ind:focus-visible \.dshs-ind-tip\{opacity:1/, 'подсказка видна по hover/focus')
+})
+
+test('умолчание режима рабочих пространств: селектор в карточке режимов', () => {
+  exported.__test.setSessionStates({
+    ok: true,
+    syncing: false,
+    states: {},
+    sessions: [],
+    modes: { local: 0, cloud: 0 },
+    unattached: 0,
+    workspaces: [
+      { id: 'ws-alpha', title: 'Alpha', path: 'C:\\work\\alpha', sessions: 3, defaultMode: 'local' },
+      { id: 'ws-beta', title: 'Beta', path: 'C:\\work\\beta', sessions: 2, defaultMode: 'cloud' },
+    ],
+    cloud: { offline: false, ok: true, at: null, message: '' },
+    attachAvailable: true,
+  })
+  const tree = resolveNode(main.component({}))
+  const nodes = walk(tree)
+  const text = nodes.map(textOf).join('\n')
+  assert.match(text, /Режим по умолчанию для рабочих пространств/)
+  assert.match(text, /Действует для новых сессий; уже переключённые сессии не меняются\./)
+  assert.match(text, /Alpha · сессий: 3/)
+  assert.match(text, /Beta · сессий: 2/)
+
+  const select = nodes.find((node) => node.type === 'select' && String(node.props?.['aria-label'] ?? '').startsWith('Режим по умолчанию для Alpha'))
+  assert.ok(select, 'селектор умолчания для Alpha есть')
+  assert.equal(select.props.value, 'local', 'умолчание Alpha — локальная')
+  const options = select.children.map((option) => option?.props?.value)
+  assert.deepEqual(options, ['cloud', 'local'])
+  assert.match(text, /Облачная/)
+  assert.match(text, /Локальная/)
+
+  const modesCss = styles.find((textCss) => typeof textCss === 'string' && textCss.includes('.dshs-ws-default-row'))
+  assert.ok(modesCss, 'стили умолчаний внедрены')
+  assert.match(modesCss, /\.dshs-ws-default-row\{[^}]*flex-wrap:wrap/, 'строка умолчания переносится на узком экране')
+  assert.match(modesCss, /\.dshs-ws-defaults\{[^}]*min-width:0/, 'блок не распирает карточку')
+
+  exported.__test.setSessionStates(null)
+})
+
+test('облачная копия локальной сессии: подсказка и действие «Удалить копию из облака»', () => {
+  exported.__test.setSessionStates({
+    ok: true,
+    syncing: false,
+    states: {},
+    sessions: [
+      {
+        id: 'session-local-copy',
+        title: 'Локальная работа',
+        projectId: 'harness',
+        path: 'C:\\work\\project',
+        mode: 'local',
+        state: 'green',
+        badge: 'local',
+        attached: true,
+        bytes: 2048,
+        syncedAt: null,
+        cloudCopy: true,
+        cloudCopyBytes: 1536,
+      },
+    ],
+    modes: { local: 1, cloud: 0 },
+    unattached: 0,
+    workspaces: [],
+    cloud: { offline: false, ok: true, at: null, message: '' },
+    attachAvailable: true,
+  })
+  const tree = resolveNode(main.component({}))
+  const nodes = walk(tree)
+  const text = nodes.map(textOf).join('\n')
+  assert.match(text, /В облаке есть копия \(1,5 КБ\), локально отключена — сессия остаётся здесь\./)
+  const deleteButton = nodes.find((node) => node.type === 'button' && textOf(node).trim() === 'Удалить копию из облака')
+  assert.ok(deleteButton, 'кнопка «Удалить копию из облака» есть')
+  assert.equal(deleteButton.props.disabled, false)
+  assert.equal(deleteButton.props.style.height, 32, 'кнопка действия 32 px')
+  assert.equal(deleteButton.props.style.borderRadius, 10)
+  const copyHint = nodes.find((node) => String(node.props?.className ?? '').includes('dshs-cloud-copy'))
+  assert.ok(copyHint, 'блок-подсказка оформлен классом dshs-cloud-copy')
+
+  // Отдельное действие и в меню сессии: подсказка + подтверждение вторым кликом.
+  const menuRegistration = registrations.find((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item')
+  const menuNode = resolveNode(menuRegistration.component({
+    sessionId: 'session-local-copy',
+    useMenuOpenState: () => [false, () => {}],
+  }))
+  const menuText = textOf(menuNode)
+  assert.match(menuText, /Удалить копию из облака/, 'действие в меню сессии')
+  assert.match(menuText, /в облаке есть копия, локальная сессия останется/)
+
+  const pageCss = styles.find((textCss) => typeof textCss === 'string' && textCss.includes('.dshs-ind'))
+  assert.match(pageCss, /\.dshs-cloud-copy\{[^}]*min-width:0/, 'подсказка не распирает строку')
+  assert.match(pageCss, /\.dshs-cloud-copy-actions\{[^}]*flex-wrap:wrap/, 'кнопки подтверждения переносятся')
+
+  exported.__test.setSessionStates(null)
+})
+
+test('skippedLocal в панели: строка «Локальных сессий пропущено» и журнал', () => {
+  exported.__test.setHostState({
+    ...readyState,
+    lastRun: {
+      at: '2026-11-22T10:00:00.000Z',
+      ok: true,
+      message: 'синхронизировано',
+      skippedLocal: 4,
+      localMirrorProtected: 2,
+    },
+    history: [
+      { at: '2026-11-22T09:00:00.000Z', ok: true, message: 'отправлено: 2', skippedLocal: 4 },
+    ],
+  })
+  const tree = resolveNode(main.component({}))
+  const text = walk(tree).map(textOf).join('\n')
+  assert.match(text, /Локальных сессий пропущено: 4 \(копий в зеркале защищено: 2\)\./)
+  assert.match(text, /локальных пропущено: 4/)
+  exported.__test.setHostState(readyState)
+})

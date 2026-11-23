@@ -21,7 +21,7 @@ import { readFile as readFileText } from 'node:fs/promises'
 import { defaultConfig, loadConfig, saveConfig } from './lib/config.mjs'
 import { encodeSegment, projectKey, samePath } from './lib/format.mjs'
 import { collectDiagnostics } from './lib/diagnostics.mjs'
-import { readHistory, recordRun, removalDetails, subagentStats } from './lib/history.mjs'
+import { readHistory, localSkipStats, recordRun, removalDetails, subagentStats } from './lib/history.mjs'
 import { readLedger, sessionState } from './lib/ledger.mjs'
 import { probeYandex } from './lib/yandex.mjs'
 import { probeWebdav } from './lib/webdav.mjs'
@@ -39,10 +39,20 @@ import {
   resetSecondaryInitialization,
 } from './lib/secondary-init.mjs'
 import { applyUpdate, checkForUpdate, describeUpdate, updateState } from './lib/update.js'
-import { MODE_LOCAL, readSessionModes, sessionBadge, sessionModeOf, setSessionMode } from './lib/session-modes.mjs'
-import { clearWorkspacePending, planWorkspace, readWorkspacePending } from './lib/workspace.mjs'
+import {
+  MODE_LOCAL,
+  applyWorkspaceDefaults,
+  readSessionModes,
+  sessionBadge,
+  sessionModeOf,
+  setSessionMode,
+  setWorkspaceDefaultMode,
+  workspaceDefaultMode,
+} from './lib/session-modes.mjs'
+import { clearWorkspacePending, planWorkspace, readLocalWorkspaces, readWorkspacePending } from './lib/workspace.mjs'
 import { applyPendingProfile, clearPendingBrowserSettings, discardProfilePlan, readJournal, readPendingBrowserSettings, readProfileStatus, refreshProfilePlan, writeBrowserSettings } from './lib/profile.mjs'
 import { QUARANTINE_DAYS, listTombstones, restoreTombstones } from './lib/tombstones.mjs'
+import { cloudCopyPath, deleteCloudCopy, inspectCloudCopy } from './lib/cloud-copy.mjs'
 import { createRemote } from './lib/remote.mjs'
 import { hasChanges } from './lib/git.mjs'
 
@@ -61,6 +71,8 @@ const NOTIFICATIONS_PATH = '/api/dsh-sync/notifications'
 const ACK_UPDATE_PATH = '/api/dsh-sync/ack-update'
 const YANDEX_CHECK_PATH = '/api/dsh-sync/yandex-check'
 const SESSION_MODE_PATH = '/api/dsh-sync/session-mode'
+// Удаление только облачной копии локальной сессии (локальная остаётся).
+const SESSION_CLOUD_COPY_PATH = '/api/dsh-sync/session-cloud-copy'
 const PROFILE_PATH = '/api/dsh-sync/profile'
 // «Сначала показать, потом применить»: отдельный маршрут применения плана.
 const PROFILE_APPLY_PATH = '/api/dsh-sync/profile/apply'
@@ -512,8 +524,12 @@ async function readState(ctx) {
   }
   let modes = { local: 0, cloud: 0 }
   try {
-    const sessionModes = await readSessionModes(home)
-    modes = { local: Object.keys(sessionModes.sessions).length, cloud: local }
+    // Новые сессии получают умолчание своего рабочего пространства и здесь:
+    // иначе сводка «локальных/облачных» отставала бы от списка сессий.
+    const sessionModes = (await applyWorkspaceDefaults(home)).modes
+    // Явные записи теперь бывают и 'cloud': локальными считаем только 'local'.
+    const localModes = Object.values(sessionModes.sessions).filter(mode => mode === MODE_LOCAL).length
+    modes = { local: localModes, cloud: Math.max(0, local - localModes) }
   } catch {
     // режимы — вспомогательные данные
   }
@@ -1085,6 +1101,7 @@ async function runSync(ctx, action, options = {}) {
       if (result.push.childrenMissing?.length) messages.push(`субагентов нет локально: ${result.push.childrenMissing.length} (в зеркале оставлены)`)
       if (result.push.orphansProtected?.length) messages.push(`осиротевших субагентов не удаляем: ${result.push.orphansProtected.length}`)
       if ((result.push.localSkipped ?? 0) > 0) messages.push(`локальных сессий не отправлено: ${result.push.localSkipped}`)
+      if ((result.push.localMirrorProtected ?? 0) > 0) messages.push(`в зеркале защищено локальных копий: ${result.push.localMirrorProtected}`)
       if (result.push.profile !== undefined) messages.push(`профиль: записей ${result.push.profile.patchEntries ?? 0}`)
       if (result.push.profileError !== undefined) messages.push(`профиль не отправлен: ${result.push.profileError}`)
       if (result.push.workspace !== undefined) messages.push(`рабочие пространства: ${result.push.workspace.workspaces ?? 0}`)
@@ -1113,6 +1130,8 @@ async function runSync(ctx, action, options = {}) {
   // Единица обмена «родитель + субагенты»: сколько сессий и субагентов
   // обменяно и каких детей не хватило локально (см. history.jsonl).
   const groups = subagentStats(result)
+  // Сводка «локальная» для журнала и панели: skippedLocal + защита копий.
+  const skipped = localSkipStats(result)
 
   const record = {
     ok: true,
@@ -1120,6 +1139,7 @@ async function runSync(ctx, action, options = {}) {
     action,
     mode: 'host',
     ...groups,
+    ...skipped,
     message: `дочерний Node не найден, работал host-процесс. ${messages.join('; ')}`,
     durationMs: Date.now() - started,
     removed,
@@ -1141,10 +1161,10 @@ async function runSync(ctx, action, options = {}) {
       ? null
       : { pushed: result.push.secondary.pushed, committed: result.push.secondary.committed === true },
     pull: result.pull
-      ? { imported: result.pull.imported, updated: result.pull.updated, conflicts: result.pull.conflicts, attachments: result.pull.attachments?.restored ?? 0 }
+      ? { imported: result.pull.imported, updated: result.pull.updated, conflicts: result.pull.conflicts, attachments: result.pull.attachments?.restored ?? 0, skippedLocal: skipped.pullSkippedLocal }
       : null,
     push: result.push
-      ? { pushed: result.push.pushed, committed: result.push.committed, attachments: result.push.attachments?.added ?? 0 }
+      ? { pushed: result.push.pushed, committed: result.push.committed, attachments: result.push.attachments?.added ?? 0, skippedLocal: skipped.pushSkippedLocal, localMirrorProtected: skipped.localMirrorProtected }
       : null,
   }
   await writeLastRun(record)
@@ -1606,6 +1626,66 @@ function workspaceAttachedIds(ctx) {
   }
 }
 
+/**
+ * Рабочие пространства и карта «сессия → пространство».
+ *
+ * Источник — реестр DSH (он знает живые пространства), запасной — стор
+ * `storages/workspace.json`. Карта нужна двум вещам: привязке (уже была) и
+ * умолчанию режима для новых сессий каждого пространства.
+ */
+async function workspaceDirectory(ctx, home) {
+  const workspaces = []
+  const sessionWorkspace = {}
+  try {
+    const registry = ctx?.get?.('workspaceRegistry')
+    if (registry !== undefined && registry !== null && typeof registry.list === 'function') {
+      for (const workspace of registry.list() ?? []) {
+        const id = typeof workspace?.id === 'string' ? workspace.id.trim() : ''
+        if (id === '') continue
+        const path = typeof workspace?.path === 'string'
+          ? workspace.path
+          : typeof workspace?.record?.path === 'string' ? workspace.record.path : ''
+        const title = typeof workspace?.title === 'string' && workspace.title.trim() !== ''
+          ? workspace.title.trim()
+          : typeof workspace?.record?.title === 'string' && workspace.record.title.trim() !== ''
+            ? workspace.record.title.trim()
+            : path
+        const sessionIds = (Array.isArray(workspace?.sessionIds) ? workspace.sessionIds : [])
+          .filter(sessionId => typeof sessionId === 'string' && sessionId !== '')
+        workspaces.push({ id, title, path, sessionIds })
+        for (const sessionId of sessionIds) {
+          if (sessionWorkspace[sessionId] === undefined) sessionWorkspace[sessionId] = id
+        }
+      }
+    }
+  } catch {
+    // реестр недоступен — берём стор
+  }
+  if (workspaces.length === 0) {
+    try {
+      const local = await readLocalWorkspaces(home)
+      for (const workspace of local?.workspaces ?? []) {
+        const id = typeof workspace?.id === 'string' ? workspace.id.trim() : ''
+        if (id === '') continue
+        const sessionIds = (workspace?.sessionIds ?? []).filter(sessionId => typeof sessionId === 'string')
+        workspaces.push({ id, title: workspace.title ?? workspace.path, path: workspace.path, sessionIds })
+        for (const sessionId of sessionIds) {
+          if (sessionWorkspace[sessionId] === undefined) sessionWorkspace[sessionId] = id
+        }
+      }
+    } catch {
+      // стора ещё нет — пространств нет
+    }
+  }
+  return { workspaces, sessionWorkspace }
+}
+
+/** Запись реестра синхронизации для сессии (реестр хранит числовой `at`). */
+function ledgerEntry(ledger, sessionId) {
+  const key = typeof sessionId === 'string' && sessionId.startsWith('session-') ? sessionId : `session-${sessionId}`
+  return ledger.sessions[key] ?? ledger.sessions[sessionId]
+}
+
 /** Последний запуск синхронизации из журнала. */
 async function readLastRunInfo(home) {
   try {
@@ -1623,11 +1703,17 @@ async function sessionStates(ctx) {
   const home = dshHome()
   const config = await loadConfig(home)
   const ledger = await readLedger(home)
-  const modes = await readSessionModes(home)
-  const attached = workspaceAttachedIds(ctx)
+  const directory = await workspaceDirectory(ctx, home)
+  const attached = Object.keys(directory.sessionWorkspace).length > 0
+    ? new Set(Object.keys(directory.sessionWorkspace))
+    : workspaceAttachedIds(ctx)
+  // Новые сессии получают умолчание своего рабочего пространства до того, как
+  // индикатор решит, облачная она или локальная.
+  const modes = (await applyWorkspaceDefaults(home, { workspaceIdBySession: directory.sessionWorkspace })).modes
   const lastRun = await readLastRunInfo(home)
   const offline = lastRun !== null && lastRun.ok === false
   const conflictIds = new Set(Array.isArray(lastRun?.conflictIds) ? lastRun.conflictIds : [])
+  const syncing = automation.running === true
   const states = {}
   const sessions = []
 
@@ -1658,16 +1744,40 @@ async function sessionStates(ctx) {
         conflict: conflictIds.has(session.id),
         unattached,
       })
+      // «В облаке есть копия»: у локальной сессии копия зеркала защищена от
+      // prune, и панель предлагает удалить её отдельным действием.
+      let cloudCopy = false
+      let cloudCopyBytes
+      if (mode === MODE_LOCAL) {
+        const copyDir = cloudCopyPath(config.repoDir, projectId, session.id)
+        if (existsSync(copyDir)) {
+          cloudCopy = true
+          try {
+            cloudCopyBytes = (await stat(join(copyDir, 'session.v4.jsonl.zstd'))).size
+          } catch {
+            cloudCopyBytes = undefined
+          }
+        }
+      }
+      const ledgerRecord = ledgerEntry(ledger, session.id)
       states[session.id] = badge
       sessions.push({
         id: session.id,
         title: typeof session.title === 'string' ? session.title : '',
         projectId,
         path: projectPath,
+        workspaceId: directory.sessionWorkspace[session.id] ?? '',
         mode,
         state: baseState,
         badge,
         attached: attached === undefined ? null : !unattached,
+        // Подсказка индикатора: дата последней синхронизации и размер лога.
+        bytes: info?.size ?? (typeof ledgerRecord?.size === 'number' ? ledgerRecord.size : undefined),
+        syncedAt: typeof ledgerRecord?.at === 'number' && Number.isFinite(ledgerRecord.at)
+          ? new Date(ledgerRecord.at).toISOString()
+          : null,
+        cloudCopy,
+        ...(cloudCopyBytes !== undefined ? { cloudCopyBytes } : {}),
       })
     }
   }
@@ -1679,12 +1789,23 @@ async function sessionStates(ctx) {
     states,
     sessions,
     modes: { local: localCount, cloud: sessions.length - localCount },
+    workspaces: directory.workspaces.map(workspace => ({
+      id: workspace.id,
+      title: workspace.title,
+      path: workspace.path,
+      sessions: workspace.sessionIds.length,
+      // Умолчание режима для новых сессий этого пространства.
+      defaultMode: workspaceDefaultMode(modes, workspace.id),
+    })),
     unattached,
+    syncing,
     cloud: {
       offline,
       at: lastRun?.at ?? null,
       ok: lastRun === null ? true : lastRun.ok !== false,
       message: lastRun?.message ?? '',
+      skippedLocal: Number(lastRun?.skippedLocal ?? 0) || 0,
+      localMirrorProtected: Number(lastRun?.localMirrorProtected ?? 0) || 0,
     },
     attachAvailable: attached !== undefined,
   }
@@ -2221,12 +2342,25 @@ export function apply(ctx) {
   })
 
   // Режим «локальная / облачная»: одна сессия или группа (массово).
+  // payload.workspaceId — умолчание рабочего пространства для новых сессий.
   route('session-mode', SESSION_MODE_PATH, async (request) => {
     try {
       const payload = await body(request)
-      const ids = Array.isArray(payload.ids) ? payload.ids : payload.id !== undefined ? [payload.id] : []
       const mode = payload.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud'
       const home = dshHome()
+      const workspaceId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : ''
+      if (workspaceId !== '') {
+        // Умолчание пространства: существующим сессиям фиксируется прежний
+        // режим, чтобы смена умолчания не переключала их задним числом.
+        const directory = await workspaceDirectory(ctx, home)
+        const workspace = directory.workspaces.find(item => item.id === workspaceId)
+        const sessionIds = workspace?.sessionIds ?? Object.keys(directory.sessionWorkspace)
+          .filter(sessionId => directory.sessionWorkspace[sessionId] === workspaceId)
+        const result = await setWorkspaceDefaultMode(home, workspaceId, mode, { sessionIds })
+        invalidateSessionStates()
+        return json({ ok: true, scope: 'workspace', ...result })
+      }
+      const ids = Array.isArray(payload.ids) ? payload.ids : payload.id !== undefined ? [payload.id] : []
       // Режим группы: вместе с родителем переключаются его субагенты, иначе
       // ребёнок уехал бы в зеркало без родителя. Связи берём из заголовков
       // сессий (host-часть отдаёт `parent` без чтения логов).
@@ -2240,6 +2374,75 @@ export function apply(ctx) {
       const result = await setSessionMode(home, ids, mode, { groups })
       invalidateSessionStates()
       return json({ ok: true, ...result })
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  // «Удалить копию из облака»: только у локальной сессии, только зеркальная
+  // копия, локальный лог цел. Без confirm:true маршрут показывает, что найдено,
+  // и просит подтверждение (окно-подтверждение в панели — клиентская часть).
+  route('session-cloud-copy', SESSION_CLOUD_COPY_PATH, async (request) => {
+    try {
+      const payload = await body(request)
+      const id = typeof payload.id === 'string' ? payload.id.trim() : ''
+      const home = dshHome()
+      const config = await loadConfig(home)
+      const modes = await readSessionModes(home)
+      if (payload.confirm !== true) {
+        const inspected = await inspectCloudCopy({ home, config, sessionId: id, modes })
+        const message = inspected.ok === true
+          ? 'в облаке есть копия этой локальной сессии; подтвердите удаление — локальная сессия останется'
+          : inspected.message
+        return json({ ...inspected, ok: false, code: inspected.ok === true ? 'confirm-required' : inspected.code, message }, 409)
+      }
+      // Удаление должно доехать до облака: иначе копия вернётся следующим
+      // приёмом. Сначала приводим зеркало к удалённой ветке (как и
+      // восстановление), и только потом переносим копию в карантин: иначе
+      // fetch+reset затёр бы незакоммиченные изменения. Сетевой сбой не
+      // отменяет локальное удаление — метка manual ляжет в коммит при
+      // следующей успешной отправке.
+      let remote
+      let warning = ''
+      try {
+        remote = createRemote(config)
+        await remote.sync()
+      } catch (error) {
+        warning = `облако пока недоступно (${error instanceof Error ? error.message : String(error)}); удаление уйдёт при следующей синхронизации`
+      }
+      const result = await deleteCloudCopy({ home, config, sessionId: id, modes })
+      if (result.ok !== true) {
+        return json(result, result.code === 'no-cloud-copy' ? 404 : 409)
+      }
+      let committed = false
+      if (remote !== undefined) {
+        try {
+          const commit = await remote.commit(`dsh-sync: delete cloud copy of local session ${id} (${config.deviceId})`)
+          committed = commit.committed === true
+        } catch (error) {
+          const commitWarning = `облако пока недоступно (${error instanceof Error ? error.message : String(error)}); удаление уйдёт при следующей синхронизации`
+          warning = warning === '' ? commitWarning : `${warning}; ${commitWarning}`
+        }
+      }
+      const record = {
+        ok: true,
+        at: new Date().toISOString(),
+        action: 'cloud-copy-delete',
+        mode: 'host',
+        message: `${result.message}${warning !== '' ? `; ${warning}` : ''}`,
+        projectId: result.projectId,
+        removed: 1,
+        removedIds: [id],
+        reasons: ['manual'],
+        by: ['owner'],
+        quarantined: result.quarantined === true,
+        bytes: result.bytes,
+        committed,
+        ...(warning !== '' ? { warning } : {}),
+      }
+      await recordRun(home, record)
+      invalidateSessionStates()
+      return json(record)
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
     }
@@ -2434,6 +2637,10 @@ export function apply(ctx) {
       }
       if (state.lastRun) {
         lines.push(`последний запуск: ${state.lastRun.at} — ${state.lastRun.ok ? 'успешно' : 'ошибка'}: ${state.lastRun.message}`)
+        const skippedLocal = Number(state.lastRun.skippedLocal ?? 0) || 0
+        if (skippedLocal > 0) {
+          lines.push(`  локальных сессий пропущено: ${skippedLocal}${(state.lastRun.localMirrorProtected ?? 0) > 0 ? ` (копий в зеркале защищено: ${state.lastRun.localMirrorProtected})` : ''}`)
+        }
       }
       if (state.automation) {
         const auto = state.automation
