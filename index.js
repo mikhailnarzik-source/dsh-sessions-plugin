@@ -20,7 +20,7 @@ import { readFile as readFileText } from 'node:fs/promises'
 import { defaultConfig, loadConfig, saveConfig } from './lib/config.mjs'
 import { encodeSegment, projectKey, samePath } from './lib/format.mjs'
 import { collectDiagnostics } from './lib/diagnostics.mjs'
-import { readHistory, recordRun } from './lib/history.mjs'
+import { readHistory, recordRun, removalDetails } from './lib/history.mjs'
 import { readLedger, sessionState } from './lib/ledger.mjs'
 import { probeYandex } from './lib/yandex.mjs'
 import { probeWebdav } from './lib/webdav.mjs'
@@ -33,6 +33,9 @@ import { applyUpdate, checkForUpdate, describeUpdate, updateState } from './lib/
 import { MODE_LOCAL, readSessionModes, sessionBadge, sessionModeOf, setSessionMode } from './lib/session-modes.mjs'
 import { clearWorkspacePending, planWorkspace, readWorkspacePending } from './lib/workspace.mjs'
 import { clearPendingBrowserSettings, readJournal, readPendingBrowserSettings, readProfileStatus, writeBrowserSettings } from './lib/profile.mjs'
+import { QUARANTINE_DAYS, listTombstones, restoreTombstones } from './lib/tombstones.mjs'
+import { createRemote } from './lib/remote.mjs'
+import { hasChanges } from './lib/git.mjs'
 
 export const name = 'dsh-sync'
 // sessionPersistence даёт список сессий с путями к логам: обходим каталог
@@ -51,6 +54,8 @@ const YANDEX_CHECK_PATH = '/api/dsh-sync/yandex-check'
 const SESSION_MODE_PATH = '/api/dsh-sync/session-mode'
 const PROFILE_PATH = '/api/dsh-sync/profile'
 const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings'
+const TOMBSTONES_PATH = '/api/dsh-sync/tombstones'
+const RESTORE_PATH = '/api/dsh-sync/restore'
 
 // --- уведомления -----------------------------------------------------------
 // Кольцевой буфер: клиент забирает всё, что появилось после его курсора, и
@@ -1004,6 +1009,9 @@ async function runSync(ctx, action, options = {}) {
   const removedIds = [...pullDeletions, ...pushDeletions]
   const removed = (result.pull?.deleted ?? 0) + (result.push?.removed ?? 0)
   const removedReason = [result.pull?.deletedReason, result.push?.removedReason].filter(reason => typeof reason === 'string' && reason !== '').join(', ')
+  // Коды причин и авторов удаления — отдельно от человекочитаемого текста:
+  // по ним видно, удалил пользователь (manual/owner) или автоочистка (prune/sync).
+  const removal = removalDetails(result)
 
   const record = {
     ok: true,
@@ -1015,6 +1023,13 @@ async function runSync(ctx, action, options = {}) {
     removed,
     removedIds: removedIds.slice(0, 100),
     removedReason,
+    reasons: removal.reasons,
+    by: removal.by,
+    removedDetails: removal.removedDetails,
+    expired: removal.expired,
+    expiredIds: removal.expiredIds,
+    replaced: removal.replaced,
+    replacedIds: removal.replacedIds,
     conflictIds: (result.pull?.conflictDetails ?? []).map(item => item.id),
     requireConfirmation: result.push?.requireConfirmation,
     guarded: (result.push?.guarded ?? []).length,
@@ -1954,6 +1969,122 @@ export function apply(ctx) {
   route('sessions', SESSIONS_PATH, async () => {
     try {
       return json(await sessionStates(ctx))
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  // «Удалённые»: список надгробий зеркала — что, когда, кем и почему удалено,
+  // сколько дней осталось до конца 30-дневного карантина.
+  route('tombstones', TOMBSTONES_PATH, async () => {
+    try {
+      const home = dshHome()
+      const config = await loadConfig(home)
+      const sessions = await listTombstones({
+        home,
+        repoDir: config.repoDir,
+        projects: config.projects ?? {},
+      })
+      return json({
+        ok: true,
+        quarantineDays: QUARANTINE_DAYS,
+        count: sessions.length,
+        sessions,
+      })
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  // Восстановление: снять надгробие (пометить restored), вернуть карантинную
+  // копию зеркала и локальную копию из архива, затем закоммитить зеркало.
+  route('restore', RESTORE_PATH, async (request) => {
+    try {
+      const payload = await body(request)
+      const home = dshHome()
+      const config = await loadConfig(home)
+      const all = payload.all === true
+      const requested = Array.isArray(payload.ids)
+        ? payload.ids.filter(id => typeof id === 'string' && id.trim() !== '').map(id => id.trim())
+        : typeof payload.id === 'string' && payload.id.trim() !== ''
+          ? [payload.id.trim()]
+          : []
+      if (!all && requested.length === 0) {
+        return json({ ok: false, code: 'request/invalid', message: 'нужен id сессии или all:true' }, 400)
+      }
+
+      // Сначала актуализируем зеркало (только если в git-дереве нет
+      // несохранённых изменений — иначе затёрли бы, например, свежее надгробие).
+      const remote = await createRemote(config)
+      let canSync = true
+      if (config.backend === 'git' && existsSync(config.repoDir)) {
+        canSync = !(await hasChanges(config.repoDir))
+      }
+      if (canSync) {
+        let synced
+        try {
+          synced = await remote.sync()
+        } catch (error) {
+          return json({
+            ok: false,
+            code: 'remote/unavailable',
+            message: `не удалось получить зеркало — восстановление отменено: ${error instanceof Error ? error.message : String(error)}`,
+          }, 409)
+        }
+        if (synced === false) {
+          return json({
+            ok: false,
+            code: 'remote/unavailable',
+            message: 'не удалось получить зеркало — восстановление отменено, повторите после синхронизации',
+          }, 409)
+        }
+      }
+
+      const result = await restoreTombstones({
+        home,
+        repoDir: config.repoDir,
+        projects: config.projects ?? {},
+        ids: all ? undefined : requested,
+        deviceId: config.deviceId,
+        by: 'owner',
+      })
+
+      let committed = false
+      let warning = ''
+      try {
+        const commit = await remote.commit(`dsh-sync: restore sessions (${config.deviceId})`)
+        committed = commit.committed === true
+      } catch (error) {
+        warning = `изменения сохранены в зеркале, но отправить их не удалось: ${error instanceof Error ? error.message : String(error)}`
+      }
+
+      const restored = result.restored?.length ?? 0
+      const message = restored > 0
+        ? `восстановлено сессий: ${restored}${result.failed.length > 0 ? `, не удалось: ${result.failed.length}` : ''}`
+        : result.failed.length > 0
+          ? `не удалось восстановить: ${result.failed.length} (${result.failed[0].message})`
+          : result.skipped.length > 0
+            ? 'восстанавливать нечего: карантин истёк или метка уже снята'
+            : 'восстанавливать нечего'
+      // В журнал — та же метка, что и надгробия: reason=restored, by=owner.
+      const record = {
+        ok: true,
+        at: new Date().toISOString(),
+        action: 'restore',
+        mode: 'host',
+        message,
+        restored,
+        restoredIds: result.restoredIds,
+        skippedIds: result.skipped,
+        failed: result.failed,
+        reasons: ['restored'],
+        by: ['owner'],
+        committed,
+        ...(warning !== '' ? { warning } : {}),
+      }
+      await recordRun(home, record)
+      invalidateSessionStates()
+      return json({ ok: true, ...record })
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
     }

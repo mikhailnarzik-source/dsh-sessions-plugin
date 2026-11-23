@@ -24,6 +24,8 @@ import { pruneAttachments } from './lib/attachments.mjs'
 import { decodeFrame, frameSlices } from './lib/frames.mjs'
 import { readMeta, writeMeta } from './lib/mirror-meta.mjs'
 import { createRemote } from './lib/remote.mjs'
+import { hasChanges } from './lib/git.mjs'
+import { listTombstones, restoreTombstones } from './lib/tombstones.mjs'
 
 const VALUE_FLAGS = new Set(['home', 'remote', 'repo', 'branch', 'path', 'title', 'project', 'backend', 'months', 'yandex-token', 'yandex-path'])
 
@@ -309,12 +311,86 @@ async function cmdStatus(opts) {
   }
 }
 
+/**
+ * Список удалённых сессий: причина, автор, срок карантина. Те же данные, что
+ * показывает карточка «Удалённые» в панели.
+ */
+async function cmdDeleted(opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+  const sessions = await listTombstones({
+    home: dshHome,
+    repoDir: config.repoDir,
+    projects: config.projects ?? {},
+  })
+  if (sessions.length === 0) {
+    console.log('удалённых сессий нет')
+    return
+  }
+  console.log(`удалённых сессий: ${sessions.length} (карантин 30 дней)`)
+  for (const entry of sessions) {
+    const title = entry.title !== '' ? entry.title : entry.id
+    const quarantine = entry.expired
+      ? 'срок истёк'
+      : entry.quarantined
+        ? `ещё ${entry.remainingDays} дн.`
+        : 'карантина нет'
+    console.log(`  ${title}`)
+    console.log(`    ${entry.id} · ${entry.at} · ${entry.reason}/${entry.by} · ${quarantine}`)
+  }
+  console.log('\nвосстановить: dsh-sync restore <id> или dsh-sync restore --all')
+}
+
+/**
+ * Восстановить удалённые сессии: снять надгробие (reason=restored), вернуть
+ * карантинную копию зеркала и локальную копию, закоммитить зеркало.
+ */
+async function cmdRestore(sub, rest, opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+  const ids = opts.all === true ? undefined : [sub, ...rest].filter(value => typeof value === 'string' && value !== '')
+  if (opts.all !== true && ids.length === 0) throw new Error('укажите id сессии или --all')
+  const remote = await createRemote(config)
+  if (config.backend === 'git' && existsSync(config.repoDir)) {
+    const clean = !(await hasChanges(config.repoDir))
+    if (clean) {
+      const synced = await remote.sync()
+      if (synced === false) throw new Error('не удалось получить зеркало — повторите после синхронизации')
+    }
+  }
+  const result = await restoreTombstones({
+    home: dshHome,
+    repoDir: config.repoDir,
+    projects: config.projects ?? {},
+    ids,
+    deviceId: config.deviceId,
+    by: 'owner',
+  })
+  console.log(`восстановлено: ${result.restored.length}`)
+  for (const entry of result.restored) {
+    console.log(`  ${entry.id} · зеркало: ${entry.mirror ? 'да' : 'нет'} · локально: ${entry.local ? 'да' : 'нет'}`)
+  }
+  for (const entry of result.failed) console.log(`  ${entry.id}: ${entry.message}`)
+  for (const id of result.skipped) console.log(`  ${id}: пропущено (метка снята или карантин истёк)`)
+  if (result.restored.length > 0) {
+    try {
+      const commit = await remote.commit(`dsh-sync: restore ${result.restored.length} session(s)`)
+      console.log(`коммит: ${commit.committed ? 'создан' : 'нет изменений'}, push: ${commit.pushed ? 'да' : 'нет'}`)
+    } catch (error) {
+      console.log(`зеркало обновлено, но отправить не удалось: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    console.log('перезапустите DSH, чтобы сессии появились в списке')
+  }
+}
+
 async function main() {
   const { command, sub, rest, opts } = parseArgs(process.argv.slice(2))
   const dshHome = home(opts)
 
   if (command === 'init') return cmdInit(opts)
   if (command === 'project') return cmdProject(sub, rest, opts)
+  if (command === 'deleted') return cmdDeleted(opts)
+  if (command === 'restore') return cmdRestore(sub, rest, opts)
 
   if (command === 'push' || command === 'pull') {
     const config = await loadConfig(dshHome)
@@ -366,6 +442,8 @@ async function main() {
   console.log('  dsh-sync prune-attachments [--dry-run]')
   console.log('  dsh-sync push [--project <id>] [--no-prune]')
   console.log('  dsh-sync pull [--project <id>] [--dry-run]')
+  console.log('  dsh-sync deleted — список удалённых сессий в карантине')
+  console.log('  dsh-sync restore <id> | --all — вернуть сессию из карантина')
   console.log('')
   console.log('общие ключи: --home <каталог DSH> (по умолчанию $DSH_HOME или ~/.dsh)')
   console.log('')

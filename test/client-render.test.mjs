@@ -229,7 +229,7 @@ test('шапка: иконка в круге, заголовок, подзаго
 })
 
 test('секции-карточки с заголовками и единым оформлением', () => {
-  const titles = ['Синхронизация', 'Подключение', 'Дополнительно', 'Проверка окружения', 'Обслуживание']
+  const titles = ['Синхронизация', 'Подключение', 'Дополнительно', 'Проверка окружения', 'Обслуживание', 'Удалённые']
   for (const title of titles) {
     const heading = nodes.find((node) => node.type === 'h2' && textOf(node).trim() === title)
     assert.ok(heading, `секция «${title}» есть на странице`)
@@ -465,4 +465,97 @@ test('адаптив: flex-wrap кнопок, медиа 900/640, без бел�
   assert.doesNotMatch(dialogCss, /button-primary\{[^}]*label-primary-foreground/, 'нет белого текста на primary')
   assert.match(dialogCss, /\.dshsd-button-delete:not\(:disabled\)\{[^}]*color-mix\(in srgb,var\(--dsw-alias-state-error-primary/)
   assert.match(dialogCss, /@media \(max-width:640px\)\{\.dshsd-footer/, 'на 640 px кнопки могут растягиваться')
+})
+
+test('секция «Удалённые»: список со сроком карантина, причинами и восстановлением', () => {
+  assert.ok(exported.__test?.setTombstones, 'тестовый крючок для списка удалённых доступен')
+  assert.ok(exported.__test?.setSessionStates, 'крючок сессий остался доступен')
+
+  // Пустое состояние: удалённых нет.
+  exported.__test.setTombstones({ ok: true, quarantineDays: 30, count: 0, sessions: [] })
+  const emptyTree = resolveNode(main.component({}))
+  const emptyText = walk(emptyTree).map(textOf).join('\n')
+  assert.match(emptyText, /Удалённых сессий нет/, 'пустой список подписан')
+
+  // Две метки: ручное удаление с карантином и истёкшая автоочистка.
+  exported.__test.setTombstones({
+    ok: true,
+    quarantineDays: 30,
+    count: 2,
+    sessions: [
+      {
+        id: 'session-deleted-1',
+        title: 'Ненужный диалог',
+        at: '2026-11-20T10:00:00.000Z',
+        device: 'device-a',
+        reason: 'manual',
+        by: 'owner',
+        projectId: 'harness',
+        quarantined: true,
+        localQuarantined: false,
+        liveInMirror: false,
+        remainingDays: 27,
+        expired: false,
+        canRestore: true,
+      },
+      {
+        id: 'session-deleted-2',
+        title: '',
+        at: '2026-10-01T10:00:00.000Z',
+        device: 'device-b',
+        reason: 'prune',
+        by: 'sync',
+        projectId: 'harness',
+        quarantined: false,
+        localQuarantined: false,
+        liveInMirror: false,
+        remainingDays: 0,
+        expired: true,
+        canRestore: false,
+      },
+    ],
+  })
+
+  const deletedTree = resolveNode(main.component({}))
+  const deletedNodes = walk(deletedTree)
+  const deletedText = deletedNodes.map(textOf).join('\n')
+  assert.match(deletedText, /Удалённые/, 'карточка «Удалённые» на странице')
+  assert.match(deletedText, /Ненужный диалог/, 'название удалённой сессии видно')
+  assert.match(deletedText, /deleted-2/, 'у сессии без названия показан идентификатор')
+  assert.match(deletedText, /вручную/, 'причина ручного удаления подписана')
+  assert.match(deletedText, /автоочистка/, 'причина автоочистки подписана')
+  assert.match(deletedText, /пользователь/, 'автор удаления подписан')
+  assert.match(deletedText, /синхронизация/, 'автоматический автор подписан')
+  assert.match(deletedText, /в карантине ещё 27 дн\./, 'виден остаток 30-дневного карантина')
+  assert.match(deletedText, /карантин истёк/, 'истёкший карантин подписан')
+
+  const deletedSection = deletedNodes.find(
+    (node) => node.type === 'section' && textOf(node).includes('Удалённые'),
+  )
+  assert.ok(deletedSection, 'секция «Удалённые» найдена')
+  const deletedButtons = walk(deletedSection).filter((node) => node.type === 'button')
+  const deletedButtonTexts = deletedButtons.map((node) => textOf(node).trim())
+  assert.equal(deletedButtonTexts.filter((text) => text === 'Восстановить').length, 2, 'у каждой строки кнопка «Восстановить»')
+  assert.ok(deletedButtonTexts.some((text) => text.includes('Восстановить всё (1)')), 'кнопка «Восстановить всё» считает доступные')
+  for (const button of deletedButtons) {
+    const style = button.props.style ?? {}
+    assert.ok([32, 36].includes(style.height), `высота кнопки 32/36, а не ${style.height}`)
+    assert.equal(style.borderRadius, 10, 'радиус кнопки 10')
+    assert.equal(style.whiteSpace, 'nowrap', 'подпись не переносится')
+  }
+  const restoreRow = walk(deletedSection).find(
+    (node) => node.type === 'button' && textOf(node).trim() === 'Восстановить',
+  )
+  assert.equal(restoreRow.props.disabled, false, 'доступную сессию можно вернуть')
+  const expiredRows = walk(deletedSection).filter(
+    (node) => node.type === 'button' && textOf(node).trim() === 'Восстановить' && node.props.disabled === true,
+  )
+  assert.equal(expiredRows.length, 1, 'истёкшую сессию вернуть нельзя')
+
+  const pageCss = styles.find((text) => typeof text === 'string' && text.includes('.dshs-sync-page'))
+  assert.match(pageCss, /\.dshs-deleted-list\{[^}]*overflow-y:auto/, 'список удалённых прокручивается внутри')
+  assert.match(pageCss, /\.dshs-deleted-row\{[^}]*min-width:0/, 'строки не распирают карточку')
+  assert.match(pageCss, /\.dshs-deleted-row:hover/, 'у строк есть hover')
+
+  exported.__test.setTombstones(null)
 })

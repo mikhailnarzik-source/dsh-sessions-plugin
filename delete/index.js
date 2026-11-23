@@ -106,10 +106,15 @@ async function handleInspect(ctx, request) {
  * из репозитория. Надгробие уносится при обычной отправке и удаляет сессию на
  * остальных устройствах, поэтому вызывается только по явному согласию.
  *
+ * Пометка честно говорит, откуда она: reason=manual/by=owner (решение
+ * пользователя) и название сессии для панели «Удалённые», откуда её можно
+ * вернуть в течение 30 дней.
+ *
  * @param sessionId удалённая сессия.
+ * @param title название сессии на момент удаления (может быть пустым).
  * @returns true, если пометка записана.
  */
-async function markDeletedInMirror(sessionId) {
+async function markDeletedInMirror(sessionId, title = '') {
   try {
     const config = await loadConfig(resolveDshHome())
     if (config === undefined || typeof config.repoDir !== 'string') return false
@@ -118,7 +123,11 @@ async function markDeletedInMirror(sessionId) {
       return false
     }
     const tombstones = await readTombstones(config.repoDir)
-    addTombstone(tombstones, sessionId, config.deviceId ?? 'device')
+    addTombstone(tombstones, sessionId, config.deviceId ?? 'device', {
+      reason: 'manual',
+      by: 'owner',
+      title,
+    })
     await writeTombstones(config.repoDir, tombstones)
     return true
   } catch (error) {
@@ -138,8 +147,17 @@ async function handleDelete(ctx, request) {
   // при следующем приёме, поэтому это осознанный выбор пользователя.
   const localOnly = decoded.payload.localOnly === true
   try {
+    // Название нужно пометке удаления: панель «Удалённые» показывает его, а не
+    // только идентификатор. Читаем до удаления: вместе с сессией оно исчезнет.
+    // Сбой чтения названия не должен отменять само удаление.
+    let title = ''
+    try {
+      title = await sessionTitle(ctx, decoded.sessionId)
+    } catch {
+      title = ''
+    }
     const result = await deleteSession(ctx, decoded.sessionId, { deleteFiles })
-    const marked = localOnly || result.ok !== true ? false : await markDeletedInMirror(decoded.sessionId)
+    const marked = localOnly || result.ok !== true ? false : await markDeletedInMirror(decoded.sessionId, title)
     return json({ ...result, markedInMirror: marked, localOnly }, result.ok ? 200 : 409)
   } catch (error) {
     console.error(`[session-delete] deleting ${decoded.sessionId} failed:`, error)

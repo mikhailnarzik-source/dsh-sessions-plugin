@@ -26,6 +26,8 @@ window.__ModuleLoader__.load({
     const SESSION_MODE_PATH = '/api/dsh-sync/session-mode';
     const PROFILE_PATH = '/api/dsh-sync/profile';
     const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings';
+    const TOMBSTONES_PATH = '/api/dsh-sync/tombstones';
+    const RESTORE_PATH = '/api/dsh-sync/restore';
     const shortSha = (value) => (value === null || value === undefined || value === '' ? '?' : String(value).slice(0, 7));
 
     // Подписи страницы «Синхронизация сессий». Только тексты интерфейса:
@@ -48,6 +50,14 @@ window.__ModuleLoader__.load({
       sectionChecks: 'Environment check',
       sectionMaintenance: 'Maintenance',
       sectionExternal: 'External sync plugin',
+      sectionDeleted: 'Deleted',
+      deletedHint: 'Deleted sessions stay in quarantine for 30 days: they can be returned to the mirror and to this computer.',
+      deletedEmpty: 'No deleted sessions.',
+      deletedLoading: 'Loading the list…',
+      deletedRestore: 'Restore',
+      deletedRestoreAll: 'Restore all',
+      deletedRefresh: 'Refresh list',
+      deletedRestored: 'Restored sessions:',
     };
     const ru = {
       title: 'Синхронизация сессий',
@@ -67,6 +77,14 @@ window.__ModuleLoader__.load({
       sectionChecks: 'Проверка окружения',
       sectionMaintenance: 'Обслуживание',
       sectionExternal: 'Внешний плагин синхронизации',
+      sectionDeleted: 'Удалённые',
+      deletedHint: 'Удалённые сессии лежат в карантине 30 дней: их можно вернуть в зеркало и на этот компьютер.',
+      deletedEmpty: 'Удалённых сессий нет.',
+      deletedLoading: 'Загрузка списка…',
+      deletedRestore: 'Восстановить',
+      deletedRestoreAll: 'Восстановить всё',
+      deletedRefresh: 'Обновить список',
+      deletedRestored: 'Восстановлено сессий:',
     };
 
     // Нативные выпадающие списки и поля рисуются системными цветами: без
@@ -430,6 +448,11 @@ window.__ModuleLoader__.load({
             '.dshs-modes-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.1));border-color:var(--dsw-alias-border-l2,rgba(128,128,128,0.22))}',
             '.dshs-modes-list{display:flex;flex-direction:column;gap:4px;min-width:0;max-height:320px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}',
             '.dshs-ws-hint{display:flex;flex-direction:column;gap:6px;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.05)}',
+            // «Удалённые»: строки карантина и кнопка восстановления.
+            '.dshs-deleted-list{display:flex;flex-direction:column;gap:4px;min-width:0;max-height:260px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}',
+            '.dshs-deleted-row{display:flex;align-items:center;gap:10px;min-width:0;padding:7px 10px;border-radius:10px;border:1px solid transparent}',
+            '.dshs-deleted-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.1));border-color:var(--dsw-alias-border-l2,rgba(128,128,128,0.22))}',
+            '.dshs-deleted-text{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}',
           ].join('\n');
           document.head.appendChild(style);
           return () => style.remove();
@@ -464,6 +487,7 @@ window.__ModuleLoader__.load({
           const tick = async () => {
             if (stopped) return;
             await refresh();
+            void refreshTombstones(true);
             if (stopped) return;
             timer = setTimeout(() => void tick(), 30_000);
             timer?.unref?.();
@@ -501,6 +525,7 @@ window.__ModuleLoader__.load({
             publish({ busy: '', error: result?.message ?? 'Синхронизация не удалась' });
           }
           await refresh();
+          await refreshTombstones(true);
         } catch (error) {
           publish({ busy: '', error: `Синхронизация не удалась: ${explain(error)}` });
         }
@@ -1468,6 +1493,16 @@ function CollapsedItem({ title, summary, badge, children }) {
             h(SessionModesSection, null),
           ),
 
+          // --- удалённые: карантин зеркала и восстановление ------------------
+          h(
+            Card,
+            {
+              title: t('sectionDeleted'),
+              hint: t('deletedHint'),
+            },
+            h(DeletedSection, { t }),
+          ),
+
           // --- профиль и рабочие пространства -------------------------------
           h(
             Card,
@@ -2282,6 +2317,56 @@ function CollapsedItem({ title, summary, badge, children }) {
       return sessionStates.data;
     }
 
+    // --- «Удалённые»: надгробия зеркала и восстановление из карантина -------
+    // Один общий запрос на секцию и на кнопку «Обновить»; кэш на 20 секунд,
+    // чтобы перерисовка страницы не дёргала host-часть на каждый чих.
+    const tombstonesState = { data: null, at: 0, listeners: new Set() };
+
+    async function refreshTombstones(force) {
+      if (!force && Date.now() - tombstonesState.at < 20_000) return;
+      try {
+        const result = await post(TOMBSTONES_PATH, {});
+        tombstonesState.data = result ?? null;
+        tombstonesState.at = Date.now();
+        for (const listener of tombstonesState.listeners) listener();
+      } catch {
+        // без списка удалённых страница работает как обычно
+      }
+    }
+
+    function useTombstones() {
+      const [, bump] = React.useState(0);
+      React.useEffect(() => {
+        const listener = () => bump((value) => value + 1);
+        tombstonesState.listeners.add(listener);
+        void refreshTombstones(false);
+        return () => tombstonesState.listeners.delete(listener);
+      }, []);
+      return tombstonesState.data;
+    }
+
+    // Причины и авторы удаления: коды приходят от host-части, подписи — здесь.
+    const DELETED_REASON_LABELS = {
+      manual: 'вручную',
+      prune: 'автоочистка',
+      expired: 'срок истёк',
+      replaced: 'заменено',
+      restored: 'восстановлено',
+    };
+    const DELETED_BY_LABELS = {
+      owner: 'пользователь',
+      sync: 'синхронизация',
+    };
+
+    /** «Осталось N дн.» и дата конца карантина. */
+    function quarantineLabel(entry) {
+      if (entry?.expired === true) return 'карантин истёк';
+      const days = Number(entry?.remainingDays);
+      if (!Number.isFinite(days)) return 'карантин 30 дней';
+      if (days <= 0) return 'карантин истекает сегодня';
+      return `в карантине ещё ${days} дн.`;
+    }
+
     // Значки состояния сессии: цвет и подпись. Коды приходят от host-части.
     const SESSION_BADGES = {
       synced: { color: 'var(--dsw-alias-state-success-primary, #2f9e44)', title: 'Синхронизирована' },
@@ -2622,6 +2707,145 @@ function CollapsedItem({ title, summary, badge, children }) {
                 );
               }),
             ),
+      );
+    }
+
+    /**
+     * Секция «Удалённые»: список надгробий зеркала с причиной, автором и сроком
+     * карантина, кнопки «Восстановить» и «Восстановить всё».
+     */
+    function DeletedSection(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key;
+      const data = useTombstones();
+      const [busy, setBusy] = React.useState('');
+      const [note, setNote] = React.useState('');
+      const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+
+      const restore = async (ids, all) => {
+        if (!all && (ids === undefined || ids.length === 0)) return;
+        setBusy(all === true ? 'all' : String(ids[0] ?? ''));
+        setNote('');
+        try {
+          const result = await post(RESTORE_PATH, all === true ? { all: true } : { ids });
+          if (result?.ok === true) {
+            const restored = Array.isArray(result.restoredIds) ? result.restoredIds.length : 0;
+            const failed = Array.isArray(result.failed) ? result.failed.length : 0;
+            setNote(`${t('deletedRestored')} ${restored}${failed > 0 ? `, не удалось: ${failed}` : ''}. ${result.warning ?? ''}`.trim());
+          } else {
+            setNote(result?.message ?? 'Не удалось восстановить сессии');
+          }
+          await refreshTombstones(true);
+          await refreshSessionStates(true);
+        } catch (error) {
+          setNote(`Не удалось восстановить: ${explain(error)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const restoreOne = (entry) => {
+        if (entry?.canRestore === false) {
+          setNote(entry.expired === true
+            ? 'Срок карантина истёк — сессию восстановить нельзя.'
+            : 'Карантинная копия не найдена — восстанавливать нечего.');
+          return;
+        }
+        void restore([entry.id], false);
+      };
+
+      const reasonLabel = (reason) => DELETED_REASON_LABELS[reason] ?? 'удалено';
+      const byLabel = (by) => DELETED_BY_LABELS[by] ?? 'неизвестно';
+      const canRestoreAny = sessions.some((entry) => entry.canRestore !== false);
+
+      if (data === null) {
+        return h('span', { style: S.hint }, t('deletedLoading'));
+      }
+      if (sessions.length === 0) {
+        return h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
+          h('span', { style: S.hint }, t('deletedEmpty')),
+          h(
+            'div',
+            { style: S.cardActions },
+            h('button', { type: 'button', style: S.buttonSmall, disabled: busy !== '', onClick: () => void refreshTombstones(true) }, t('deletedRefresh')),
+          ),
+        );
+      }
+
+      return h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 } },
+        h(
+          'div',
+          { className: 'dshs-deleted-list' },
+          sessions.map((entry) => {
+            const label = sessionLabel({ id: entry.id, title: entry.title });
+            const at = entry.at ? new Date(entry.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'дата неизвестна';
+            const meta = [
+              `удалено ${at}`,
+              byLabel(entry.by),
+              reasonLabel(entry.reason),
+              entry.expired === true
+                ? quarantineLabel(entry)
+                : entry.quarantined === false
+                  ? 'копии в карантине нет'
+                  : quarantineLabel(entry),
+            ].join(' · ');
+            return h(
+              'div',
+              { key: entry.id, className: 'dshs-deleted-row', title: entry.id },
+              h('span', {
+                style: {
+                  ...S.dot,
+                  background: entry.expired === true
+                    ? 'rgba(128,128,128,0.7)'
+                    : 'var(--dsw-alias-state-warn-primary, #e8590c)',
+                },
+              }),
+              h(
+                'span',
+                { className: 'dshs-deleted-text' },
+                h('span', { style: { fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label.id),
+                h('span', { style: { ...S.meta, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, meta),
+              ),
+              h(
+                'span',
+                { style: { ...S.badge, flex: '0 0 auto', background: 'rgba(128,128,128,0.14)' } },
+                reasonLabel(entry.reason),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: S.buttonSmall,
+                  disabled: busy !== '' || entry.canRestore === false,
+                  title: entry.expired === true ? 'Срок карантина истёк' : 'Вернуть сессию в зеркало',
+                  onClick: () => restoreOne(entry),
+                },
+                t('deletedRestore'),
+              ),
+            );
+          }),
+        ),
+        h(
+          'div',
+          { style: S.cardActions },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dshs-btn-primary',
+              style: S.primary,
+              disabled: busy !== '' || !canRestoreAny,
+              onClick: () => void restore(undefined, true),
+            },
+            busy === 'all' ? 'Восстанавливаем…' : `${t('deletedRestoreAll')} (${sessions.filter((entry) => entry.canRestore !== false).length})`,
+          ),
+          h('button', { type: 'button', style: S.buttonSmall, disabled: busy !== '', onClick: () => void refreshTombstones(true) }, t('deletedRefresh')),
+        ),
+        note !== '' ? h('span', { style: S.note }, note) : null,
+        h('span', { style: S.hint }, 'Если сессия вернулась в зеркало, другие устройства получат её при следующем приёме. После восстановления перезапустите DSH, чтобы сессия появилась в списке.'),
       );
     }
 
@@ -3859,9 +4083,17 @@ function CollapsedItem({ title, summary, badge, children }) {
         for (const listener of sessionStates.listeners) listener();
       },
       readSessionStates: () => sessionStates.data,
+      setTombstones: (value) => {
+        tombstonesState.data = value ?? null;
+        tombstonesState.at = Date.now();
+        for (const listener of tombstonesState.listeners) listener();
+      },
+      readTombstones: () => tombstonesState.data,
       sessionLabel,
       badgeOf,
       SESSION_BADGES,
+      DELETED_REASON_LABELS,
+      DELETED_BY_LABELS,
     };
     return module.exports;
   },

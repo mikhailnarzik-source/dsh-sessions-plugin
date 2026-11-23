@@ -26,7 +26,7 @@ assert.equal(name, 'dsh-sync')
 assert.deepEqual(inject, ['connection', 'tools', 'sessionPersistence', 'workspaceRegistry'])
 apply(ctx)
 
-assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/run', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
+assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/restore', '/api/dsh-sync/run', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/tombstones', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
 assert.deepEqual([...tools.keys()].sort(), ['sync_run', 'sync_status'])
 
 const call = async (path, payload) => {
@@ -165,6 +165,15 @@ assert.match(diagnostics.body.report, /диагностика/i)
 const states = await call('/api/dsh-sync/sessions', {})
 assert.equal(states.body.ok, true)
 assert.equal(typeof states.body.states, 'object')
+
+// 12b. «Удалённые»: пустой список и отказ восстановления без id
+const deleted = await call('/api/dsh-sync/tombstones', {})
+assert.equal(deleted.body.ok, true)
+assert.equal(deleted.body.quarantineDays, 30)
+assert.equal(Array.isArray(deleted.body.sessions), true)
+assert.equal(deleted.body.count, 0)
+const restoreWithoutId = await call('/api/dsh-sync/restore', {})
+assert.equal(restoreWithoutId.status, 400, 'без id и all:true — ошибка запроса')
 
 // 13. проверка доступа к Диску без токена отвечает понятной ошибкой
 const yandexProbe = await call('/api/dsh-sync/yandex-check', { backend: 'webdav' })
