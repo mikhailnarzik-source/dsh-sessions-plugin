@@ -19,6 +19,10 @@ window.__ModuleLoader__.load({
     const STATE_PATH = '/api/dsh-sync/state';
     const CONFIG_PATH = '/api/dsh-sync/config';
     const RUN_PATH = '/api/dsh-sync/run';
+    // План «Проверить»: только чтение.
+    const PLAN_PATH = '/api/dsh-sync/plan';
+    // Подтверждённые удаления: единственный путь удаления из зеркала.
+    const PRUNE_PATH = '/api/dsh-sync/prune';
     const CREATE_REPO_PATH = '/api/dsh-sync/create-repo';
     const DIAG_PATH = '/api/dsh-sync/diagnostics';
     const UPDATE_PATH = '/api/dsh-sync/update';
@@ -48,6 +52,7 @@ window.__ModuleLoader__.load({
       actionSyncing: 'Syncing…',
       actionSyncAgain: 'Sync again',
       sectionSync: 'Synchronization',
+      sectionPlan: 'Check',
       sectionConnection: 'Connection',
       sectionExtra: 'Advanced',
       sectionChecks: 'Environment check',
@@ -75,6 +80,7 @@ window.__ModuleLoader__.load({
       actionSyncing: 'Синхронизация…',
       actionSyncAgain: 'Синхронизировать снова',
       sectionSync: 'Синхронизация',
+      sectionPlan: 'Проверка',
       sectionConnection: 'Подключение',
       sectionExtra: 'Дополнительно',
       sectionChecks: 'Проверка окружения',
@@ -941,6 +947,45 @@ function CollapsedItem({ title, summary, badge, children }) {
       )
     }
 
+      /**
+       * Корзина плана: свёрнутая строка со счётчиком, объёмом и списком id.
+       * Списки длинные, поэтому прокручиваются внутри строки.
+       */
+      function PlanBucket({ label, count, bytes, items }) {
+        const size = Number(bytes ?? 0) || 0;
+        const summary = count === 0
+          ? 'нет'
+          : `${count}${size > 0 ? ` · ${(size / 1024).toFixed(1).replace('.', ',')} КБ` : ''}`;
+        return h(
+          CollapsedItem,
+          { title: label, summary, badge: count > 0 ? String(count) : undefined },
+          count === 0
+            ? h('span', { style: { fontSize: 11.5, opacity: 0.6 } }, 'пусто')
+            : h(
+                'div',
+                {
+                  style: {
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 2,
+                    minWidth: 0,
+                    maxHeight: 180,
+                    overflowY: 'auto',
+                    overscrollBehavior: 'contain',
+                  },
+                },
+                ...items.slice(0, 50).map((item) => h(
+                  'span',
+                  { key: item.id, style: { fontSize: 11.5, overflowWrap: 'anywhere' } },
+                  `${item.title !== undefined && item.title !== '' ? `${item.title} — ` : ''}${item.id}`,
+                )),
+                count > items.length
+                  ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё ${count - items.length}`)
+                  : null,
+              ),
+        );
+      }
+
       function SyncCard(props) {
         const view = props?.view;
         const state = useSnapshot();
@@ -1119,8 +1164,52 @@ function CollapsedItem({ title, summary, badge, children }) {
           }
         };
 
+        // Подтверждение удалений — второй клик в карточке «Проверка».
+        const [confirmDeletions, setConfirmDeletions] = React.useState(false);
+
+        /**
+         * «Проверить»: сравнить локальные сессии с зеркалом по id и хвостам
+         * логов. Только чтение: ничего не отправляется, не принимается и не
+         * удаляется — даже карантин не чистится.
+         */
+        const checkPlan = async () => {
+          publish({ busy: 'plan', planError: '', planNote: '' });
+          try {
+            const result = await post(PLAN_PATH, {});
+            if (result?.ok === true) {
+              publish({ busy: '', plan: result, planNote: result.message ?? 'Проверка выполнена: ничего не изменено.' });
+            } else {
+              publish({ busy: '', planError: result?.message ?? 'Не удалось построить план' });
+            }
+          } catch (error) {
+            publish({ busy: '', planError: `Проверка не удалась: ${explain(error)}` });
+          }
+        };
+
+        /**
+         * «Применить удаления (N)»: подтверждённое удаление из зеркала в
+         * карантин на 30 дней. После успеха обновляем план и список «Удалённые».
+         */
+        const applyPlanDeletions = async () => {
+          setConfirmDeletions(false);
+          publish({ busy: 'prune', planError: '', planNote: '' });
+          try {
+            const result = await post(PRUNE_PATH, { confirm: true });
+            if (result?.ok === true) {
+              publish({ busy: '', notice: result.message || 'Удаления применены', plan: null });
+              await refreshTombstones(true);
+              await checkPlan();
+            } else {
+              publish({ busy: '', planError: result?.message ?? 'Не удалось применить удаления' });
+            }
+          } catch (error) {
+            publish({ busy: '', planError: `Удаления не применены: ${explain(error)}` });
+          }
+        };
+
         const checks = data?.checks ?? [];
         const busy = state.busy !== '';
+        const plan = state.plan;
         const status = data?.status;
         const last = data?.lastRun;
         const external = data?.external;
@@ -1225,40 +1314,13 @@ function CollapsedItem({ title, summary, badge, children }) {
                   + '.',
                 )
               : null,
-            last?.requireConfirmation !== undefined && last.requireConfirmation !== null
+            // Отложенные удаления: push их не выполняет. Подробный список и
+            // кнопка подтверждения — в карточке «Проверка» ниже.
+            (last?.skippedDeletions?.removed ?? last?.requireConfirmation?.removed ?? 0) > 0
               ? h(
-                  'div',
-                  { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
-                  h(
-                    'span',
-                    { style: S.error },
-                    `Удаление ${last.requireConfirmation.removed ?? 0} сессий остановлено: `
-                    + ((last.requireConfirmation.subagents ?? 0) > 0
-                      ? 'удаляется родитель с субагентами — подтвердите удаление вместе с ними.'
-                      : `превышен порог (${last.requireConfirmation.maxCount ?? 5} сессий или ${Math.round((last.requireConfirmation.maxRatio ?? 0.2) * 100)}% известных).`),
-                  ),
-                  (last.requireConfirmation.subagents ?? 0) > 0
-                    ? h(
-                        'span',
-                        { style: S.note },
-                        `Вместе с родителем уйдут субагенты: ${last.requireConfirmation.subagents} — их копии попадут в карантин, восстановить можно вместе.`,
-                      )
-                    : null,
-                  h(
-                    'div',
-                    { style: S.buttons },
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        style: S.danger,
-                        disabled: busy,
-                        title: 'Удалить из зеркала именно эти сессии (в карантин на 30 дней)',
-                        onClick: () => void run('push', { confirmPrune: true }),
-                      },
-                      `Подтвердить удаление (${last.requireConfirmation.removed ?? 0})`,
-                    ),
-                  ),
+                  'span',
+                  { style: S.note },
+                  `Удалений ждёт подтверждения: ${last?.skippedDeletions?.removed ?? last.requireConfirmation.removed} — ничего не удалено. Нажмите «Проверить» и «Применить удаления» в карточке «Проверка».`,
                 )
               : null,
             (data?.history?.length ?? 0) > 0
@@ -1289,6 +1351,149 @@ function CollapsedItem({ title, summary, badge, children }) {
                       + (data.automation.lastError ? `; ошибка: ${data.automation.lastError}` : ''),
                 )
               : null,
+          ),
+
+          // --- проверка: план обмена, только чтение -------------------------
+          // «Проверить» ничего не меняет, а показывает шесть корзин и список
+          // удалений. Удаления выполняются только подтверждённой кнопкой.
+          h(
+            Card,
+            {
+              title: t('sectionPlan'),
+              hint: 'Сравнение локальных сессий с зеркалом по идентификаторам и хвостам логов. Проверка только читает: ничего не изменяется.',
+            },
+            h(
+              'div',
+              { style: S.buttons },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dshs-btn-primary',
+                  style: S.primary,
+                  disabled: busy,
+                  onClick: () => void checkPlan(),
+                },
+                state.busy === 'plan' ? 'Проверяю…' : (plan === null || plan === undefined ? 'Проверить' : 'Проверить снова'),
+              ),
+              plan !== null && plan !== undefined
+                ? h('span', { style: S.meta }, `Проверено: ${new Date(plan.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`)
+                : null,
+            ),
+            state.planError ? h('div', { style: S.error }, state.planError) : null,
+            plan === null || plan === undefined
+              ? h(
+                  'span',
+                  { style: S.hint },
+                  'Нажмите «Проверить»: покажем, что уедет в зеркало, что приедет и что было бы удалено. Удаления выполняются только кнопкой «Применить удаления».',
+                )
+              : h(
+                  'div',
+                  { style: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 } },
+                  h(
+                    'span',
+                    { style: S.ok },
+                    state.planNote || 'Проверка выполнена: ничего не изменено.',
+                  ),
+                  plan.warnings?.length > 0
+                    ? h(
+                        'div',
+                        { style: S.error },
+                        ...plan.warnings.map((warning, index) => h('div', { key: `w${index}` }, `Внимание: ${warning}`)),
+                      )
+                    : null,
+                  h(
+                    'div',
+                    { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
+                    h(PlanBucket, { label: 'Только локально', count: plan.counts?.onlyLocal ?? 0, bytes: plan.sizes?.onlyLocal ?? 0, items: plan.buckets?.onlyLocal ?? [] }),
+                    h(PlanBucket, { label: 'Только в зеркале', count: plan.counts?.onlyCloud ?? 0, bytes: plan.sizes?.onlyCloud ?? 0, items: plan.buckets?.onlyCloud ?? [] }),
+                    h(PlanBucket, { label: 'Совпадают', count: plan.counts?.same ?? 0, bytes: plan.sizes?.same ?? 0, items: plan.buckets?.same ?? [] }),
+                    h(PlanBucket, { label: 'Локально новее', count: plan.counts?.localAhead ?? 0, bytes: plan.sizes?.localAhead ?? 0, items: plan.buckets?.localAhead ?? [] }),
+                    h(PlanBucket, { label: 'В зеркале новее', count: plan.counts?.cloudAhead ?? 0, bytes: plan.sizes?.cloudAhead ?? 0, items: plan.buckets?.cloudAhead ?? [] }),
+                    h(PlanBucket, { label: 'Расхождения', count: plan.counts?.conflicts ?? 0, bytes: plan.sizes?.conflicts ?? 0, items: plan.buckets?.conflicts ?? [] }),
+                  ),
+                  (plan.localSkipped ?? 0) > 0
+                    ? h('span', { style: S.note }, `Локальных сессий не участвует в обмене: ${plan.localSkipped} (режим «локальная»).`)
+                    : null,
+                  (plan.deletionCount ?? 0) > 0
+                    ? h(
+                        'div',
+                        { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
+                        h(
+                          'span',
+                          { style: S.error },
+                          `Было бы удалено из зеркала: ${plan.deletionCount}. Это только список — нажмите «Применить удаления», чтобы перенести их в карантин на 30 дней.`,
+                        ),
+                        (plan.requireConfirmation?.subagents ?? 0) > 0
+                          ? h('span', { style: S.note }, `Вместе с родителем уйдут субагенты: ${plan.requireConfirmation.subagents} — их тоже можно будет восстановить.`)
+                          : null,
+                        plan.requireConfirmation?.overCount === true
+                          ? h('span', { style: S.note }, `Больше ${plan.requireConfirmation.maxCount ?? 5} сессий: убедитесь, что это не сбой доступа к диску.`)
+                          : null,
+                        h(
+                          CollapsedItem,
+                          {
+                            title: 'Удаления',
+                            summary: `${plan.deletionCount} · в карантин на 30 дней`,
+                            badge: String(plan.deletionCount),
+                          },
+                          h(
+                            'div',
+                            { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, maxHeight: 200, overflowY: 'auto', overscrollBehavior: 'contain' } },
+                            ...(plan.deletions ?? []).slice(0, 50).map((item) => h(
+                              'span',
+                              { key: item.id, style: { fontSize: 11.5, overflowWrap: 'anywhere' } },
+                              `${item.title !== undefined && item.title !== '' ? `${item.title} — ` : ''}${item.id} (${item.humanReason ?? item.reason})`,
+                            )),
+                            (plan.deletions?.length ?? 0) > 50
+                              ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё ${plan.deletions.length - 50}`)
+                              : null,
+                          ),
+                        ),
+                        confirmDeletions
+                          ? h(
+                              'div',
+                              { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
+                              h('span', { style: S.hint }, `Подтвердите: ${plan.deletionCount} сессий уйдут из зеркала в карантин на 30 дней. Локальные сессии не изменятся.`),
+                              h(
+                                'div',
+                                { style: S.buttons },
+                                h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    style: S.danger,
+                                    disabled: busy,
+                                    onClick: () => void applyPlanDeletions(),
+                                  },
+                                  state.busy === 'prune' ? 'Применяю…' : `Подтвердить удаление (${plan.deletionCount})`,
+                                ),
+                                h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => setConfirmDeletions(false) }, 'Отмена'),
+                              ),
+                            )
+                          : h(
+                              'div',
+                              { style: S.buttons },
+                              h(
+                                'button',
+                                {
+                                  type: 'button',
+                                  style: S.danger,
+                                  disabled: busy,
+                                  title: 'Перенести эти сессии из зеркала в карантин на 30 дней',
+                                  onClick: () => setConfirmDeletions(true),
+                                },
+                                `Применить удаления (${plan.deletionCount})`,
+                              ),
+                            ),
+                      )
+                    : h('span', { style: { fontSize: 12, opacity: 0.75 } }, 'Удалений нет: удалять из зеркала нечего.'),
+                ),
+            h(
+              'span',
+              { style: S.hint },
+              'Проверка сравнивает с копией зеркала на этом компьютере: сеть не используется, журнал запусков не меняется.',
+            ),
           ),
 
           // --- подключение: где зеркало и какой проект синхронизировать -----
@@ -2444,7 +2649,7 @@ function CollapsedItem({ title, summary, badge, children }) {
     // Хранилище состояния синхронизации на уровне модуля: его читают и
     // карточка плагина, и строка в подвале боковой панели.
     const listeners = new Set();
-    let snapshot = { loading: true, data: null, error: '', busy: '', notice: '' };
+    let snapshot = { loading: true, data: null, error: '', busy: '', notice: '', plan: null, planError: '', planNote: '' };
     const useSnapshot = () => {
       const [, force] = React.useReducer((n) => n + 1, 0);
       React.useEffect(() => {
@@ -4886,6 +5091,13 @@ function CollapsedItem({ title, summary, badge, children }) {
         for (const listener of listeners) listener();
       },
       readHostState: () => snapshot.data,
+      // План «Проверить» для тестов карточки: в живом интерфейсе его приносит
+      // маршрут /api/dsh-sync/plan по кнопке.
+      setPlan: (value) => {
+        snapshot = { ...snapshot, plan: value ?? null };
+        for (const listener of listeners) listener();
+      },
+      readPlan: () => snapshot.plan,
       setTombstones: (value) => {
         tombstonesState.data = value ?? null;
         tombstonesState.at = Date.now();

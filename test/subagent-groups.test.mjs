@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto'
 
 import { defaultConfig, saveConfig } from '../lib/config.mjs'
 import { localSessionDir, splitLog } from '../lib/store.mjs'
-import { pull, push } from '../lib/sync.mjs'
+import { applyDeletions, pull, push } from '../lib/sync.mjs'
 import { MODE_CLOUD, MODE_LOCAL, readSessionModes, setSessionMode } from '../lib/session-modes.mjs'
 import { buildSessionGroups, descendantsOf, rootOf } from '../lib/session-groups.mjs'
 import { recordRun, readHistory, removalDetails, subagentStats } from '../lib/history.mjs'
@@ -146,7 +146,7 @@ test('push: ребёнка, которого нет локально, не уд�
     // Локально удалили детей, родитель жив: детей нет, но родитель на месте.
     await rm(localSessionDir(env.homeA, env.projectPathA, ids.child), { recursive: true, force: true })
     await rm(localSessionDir(env.homeA, env.projectPathA, ids.grandchild), { recursive: true, force: true })
-    const result = await push({ home: env.homeA, config: env.configA, confirmPrune: true })
+    const result = await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
 
     assert.equal(result.removed, 0, 'детей живого родителя не удаляем')
     assert.equal(result.childrenMissing.length, 2, 'оба ребёнка отмечены как отсутствующие локально')
@@ -188,7 +188,7 @@ test('prune родителя требует подтверждения и уно
       assert.equal(existsSync(join(mirrorDir(env.configA, id), 'session.v4.jsonl.zstd')), true, 'зеркало не тронуто')
     }
 
-    const confirmed = await push({ home: env.homeA, config: env.configA, confirmPrune: true })
+    const confirmed = await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(confirmed.removed, 3, 'родитель и двое детей ушли в карантин')
     assert.equal(confirmed.childrenQuarantined, 2)
     assert.match(confirmed.removedReason ?? '', /вместе с родителем/)
@@ -229,7 +229,7 @@ test('пул: осиротевшего субагента без родител�
     for (const id of Object.values(ids)) {
       await rm(localSessionDir(env.homeA, env.projectPathA, id), { recursive: true, force: true })
     }
-    const result = await push({ home: env.homeA, config: env.configA, confirmPrune: true })
+    const result = await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(result.removed, 0, 'осиротевшую копию без родителя не удаляем')
     assert.ok((result.orphansProtected ?? []).includes(ids.child), 'ребёнок защищён как сирота')
     assert.equal(existsSync(join(mirrorDir(env.configA, ids.child), 'session.v4.jsonl.zstd')), true)
@@ -253,7 +253,7 @@ test('явная метка удаления ребёнка сильнее за�
         [ids.child]: { at: new Date().toISOString(), device: 'device-a', reason: 'manual', by: 'owner' },
       },
     }))
-    const result = await push({ home: env.homeA, config: env.configA, confirmPrune: true })
+    const result = await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(result.removed, 1, 'ребёнка с явной меткой удаляем')
     assert.deepEqual(result.removedIds, [ids.child])
     assert.equal((result.childrenMissing ?? []).length, 0, 'явная метка отменяет защиту childrenMissing')
@@ -315,7 +315,7 @@ test('pull: метка родителя уносит локальных суба
     for (const id of Object.values(ids)) {
       await rm(localSessionDir(env.homeA, env.projectPathA, id), { recursive: true, force: true })
     }
-    await push({ home: env.homeA, config: env.configA, confirmPrune: true })
+    await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
 
     const result = await pull({ home: env.homeB, config: env.configB })
     assert.equal(result.deleted, 3, 'группа удалена на B целиком')

@@ -244,7 +244,7 @@ test('шапка: иконка в круге, заголовок, подзаго
 })
 
 test('секции-карточки с заголовками и единым оформлением', () => {
-  const titles = ['Синхронизация', 'Подключение', 'Дополнительно', 'Резервный канал', 'Проверка окружения', 'Обслуживание', 'Удалённые']
+  const titles = ['Синхронизация', 'Проверка', 'Подключение', 'Дополнительно', 'Резервный канал', 'Проверка окружения', 'Обслуживание', 'Удалённые']
   for (const title of titles) {
     const heading = nodes.find((node) => node.type === 'h2' && textOf(node).trim() === title)
     assert.ok(heading, `секция «${title}» есть на странице`)
@@ -936,4 +936,72 @@ test('skippedLocal в панели: строка «Локальных сесси
   assert.match(text, /Локальных сессий пропущено: 4 \(копий в зеркале защищено: 2\)\./)
   assert.match(text, /локальных пропущено: 4/)
   exported.__test.setHostState(readyState)
+})
+
+test('карточка «Проверка»: план из шести корзин, «ничего не изменено» и «Применить удаления (N)»', () => {
+  assert.equal(typeof exported.__test.setPlan, 'function', 'крючок плана доступен тестам')
+
+  // Пустое состояние: кнопка «Проверить» и подсказка, что изменения не делаются.
+  exported.__test.setPlan(null)
+  const emptyText = walk(resolveNode(main.component({}))).map(textOf).join('\n')
+  assert.match(emptyText, /Сравнение локальных сессий с зеркалом/, 'карточка «Проверка» на странице')
+  assert.match(emptyText, /Удаления выполняются только кнопкой «Применить удаления»/, 'подсказка про подтверждение')
+  assert.ok(emptyText.includes('Проверить'), 'кнопка «Проверить» есть без плана')
+
+  const plan = {
+    ok: true,
+    readOnly: true,
+    action: 'plan',
+    at: '2026-11-22T10:05:00.000Z',
+    message: 'Проверка выполнена: удалений 2 ждёт подтверждения; ничего не изменено.',
+    counts: { onlyLocal: 1, onlyCloud: 2, same: 3, localAhead: 4, cloudAhead: 5, conflicts: 6 },
+    sizes: { onlyLocal: 1024, onlyCloud: 2048, same: 3072, localAhead: 4096, cloudAhead: 5120, conflicts: 6144 },
+    buckets: {
+      onlyLocal: [{ id: 'session-local-1' }],
+      onlyCloud: [{ id: 'session-cloud-1' }, { id: 'session-cloud-2' }],
+      same: [],
+      localAhead: [],
+      cloudAhead: [],
+      conflicts: [],
+    },
+    deletions: [
+      { id: 'session-drop-1', title: 'Старый диалог', humanReason: 'удалено локально', reason: 'prune', size: 512 },
+      { id: 'session-drop-2', title: '', humanReason: 'удалено вместе с родителем', reason: 'children', size: 256, parent: 'session-drop-1' },
+    ],
+    deletionCount: 2,
+    localSkipped: 1,
+    warnings: [],
+    requireConfirmation: { removed: 2, subagents: 1, maxCount: 5, maxRatio: 0.2, overCount: false },
+  }
+  exported.__test.setPlan(plan)
+  const nodes = walk(resolveNode(main.component({})))
+  const text = nodes.map(textOf).join('\n')
+
+  // Корзины подписаны и показывают числа.
+  for (const label of ['Только локально', 'Только в зеркале', 'Совпадают', 'Локально новее', 'В зеркале новее', 'Расхождения']) {
+    assert.ok(nodes.some((node) => textOf(node).includes(label)), `корзина «${label}» на странице`)
+  }
+  assert.match(text, /Только локально/, 'подпись корзины')
+  assert.match(text, /Только в зеркале/, 'счётчики и списки корзин')
+
+  // План — только чтение: подпись «ничего не изменено» и блок удалений.
+  assert.match(text, /ничего не изменено/i)
+  assert.match(text, /Было бы удалено из зеркала: 2/)
+  assert.match(text, /Удаления 2 2 · в карантин на 30 дней/, 'список удалений свёрнут, но счётчик и срок видны')
+
+  // Кнопка удалений невидима до подтверждения: сначала «Применить удаления (N)».
+  const applyButton = nodes.find((node) => node.type === 'button' && textOf(node).trim() === 'Применить удаления (2)')
+  assert.ok(applyButton, 'кнопка «Применить удаления (2)» есть только при deletions > 0')
+  assert.equal(applyButton.props.style.height, 36, 'кнопка удалений 36 px')
+  assert.equal(applyButton.props.style.borderRadius, 10)
+  const checkButton = nodes.find((node) => node.type === 'button' && textOf(node).trim() === 'Проверить снова')
+  assert.ok(checkButton, 'после проверки кнопка предлагает проверить снова')
+
+  // Без удалений план говорит прямо, что удалять нечего.
+  exported.__test.setPlan({ ...plan, deletions: [], deletionCount: 0, requireConfirmation: undefined })
+  const noDeletions = walk(resolveNode(main.component({}))).map(textOf).join('\n')
+  assert.match(noDeletions, /Удалений нет: удалять из зеркала нечего\./)
+  assert.equal(noDeletions.includes('Применить удаления'), false, 'кнопка удалений скрыта, когда удалений нет')
+
+  exported.__test.setPlan(null)
 })

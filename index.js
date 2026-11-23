@@ -64,6 +64,10 @@ export const inject = ['connection', 'tools', 'sessionPersistence', 'workspaceRe
 const STATE_PATH = '/api/dsh-sync/state'
 const CONFIG_PATH = '/api/dsh-sync/config'
 const RUN_PATH = '/api/dsh-sync/run'
+// План «Проверить»: только чтение, ничего не меняет.
+const PLAN_PATH = '/api/dsh-sync/plan'
+// Подтверждённые удаления: единственный путь удаления из зеркала.
+const PRUNE_PATH = '/api/dsh-sync/prune'
 const CREATE_REPO_PATH = '/api/dsh-sync/create-repo'
 const DIAG_PATH = '/api/dsh-sync/diagnostics'
 const SESSIONS_PATH = '/api/dsh-sync/sessions'
@@ -554,6 +558,9 @@ async function readState(ctx) {
       repoDir: config.repoDir,
       attachments: config.attachments === true,
       useExternal: config.useExternal !== false,
+      // Автоочистка зеркала: по умолчанию выключена, удаления — только по
+      // подтверждённой кнопке «Применить удаления».
+      sync: { autoPrune: config.sync?.autoPrune === true },
       profile: config.profile ?? { enabled: true },
       workspace: config.workspace ?? { enabled: true },
       projectId: projectId ?? '',
@@ -749,6 +756,10 @@ async function saveSettings(ctx, payload) {
   }
   config.attachments = payload.attachments === true
   config.autoUpdate = payload.autoUpdate === true
+  // Удаления из зеркала выполняются только подтверждённым действием
+  // «Применить удаления»; автоочистка (sync.autoPrune) по умолчанию выключена
+  // и push её не использует.
+  config.sync = { ...(config.sync ?? {}), autoPrune: typeof payload.autoPrune === 'boolean' ? payload.autoPrune : config.sync?.autoPrune === true }
 
   // Резервное хранилище: туда дублируются сессии (без вложений).
   if (typeof payload.secondaryBackend === 'string' && payload.secondaryBackend !== '') {
@@ -877,7 +888,10 @@ async function resolveNodeWithZstd() {
  * Выполнить синхронизацию в отдельном процессе на штатном Node: там доступны и
  * полный файловый обход, и zstd. Возвращает undefined, если подходящего Node нет.
  * extraEnv дополняет окружение дочернего процесса (токен GitHub и т. п.);
- * options.confirmPrune снимает порог защиты от массового удаления.
+ * options.confirmPrune — прежний признак подтверждения (совместимость);
+ * options.ids — сузить подтверждённые удаления списком из плана;
+ * options.record=false — не писать last-run и уведомления (для плана: он
+ * только читает).
  */
 async function runViaChild(action, extraEnv = {}, options = {}) {
   const node = await resolveNodeWithZstd()
@@ -890,6 +904,9 @@ async function runViaChild(action, extraEnv = {}, options = {}) {
   const versionEnv = { ...(extraEnv ?? {}) }
   const dshVersion = await hostDshVersion()
   if (dshVersion !== undefined) versionEnv.DSH_SYNC_DSH_VERSION = dshVersion
+  if (Array.isArray(options?.ids) && options.ids.length > 0) {
+    versionEnv.DSH_SYNC_PRUNE_IDS = JSON.stringify(options.ids)
+  }
 
   const started = Date.now()
   const result = await runCapture(node.path, args, { env: { ...node.env, ...versionEnv }, timeoutMs: 600_000 })
@@ -902,26 +919,28 @@ async function runViaChild(action, extraEnv = {}, options = {}) {
     parsed = undefined
   }
 
-  if (parsed === undefined) {
-    const record = {
-      ok: false,
-      at: new Date().toISOString(),
-      action,
-      mode: 'child',
-      message: `дочерний процесс не ответил (код ${result.code}): ${(result.stderr || result.stdout).trim().slice(0, 300)}`,
-      durationMs: Date.now() - started,
-    }
-    await writeLastRun(record)
-    pushNotice('error', `Синхронизация не удалась: ${record.message}`)
-    return record
-  }
+  const record = parsed === undefined
+    ? {
+        ok: false,
+        at: new Date().toISOString(),
+        action,
+        mode: 'child',
+        message: `дочерний процесс не ответил (код ${result.code}): ${(result.stderr || result.stdout).trim().slice(0, 300)}`,
+        durationMs: Date.now() - started,
+      }
+    : { ...parsed, at: new Date().toISOString(), nodePath: node.path, durationMs: parsed.durationMs ?? Date.now() - started }
 
-  const record = { ...parsed, at: new Date().toISOString(), nodePath: node.path, durationMs: parsed.durationMs ?? Date.now() - started }
+  if (options?.record === false) return record
   await writeLastRun(record)
   if (record.ok !== true) {
     pushNotice('error', `Синхронизация не удалась: ${record.message}`)
-  } else if ((record.pull?.imported ?? 0) > 0) {
-    pushNotice('sync', `Принято новых сессий: ${record.pull.imported}. Откройте DSH заново, чтобы увидеть их в списке.`)
+  } else {
+    if ((record.pull?.imported ?? 0) > 0) {
+      pushNotice('sync', `Принято новых сессий: ${record.pull.imported}. Откройте DSH заново, чтобы увидеть их в списке.`)
+    }
+    if ((record.prune?.removed ?? 0) > 0) {
+      pushNotice('sync', `Удалено в карантин: ${record.prune.removed}. Вернуть можно в карточке «Удалённые».`)
+    }
   }
   return record
 }
@@ -1105,7 +1124,9 @@ async function runSync(ctx, action, options = {}) {
       if (result.push.profile !== undefined) messages.push(`профиль: записей ${result.push.profile.patchEntries ?? 0}`)
       if (result.push.profileError !== undefined) messages.push(`профиль не отправлен: ${result.push.profileError}`)
       if (result.push.workspace !== undefined) messages.push(`рабочие пространства: ${result.push.workspace.workspaces ?? 0}`)
-      if (result.push.requireConfirmation !== undefined) messages.push(`удаление ${result.push.requireConfirmation.removed} сессий ждёт подтверждения`)
+      if (result.push.requireConfirmation !== undefined) {
+        messages.push(`удаление ${result.push.skippedDeletions?.removed ?? result.push.requireConfirmation.removed} сессий ждёт подтверждения — ничего не удалено`)
+      }
       if (result.push.secondary !== undefined) messages.push(`резерв (${config.secondary?.backend ?? 'дубль'}): отправлено ${result.push.secondary.pushed}`)
       if (result.push.secondaryBlocked !== undefined) messages.push(result.push.secondaryBlocked.message)
       if (result.push.secondaryError !== undefined) messages.push(`резерв недоступен: ${result.push.secondaryError}`)
@@ -1153,6 +1174,10 @@ async function runSync(ctx, action, options = {}) {
     replaced: removal.replaced,
     replacedIds: removal.replacedIds,
     conflictIds: (result.pull?.conflictDetails ?? []).map(item => item.id),
+    // Сводка плана и отложенные удаления — в журнал последнего запуска:
+    // панель и sync_status показывают «удалений: N (ждёт подтверждения)».
+    plan: result.push?.plan,
+    skippedDeletions: result.push?.skippedDeletions,
     requireConfirmation: result.push?.requireConfirmation,
     guarded: (result.push?.guarded ?? []).length,
     secondaryBlocked: result.push?.secondaryBlocked,
@@ -1170,6 +1195,121 @@ async function runSync(ctx, action, options = {}) {
   await writeLastRun(record)
   invalidateSessionStates()
   return record
+}
+
+/**
+ * План «Проверить»: только чтение.
+ *
+ * Сравнивает локальные сессии с зеркалом по id и хвостам логов и возвращает
+ * шесть корзин плюс список сессий, которые были бы удалены. Ничего не пишет:
+ * ни last-run, ни состояние, ни карантин.
+ */
+async function runPlan(ctx) {
+  const home = dshHome()
+  const config = await applySecret(ctx, await loadConfig(home))
+  if (Object.keys(config.projects ?? {}).length === 0) {
+    return { ok: false, action: 'plan', message: 'Сначала укажите проект в настройках плагина.' }
+  }
+  const githubToken = await resolveGitHubToken(ctx)
+  if (githubToken !== '') process.env.GITHUB_TOKEN = githubToken
+  const viaChild = await runViaChild(
+    'plan',
+    githubToken === '' ? {} : { GITHUB_TOKEN: githubToken },
+    { record: false },
+  )
+  if (viaChild !== undefined) {
+    // Синхронизация уже идёт другим процессом — это не план, а отказ.
+    if (viaChild.skipped === true) return { ok: false, action: 'plan', message: viaChild.message }
+    return viaChild
+  }
+
+  // Запасной путь без отдельного Node: host-процесс тоже умеет читать zstd,
+  // если сборка это позволяет.
+  const started = Date.now()
+  try {
+    const { buildPlan } = await import('./lib/plan.mjs')
+    const plan = await buildPlan({ home, config, dshVersion: await hostDshVersion() })
+    return { ...plan, mode: 'host', durationMs: Date.now() - started }
+  } catch (error) {
+    return {
+      ok: false,
+      action: 'plan',
+      message: `план не построен: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
+/**
+ * «Применить удаления (N)»: подтверждённое удаление из зеркала в карантин.
+ * Без `confirm: true` ничего не делает и просит подтверждение.
+ */
+async function runPrune(ctx, payload = {}) {
+  const home = dshHome()
+  if (payload?.confirm !== true) {
+    return {
+      ok: false,
+      action: 'prune',
+      code: 'confirm-required',
+      message: 'удаление из зеркала выполняется только с подтверждением: нажмите «Применить удаления» и подтвердите',
+    }
+  }
+  const config = await applySecret(ctx, await loadConfig(home))
+  if (Object.keys(config.projects ?? {}).length === 0) {
+    return { ok: false, action: 'prune', message: 'Сначала укажите проект в настройках плагина.' }
+  }
+  const githubToken = await resolveGitHubToken(ctx)
+  if (githubToken !== '') process.env.GITHUB_TOKEN = githubToken
+  const ids = Array.isArray(payload.ids)
+    ? payload.ids.filter(id => typeof id === 'string' && id.trim() !== '').map(id => id.trim())
+    : undefined
+  const viaChild = await runViaChild(
+    'prune',
+    githubToken === '' ? {} : { GITHUB_TOKEN: githubToken },
+    { record: true, ids },
+  )
+  if (viaChild !== undefined) {
+    invalidateSessionStates()
+    if (viaChild.skipped === true) return { ok: false, action: 'prune', message: viaChild.message }
+    return viaChild
+  }
+
+  const started = Date.now()
+  try {
+    const { applyDeletions } = await import('./lib/sync.mjs')
+    const summary = await applyDeletions({ home, config, confirm: true, ids, dshVersion: await hostDshVersion() })
+    const record = {
+      ok: true,
+      at: new Date().toISOString(),
+      action: 'prune',
+      mode: 'host',
+      message: summary.message ?? `удалено в карантин: ${summary.removed}`,
+      removed: summary.removed,
+      removedIds: summary.removedIds ?? [],
+      removedReason: summary.removedReason ?? '',
+      reasons: summary.reasons ?? ['manual'],
+      by: summary.by ?? ['owner'],
+      removedDetails: summary.removedDetails ?? [],
+      committed: summary.committed === true,
+      skippedDeletions: summary.skippedDeletions,
+      durationMs: Date.now() - started,
+    }
+    await writeLastRun(record)
+    invalidateSessionStates()
+    if (record.removed > 0) pushNotice('sync', `Удалено в карантин: ${record.removed}. Вернуть можно в карточке «Удалённые».`)
+    return record
+  } catch (error) {
+    const record = {
+      ok: false,
+      at: new Date().toISOString(),
+      action: 'prune',
+      mode: 'host',
+      message: error instanceof Error ? error.message : String(error),
+      durationMs: Date.now() - started,
+    }
+    await writeLastRun(record)
+    pushNotice('error', `Удаление не выполнено: ${record.message}`)
+    return record
+  }
 }
 
 /**
@@ -2198,6 +2338,29 @@ export function apply(ctx) {
     }
   })
 
+  // «Проверить»: план обмена, только чтение. Ничего не удаляет, не пишет и не
+  // трогает журнал — интерфейс показывает корзины и подпись «ничего не изменено».
+  route('plan', PLAN_PATH, async () => {
+    try {
+      return json(await runPlan(ctx))
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  // «Применить удаления (N)»: единственный путь удаления из зеркала.
+  // Без confirm:true маршрут возвращает 409 и просит подтверждение.
+  route('prune', PRUNE_PATH, async (request) => {
+    try {
+      const payload = await body(request)
+      const result = await runPrune(ctx, payload)
+      const status = result?.code === 'confirm-required' ? 409 : result?.ok === false ? 500 : 200
+      return json(result, status)
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
   route('create-repo', CREATE_REPO_PATH, async () => {
     try {
       return json(await createRepository(ctx))
@@ -2640,6 +2803,16 @@ export function apply(ctx) {
         const skippedLocal = Number(state.lastRun.skippedLocal ?? 0) || 0
         if (skippedLocal > 0) {
           lines.push(`  локальных сессий пропущено: ${skippedLocal}${(state.lastRun.localMirrorProtected ?? 0) > 0 ? ` (копий в зеркале защищено: ${state.lastRun.localMirrorProtected})` : ''}`)
+        }
+        // Отложенные удаления: push их не выполняет, нужно отдельное
+        // подтверждённое действие «Применить удаления».
+        const pendingDeletions = Number(state.lastRun.skippedDeletions?.removed ?? 0) || 0
+        if (pendingDeletions > 0) {
+          lines.push(`  удалений: ${pendingDeletions} (ждёт подтверждения)`)
+        }
+        const plan = state.lastRun.plan
+        if (plan?.counts !== undefined) {
+          lines.push(`  план: только локально ${plan.counts.onlyLocal ?? 0}, только в зеркале ${plan.counts.onlyCloud ?? 0}, локально новее ${plan.counts.localAhead ?? 0}, в зеркале новее ${plan.counts.cloudAhead ?? 0}, конфликтов ${plan.counts.conflicts ?? 0}, удалений ${plan.deletions ?? 0}`)
         }
       }
       if (state.automation) {

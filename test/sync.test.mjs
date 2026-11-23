@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto'
 
 import { canonicalCwd, defaultConfig, loadConfig, saveConfig } from '../lib/config.mjs'
 import { localSessionDir, canonicalize, remapTo, splitLog } from '../lib/store.mjs'
-import { pull, push } from '../lib/sync.mjs'
+import { applyDeletions, pull, push } from '../lib/sync.mjs'
 
 // --- helpers ---------------------------------------------------------------
 
@@ -196,7 +196,7 @@ test('push без адреса репозитория говорит об это
   }
 })
 
-test('push удаляет из зеркала сессии, удалённые локально (с подтверждением и карантином)', async () => {
+test('push удаления не выполняет, а подтверждённое «Применить удаления» переносит в карантин', async () => {
   const env = await makeEnvironment()
   try {
     const keep = `session-${randomUUID()}`
@@ -207,15 +207,15 @@ test('push удаляет из зеркала сессии, удалённые �
     assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'alpha', drop, 'session.v4.jsonl.zstd')), true)
 
     await rm(dropDir, { recursive: true, force: true })
-    // Одна удалённая сессия из двух известных — больше 20%: порог останавливает
-    // удаление, пока не будет явного подтверждения.
+    // push ничего не удаляет: кандидат только показывается как отложенный.
     const blocked = await push({ home: env.homeA, config: env.configA })
     assert.equal(blocked.removed, 0)
+    assert.equal(blocked.skippedDeletions.removed, 1)
     assert.ok(blocked.requireConfirmation, 'удаление ждёт подтверждения')
     assert.equal(blocked.requireConfirmation.removed, 1)
     assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'alpha', drop, 'session.v4.jsonl.zstd')), true, 'без подтверждения зеркало не тронуто')
 
-    const result = await push({ home: env.homeA, config: env.configA, confirmPrune: true })
+    const result = await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(result.removed, 1)
     assert.deepEqual(result.removedIds, [drop])
     assert.equal(result.removedReason, 'удалено локально')

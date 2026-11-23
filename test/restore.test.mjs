@@ -17,7 +17,7 @@ import { zstdCompressSync } from 'node:zlib'
 
 import { defaultConfig, saveConfig } from '../lib/config.mjs'
 import { localSessionDir, splitLog } from '../lib/store.mjs'
-import { pull, push } from '../lib/sync.mjs'
+import { applyDeletions, pull, push } from '../lib/sync.mjs'
 import { readHistory, recordRun, removalDetails } from '../lib/history.mjs'
 import {
   QUARANTINE_DAYS,
@@ -84,7 +84,7 @@ async function writeManualTombstone(repoDir, id, extra = {}) {
 
 // --- 1. метки при удалении -------------------------------------------------
 
-test('prune пишет reason=prune/by=sync, подтверждённая пачка — manual/owner с size', async () => {
+test('подтверждённое удаление пишет reason=manual/by=owner с size, старое поле prune не используется', async () => {
   const env = await makeEnvironment()
   try {
     const ids = []
@@ -95,39 +95,46 @@ test('prune пишет reason=prune/by=sync, подтверждённая пач
     }
     await push({ home: env.homeA, config: env.configA })
 
-    // Один удалённый из десяти — ниже порога, удаление проходит сразу.
+    // Push удаления не выполняет: одна удалённая из десяти только ждёт
+    // подтверждения (раньше проходила сразу как «ниже порога»).
     await rm(localSessionDir(env.homeA, env.projectPathA, ids[0]), { recursive: true, force: true })
-    const pruned = await push({ home: env.homeA, config: env.configA })
+    const pending = await push({ home: env.homeA, config: env.configA })
+    assert.equal(pending.removed, 0, 'push ничего не удалил')
+    assert.equal(pending.skippedDeletions.removed, 1)
+
+    const pruned = await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(pruned.removed, 1)
-    assert.deepEqual(pruned.removedReasons, ['prune'], 'автоочистка помечена prune')
-    assert.deepEqual(pruned.removedBy, ['sync'], 'автор — синхронизация')
-    assert.deepEqual(pruned.removedDetails, [{ id: ids[0], reason: 'prune', by: 'sync' }])
+    assert.deepEqual(pruned.removedReasons, ['manual'], 'удаление помечено ручным')
+    assert.deepEqual(pruned.removedBy, ['owner'], 'автор — пользователь')
+    assert.deepEqual(pruned.removedDetails, [{ id: ids[0], reason: 'manual', by: 'owner' }])
 
     const afterPrune = await readTombstones(env.configA.repoDir)
     const prunedEntry = afterPrune.sessions[ids[0]]
-    assert.equal(prunedEntry.reason, 'prune')
-    assert.equal(prunedEntry.by, 'sync')
+    assert.equal(prunedEntry.reason, 'manual')
+    assert.equal(prunedEntry.by, 'owner')
     assert.equal(typeof prunedEntry.at, 'string')
     assert.equal(prunedEntry.device, 'device-a')
     assert.equal(prunedEntry.title, 'Диалог 0', 'название сохранено для панели')
     assert.ok(prunedEntry.bytes > 0, 'объём удалённого лога сохранён')
+    assert.equal(prunedEntry.size, 1, 'в метке есть размер пачки')
     assert.equal(isActiveTombstone(prunedEntry), true)
 
     const deletedAt = JSON.parse(await readFile(join(quarantineDir(env.configA, ids[0]), 'deleted-at.json'), 'utf8'))
-    assert.equal(deletedAt.reason, 'prune')
-    assert.equal(deletedAt.by, 'sync')
+    assert.equal(deletedAt.reason, 'manual')
+    assert.equal(deletedAt.by, 'owner')
     assert.equal(deletedAt.device, 'device-a')
     assert.equal(deletedAt.reasonLabel, 'удалено локально', 'человекочитаемая причина сохранена')
 
-    // Три удаления из девяти известных — выше порога: нужна пачка с подтверждением.
+    // Три удаления из девяти известных — подтверждённая пачка.
     for (const id of ids.slice(1, 4)) {
       await rm(localSessionDir(env.homeA, env.projectPathA, id), { recursive: true, force: true })
     }
     const blocked = await push({ home: env.homeA, config: env.configA })
     assert.equal(blocked.removed, 0)
-    assert.ok(blocked.requireConfirmation, 'пачка ждёт подтверждения')
+    assert.equal(blocked.skippedDeletions.removed, 3)
+    assert.equal(blocked.skippedDeletions.overRatio, true, '3 из 9 — выше доли')
 
-    const confirmed = await push({ home: env.homeA, config: env.configA, confirmPrune: true })
+    const confirmed = await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(confirmed.removed, 3)
     assert.deepEqual(confirmed.removedReasons, ['manual'], 'подтверждённая пачка — ручное удаление')
     assert.deepEqual(confirmed.removedBy, ['owner'], 'автор — пользователь')
@@ -172,7 +179,7 @@ test('повторное удаление заменяет старую кара
 
     // Первое удаление: карантинная копия уже заняла место.
     await rm(localSessionDir(env.homeA, env.projectPathA, id), { recursive: true, force: true })
-    await push({ home: env.homeA, config: env.configA })
+    await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(existsSync(quarantineDir(env.configA, id)), true)
 
     // Сессия «вернулась» на устройство и снова ушла в зеркало (метка снята).
@@ -181,7 +188,8 @@ test('повторное удаление заменяет старую кара
 
     // Удаляем её ещё раз: старая карантинная копия того же id заменяется.
     await rm(localSessionDir(env.homeA, env.projectPathA, id), { recursive: true, force: true })
-    const replaced = await push({ home: env.homeA, config: env.configA })
+    await push({ home: env.homeA, config: env.configA })
+    const replaced = await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(replaced.removed, 1)
     assert.equal(replaced.replaced, 1, 'замена карантина посчитана')
     assert.deepEqual(replaced.replacedIds, [id])
@@ -189,7 +197,7 @@ test('повторное удаление заменяет старую кара
     assert.equal(data.sessions[id].replaced, true, 'в метке есть флаг замены')
     const removal = removalDetails({ push: replaced })
     assert.ok(removal.reasons.includes('replaced'), 'код replaced попадает в журнал')
-    assert.ok(removal.by.includes('sync'))
+    assert.ok(removal.by.includes('owner'))
   } finally {
     await rm(env.root, { recursive: true, force: true })
   }
@@ -273,9 +281,12 @@ test('git: ручная метка удаления не затирается fe
     assert.equal(data.sessions[id]?.by, 'owner')
 
     const pushed = await push({ home, config })
-    assert.equal(pushed.removed, 1)
-    assert.deepEqual(pushed.removedReasons, ['manual'], 'отправка сохранила ручную причину')
-    assert.deepEqual(pushed.removedBy, ['owner'])
+    assert.equal(pushed.removed, 0, 'push сам ничего не удаляет')
+    assert.equal(pushed.skippedDeletions.removed, 1)
+    const pruned = await applyDeletions({ home, config, confirm: true })
+    assert.equal(pruned.removed, 1)
+    assert.deepEqual(pruned.removedReasons, ['manual'], 'подтверждённое удаление сохранило ручную причину')
+    assert.deepEqual(pruned.removedBy, ['owner'])
     data = await readTombstones(mirror)
     assert.equal(data.sessions[id].reason, 'manual')
     assert.equal(data.sessions[id].by, 'owner')
@@ -300,7 +311,7 @@ test('restore одной сессии: карантин зеркала и лок
 
     const id = ids[0]
     await rm(localSessionDir(env.homeA, env.projectPathA, id), { recursive: true, force: true })
-    await push({ home: env.homeA, config: env.configA })
+    await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(existsSync(join(quarantineDir(env.configA, id), 'session.v4.jsonl.zstd')), true, 'копия в карантине')
     assert.equal(existsSync(mirrorDir(env.configA, id)), false, 'в зеркале её нет')
 
@@ -324,7 +335,7 @@ test('restore одной сессии: карантин зеркала и лок
     const restoredData = await readTombstones(env.configA.repoDir)
     assert.equal(restoredData.sessions[id].reason, 'restored', 'надгробие помечено restored')
     assert.equal(restoredData.sessions[id].by, 'owner')
-    assert.equal(restoredData.sessions[id].restoredFrom, 'prune')
+    assert.equal(restoredData.sessions[id].restoredFrom, 'manual', 'метка помнит ручное удаление')
     assert.equal(isActiveTombstone(restoredData.sessions[id]), false, 'снятая метка не действует')
     assert.equal((await listTombstones({ home: env.homeA, repoDir: env.configA.repoDir, projects: env.configA.projects })).length, 0, 'снятая метка в списке не остаётся')
 
@@ -358,7 +369,7 @@ test('restore всех: возвращаются карантинные копи
     for (const id of ids.slice(0, 2)) {
       await rm(localSessionDir(env.homeA, env.projectPathA, id), { recursive: true, force: true })
     }
-    const removed = await push({ home: env.homeA, config: env.configA, confirmPrune: true })
+    const removed = await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     assert.equal(removed.removed, 2)
 
     const result = await restoreTombstones({
@@ -447,13 +458,13 @@ test('истёкший карантин: метка reason=expired, восста
     await push({ home: env.homeA, config: env.configA })
     const id = ids[0]
     await rm(localSessionDir(env.homeA, env.projectPathA, id), { recursive: true, force: true })
-    await push({ home: env.homeA, config: env.configA })
+    await applyDeletions({ home: env.homeA, config: env.configA, confirm: true })
     const quarantine = quarantineDir(env.configA, id)
     assert.equal(existsSync(quarantine), true)
 
     // Состариваем карантин на 40 дней.
     const old = new Date(Date.now() - 40 * 24 * 60 * 60_000).toISOString()
-    await writeFile(join(quarantine, 'deleted-at.json'), `${JSON.stringify({ at: old, reason: 'prune', by: 'sync' })}\n`, 'utf8')
+    await writeFile(join(quarantine, 'deleted-at.json'), `${JSON.stringify({ at: old, reason: 'manual', by: 'owner' })}\n`, 'utf8')
 
     const purged = await push({ home: env.homeA, config: env.configA })
     assert.equal(purged.quarantinePurged, 1, 'карантин вычищен')

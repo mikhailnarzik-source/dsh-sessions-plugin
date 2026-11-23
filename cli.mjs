@@ -16,7 +16,8 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { loadConfig, normalizeProjectId, resolveDshHome, saveConfig } from './lib/config.mjs'
 import { listLocalSessions, listMirrorSessions, sessionsOfProject } from './lib/store.mjs'
-import { pull, push } from './lib/sync.mjs'
+import { pull, push, applyDeletions } from './lib/sync.mjs'
+import { buildPlan } from './lib/plan.mjs'
 import { ensureRepo, git, setRemote } from './lib/git.mjs'
 import { collectDiagnostics } from './lib/diagnostics.mjs'
 import { repairLog } from './lib/repair.mjs'
@@ -27,7 +28,7 @@ import { createRemote } from './lib/remote.mjs'
 import { hasChanges } from './lib/git.mjs'
 import { listTombstones, restoreTombstones } from './lib/tombstones.mjs'
 import { applyWorkspaceDefaults } from './lib/session-modes.mjs'
-import { LAST_RUN_FILE } from './lib/history.mjs'
+import { recordRun, LAST_RUN_FILE } from './lib/history.mjs'
 
 const VALUE_FLAGS = new Set(['home', 'remote', 'repo', 'branch', 'path', 'title', 'project', 'backend', 'months', 'yandex-token', 'yandex-path'])
 
@@ -36,7 +37,7 @@ function parseArgs(argv) {
   const positional = []
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--dry-run' || arg === '--prune' || arg === '--no-prune' || arg === '--attachments' || arg === '--save') {
+    if (arg === '--dry-run' || arg === '--prune' || arg === '--no-prune' || arg === '--attachments' || arg === '--save' || arg === '--confirm') {
       opts[arg.slice(2)] = true
       continue
     }
@@ -404,6 +405,96 @@ async function cmdRestore(sub, rest, opts) {
   }
 }
 
+/** Подписи шести корзин плана — те же, что в интерфейсе. */
+const PLAN_BUCKET_LABELS = {
+  onlyLocal: 'только локально',
+  onlyCloud: 'только в зеркале',
+  same: 'одинаковые',
+  localAhead: 'локально новее',
+  cloudAhead: 'в зеркале новее',
+  conflicts: 'расхождения',
+}
+
+/**
+ * `dsh-sync plan` — проверка без изменений: корзины и список удалений.
+ * Сравнение идёт с локальной копией зеркала (сеть не используется).
+ */
+async function cmdPlan(opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+  if (Object.keys(config.projects).length === 0) throw new Error('проекты не настроены: dsh-sync project add <id> --path <путь>')
+  const plan = await buildPlan({ home: dshHome, config, project: opts.project })
+  console.log('проверка: ничего не изменено — это план, а не действие')
+  for (const [bucket, label] of Object.entries(PLAN_BUCKET_LABELS)) {
+    const count = plan.counts[bucket] ?? 0
+    const size = plan.sizes[bucket] ?? 0
+    console.log(`${label}: ${count}${size > 0 ? ` (${(size / 1024).toFixed(1)} КБ)` : ''}`)
+  }
+  const deletions = plan.deletions ?? []
+  if (deletions.length === 0) {
+    console.log('удалений нет')
+  } else {
+    console.log(`\nудалений ждёт подтверждения: ${deletions.length}`)
+    for (const item of deletions.slice(0, 20)) {
+      const title = item.title !== undefined && item.title !== '' ? ` — ${item.title}` : ''
+      console.log(`  ${item.id}${title} (${item.humanReason ?? item.reason})`)
+    }
+    if (deletions.length > 20) console.log(`  … ещё ${deletions.length - 20}`)
+    console.log('применить: dsh-sync prune --confirm')
+  }
+  for (const warning of plan.warnings ?? []) console.log(`внимание: ${warning}`)
+}
+
+/**
+ * `dsh-sync prune --confirm` — подтверждённое удаление из зеркала в карантин.
+ * Без `--confirm` только подсказывает команду и ничего не трогает.
+ */
+async function cmdPrune(sub, rest, opts) {
+  const dshHome = home(opts)
+  if (opts.confirm !== true) {
+    console.log('удаление из зеркала выполняется только с подтверждением: dsh-sync prune --confirm')
+    console.log('сначала посмотрите план: dsh-sync plan')
+    process.exitCode = 2
+    return
+  }
+  const config = await loadConfig(dshHome)
+  if (Object.keys(config.projects).length === 0) throw new Error('проекты не настроены: dsh-sync project add <id> --path <путь>')
+  const ids = rest.filter(id => typeof id === 'string' && id.trim() !== '')
+  const result = await applyDeletions({
+    home: dshHome,
+    config,
+    project: opts.project,
+    confirm: true,
+    ids: ids.length > 0 ? ids : undefined,
+  })
+  if (result.ok !== true) throw new Error(result.message ?? 'удаление не выполнено')
+  // Журнал: ручное удаление с причиной и автором, как из панели.
+  await recordRun(dshHome, {
+    ok: true,
+    at: new Date().toISOString(),
+    action: 'prune',
+    mode: 'cli',
+    message: result.message ?? `перенесено в карантин: ${result.removed}`,
+    removed: result.removed ?? 0,
+    removedIds: (result.removedIds ?? []).slice(0, 100),
+    removedReason: result.removedReason ?? '',
+    reasons: result.reasons ?? ['manual'],
+    by: result.by ?? ['owner'],
+    removedDetails: result.removedDetails ?? [],
+    committed: result.committed === true,
+  })
+  console.log(`перенесено в карантин: ${result.removed}`)
+  for (const detail of (result.removedDetails ?? []).slice(0, 30)) {
+    console.log(`  ${detail.id} — ${detail.reason}/${detail.by}`)
+  }
+  if ((result.removed ?? 0) > 0) {
+    console.log(`коммит: ${result.committed ? 'создан' : 'нет изменений'}, push: ${result.pushedToRemote ? 'да' : 'нет'}`)
+    console.log('вернуть можно командой: dsh-sync restore <id>')
+  } else if (result.message !== undefined) {
+    console.log(result.message)
+  }
+}
+
 async function main() {
   const { command, sub, rest, opts } = parseArgs(process.argv.slice(2))
   const dshHome = home(opts)
@@ -412,14 +503,25 @@ async function main() {
   if (command === 'project') return cmdProject(sub, rest, opts)
   if (command === 'deleted') return cmdDeleted(opts)
   if (command === 'restore') return cmdRestore(sub, rest, opts)
+  if (command === 'plan') return cmdPlan(opts)
+  if (command === 'prune') return cmdPrune(sub, rest, opts)
 
   if (command === 'push' || command === 'pull') {
     const config = await loadConfig(dshHome)
     if (Object.keys(config.projects).length === 0) throw new Error('проекты не настроены: dsh-sync project add <id> --path <путь>')
     if (command === 'push') {
+      // `--dry-run` показывает тот же план, что и `dsh-sync plan`: общий модуль
+      // планирования, ничего не меняется и не удаляется.
+      if (opts['dry-run']) return cmdPlan(opts)
+      // push ничего не удаляет из зеркала: только добавляет и обновляет.
       const result = await push({ home: dshHome, config, project: opts.project, prune: opts['no-prune'] ? false : true })
       console.log(`отправлено сессий: ${result.pushed}`)
       console.log(`удалено в зеркале: ${result.removed}`)
+      const skippedDeletions = result.skippedDeletions?.removed ?? 0
+      if (skippedDeletions > 0) {
+        console.log(`удалений ждёт подтверждения: ${skippedDeletions} (ничего не удалено)`)
+        console.log('посмотреть план: dsh-sync plan; применить: dsh-sync prune --confirm')
+      }
       if (result.attachments) {
         console.log(`вложений добавлено: ${result.attachments.added} (${(result.attachments.bytes / 1048576).toFixed(1)} MB)`)
       }
@@ -461,8 +563,10 @@ async function main() {
   console.log('  dsh-sync compact [--months 36] [--dry-run]')
   console.log('  dsh-sync repair [--dry-run]')
   console.log('  dsh-sync prune-attachments [--dry-run]')
-  console.log('  dsh-sync push [--project <id>] [--no-prune]')
+  console.log('  dsh-sync push [--project <id>] [--dry-run] — без удалений; --dry-run показывает план')
   console.log('  dsh-sync pull [--project <id>] [--dry-run]')
+  console.log('  dsh-sync plan [--project <id>] — проверить без изменений (шесть корзин и удаления)')
+  console.log('  dsh-sync prune --confirm [--project <id>] — применить удаления из плана в карантин')
   console.log('  dsh-sync deleted — список удалённых сессий в карантине')
   console.log('  dsh-sync restore <id> | --all — вернуть сессию из карантина')
   console.log('')

@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { zstdCompressSync } from 'node:zlib'
 
-import { pull, push } from '../lib/sync.mjs'
+import { applyDeletions, pull, push } from '../lib/sync.mjs'
 import { localSessionDir } from '../lib/store.mjs'
 
 function sessionBytes(projectPath, id) {
@@ -80,7 +80,7 @@ test('удаление сессии доезжает до другого уст�
     assert.equal(blocked.removed, 0)
     assert.ok(blocked.requireConfirmation, 'удаление ждёт подтверждения')
 
-    const removed = await push({ home: homeA, config: env.configA, confirmPrune: true })
+    const removed = await applyDeletions({ home: homeA, config: env.configA, confirm: true })
     assert.equal(removed.removed, 1)
     assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'p', id)), false, 'из зеркала удалена')
     assert.equal(existsSync(join(env.configA.repoDir, 'sessions', 'p', '_deleted', id, 'session.v4.jsonl.zstd')), true, 'карантин на месте')
@@ -113,7 +113,7 @@ test('вернувшаяся сессия снимает надгробие', as
     const dir = await writeSession(homeA, env.project, id)
     await push({ home: homeA, config: env.configA })
     await rm(dir, { recursive: true, force: true })
-    await push({ home: homeA, config: env.configA, confirmPrune: true })
+    await applyDeletions({ home: homeA, config: env.configA, confirm: true })
 
     // Сессия «восстановлена» на устройстве и снова уходит в зеркало.
     await writeSession(homeA, env.project, id)

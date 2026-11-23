@@ -27,7 +27,7 @@ assert.equal(name, 'dsh-sync')
 assert.deepEqual(inject, ['connection', 'tools', 'sessionPersistence', 'workspaceRegistry'])
 apply(ctx)
 
-assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/profile/apply', '/api/dsh-sync/restore', '/api/dsh-sync/run', '/api/dsh-sync/secondary-init', '/api/dsh-sync/session-cloud-copy', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/tombstones', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
+assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/plan', '/api/dsh-sync/profile', '/api/dsh-sync/profile/apply', '/api/dsh-sync/prune', '/api/dsh-sync/restore', '/api/dsh-sync/run', '/api/dsh-sync/secondary-init', '/api/dsh-sync/session-cloud-copy', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/tombstones', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
 assert.deepEqual([...tools.keys()].sort(), ['sync_run', 'sync_status'])
 
 const call = async (path, payload) => {
@@ -74,6 +74,23 @@ const run = await call('/api/dsh-sync/run', { action: 'pull' })
 assert.equal(run.status, 200)
 assert.equal(typeof run.body.ok, 'boolean')
 assert.equal(typeof run.body.message, 'string')
+
+// 5а. «Проверить»: план шести корзин, только чтение; удаление без подтверждения
+// маршрут отклоняет с понятным кодом.
+const lastRunFile = join(home, 'dsh-sync', 'last-run.json')
+const lastRunBefore = existsSync(lastRunFile) ? await readFile(lastRunFile, 'utf8') : ''
+const planCall = await call('/api/dsh-sync/plan', {})
+assert.equal(planCall.status, 200)
+assert.equal(planCall.body.ok, true)
+assert.equal(planCall.body.readOnly, true, 'план помечен как read-only')
+assert.ok(planCall.body.counts !== undefined, 'корзины плана пришли')
+assert.match(planCall.body.message, /ничего не изменено/)
+const lastRunAfter = existsSync(lastRunFile) ? await readFile(lastRunFile, 'utf8') : ''
+assert.equal(lastRunAfter, lastRunBefore, 'план не меняет журнал запусков')
+const pruneNoConfirm = await call('/api/dsh-sync/prune', {})
+assert.equal(pruneNoConfirm.status, 409, 'без confirm:true маршрут просит подтверждение')
+assert.equal(pruneNoConfirm.body.code, 'confirm-required')
+assert.match(pruneNoConfirm.body.message, /подтвержд/)
 
 // 6. битое тело запроса не ломает маршрут
 const bad = await routes.get('/api/dsh-sync/config').fetch(new Request('http://local/api/dsh-sync/config', {
@@ -345,6 +362,25 @@ await call('/api/dsh-sync/config', {
 })
 const afterChange = await call('/api/dsh-sync/state', {})
 assert.equal(afterChange.body.secondary.initialized, false, 'после смены папки нужна сверка')
+
+// 9. sync_status показывает отложенные удаления и сводку плана.
+await mkdir(join(home, 'dsh-sync'), { recursive: true })
+await writeFile(join(home, 'dsh-sync', 'last-run.json'), JSON.stringify({
+  ok: true,
+  at: new Date().toISOString(),
+  action: 'push',
+  mode: 'child',
+  message: 'отправлено: 1',
+  skippedDeletions: { removed: 2, ids: ['session-a', 'session-b'] },
+  plan: {
+    counts: { onlyLocal: 1, onlyCloud: 2, same: 0, localAhead: 0, cloudAhead: 0, conflicts: 0 },
+    deletions: 2,
+  },
+}, null, 2))
+const pendingStatus = await tools.get('sync_status').execute({})
+assert.match(pendingStatus, /удалений: 2 \(ждёт подтверждения\)/, 'sync_status знает об отложенных удалениях')
+assert.match(pendingStatus, /план: только локально 1, только в зеркале 2/, 'sync_status печатает сводку плана')
+assert.match(pendingStatus, /в зеркале новее 0, конфликтов 0, удалений 2/, 'сводка плана полная')
 
 console.log('plugin smoke: OK')
 console.log('  маршруты:', [...routes.keys()].join(', '))

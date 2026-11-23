@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 
 import { defaultConfig, saveConfig } from '../lib/config.mjs'
 import { localSessionDir, splitLog } from '../lib/store.mjs'
-import { pull, push } from '../lib/sync.mjs'
+import { applyDeletions, pull, push } from '../lib/sync.mjs'
 import { recordRun, readHistory } from '../lib/history.mjs'
 
 // --- helpers ---------------------------------------------------------------
@@ -54,7 +54,7 @@ const mirrorSessionDir = (config, projectId, id) => join(config.repoDir, 'sessio
 
 // --- порог и карантин ------------------------------------------------------
 
-test('больше 5 удалений за прогон требуют подтверждения, затем уходят в карантин', async () => {
+test('пачка больше 5 удалений не удаляется push, подтверждённая уходит в карантин', async () => {
   const env = await makeEnvironment()
   try {
     const ids = []
@@ -77,7 +77,7 @@ test('больше 5 удалений за прогон требуют подт�
       assert.equal(existsSync(join(mirrorSessionDir(env.config, 'alpha', id), 'session.v4.jsonl.zstd')), true, 'зеркало не тронуто')
     }
 
-    const confirmed = await push({ home: env.home, config: env.config, confirmPrune: true })
+    const confirmed = await applyDeletions({ home: env.home, config: env.config, confirm: true })
     assert.equal(confirmed.removed, 7)
     assert.equal(confirmed.removedIds.length, 7)
     assert.equal(confirmed.removedReason, 'удалено локально')
@@ -91,7 +91,7 @@ test('больше 5 удалений за прогон требуют подт�
   }
 })
 
-test('одно удаление из десяти известных проходит без подтверждения', async () => {
+test('одно удаление из десяти ждёт подтверждения: push его не выполняет', async () => {
   const env = await makeEnvironment()
   try {
     const ids = []
@@ -104,9 +104,18 @@ test('одно удаление из десяти известных прохо�
 
     await rm(localSessionDir(env.home, env.projectPath, ids[0]), { recursive: true, force: true })
     const result = await push({ home: env.home, config: env.config })
-    assert.equal(result.requireConfirmation, undefined, '10% — ниже порога')
-    assert.equal(result.removed, 1)
-    assert.deepEqual(result.removedIds, [ids[0]])
+    // 10% — ниже старых порогов, но удаление всё равно отдельное действие:
+    // push только показывает, что ждёт подтверждения.
+    assert.equal(result.removed, 0, 'push ничего не удалил')
+    assert.equal(result.skippedDeletions.removed, 1)
+    assert.equal(result.skippedDeletions.overCount, false, '10% — ниже порога количества')
+    assert.equal(result.skippedDeletions.overRatio, false, '10% — ниже порога доли')
+    assert.equal(result.skippedDeletions.needsConfirmation, false, 'порог не превышен')
+    assert.equal(existsSync(join(mirrorSessionDir(env.config, 'alpha', ids[0]), 'session.v4.jsonl.zstd')), true, 'зеркало не тронуто')
+
+    const confirmed = await applyDeletions({ home: env.home, config: env.config, confirm: true })
+    assert.equal(confirmed.removed, 1)
+    assert.deepEqual(confirmed.removedIds, [ids[0]])
   } finally {
     await rm(env.root, { recursive: true, force: true })
   }
@@ -119,7 +128,7 @@ test('карантин вычищается через 30 дней', async () =>
     await writeSession(env.home, env.projectPath, id, makeLog(headerFor(env.projectPath, id), [{ seq: 0 }]))
     await push({ home: env.home, config: env.config })
     await rm(localSessionDir(env.home, env.projectPath, id), { recursive: true, force: true })
-    await push({ home: env.home, config: env.config, confirmPrune: true })
+    await applyDeletions({ home: env.home, config: env.config, confirm: true })
     const quarantine = join(env.config.repoDir, 'sessions', 'alpha', '_deleted', id)
     assert.equal(existsSync(quarantine), true, 'карантин создан')
 
@@ -345,7 +354,7 @@ test('удаление родителя с субагентами предупр
 
     // Удаляем родителя: предупреждение о субагентах, карантин родителя.
     await rm(localSessionDir(env.home, env.projectPath, parentId), { recursive: true, force: true })
-    const result = await push({ home: env.home, config: env.config, confirmPrune: true })
+    const result = await applyDeletions({ home: env.home, config: env.config, confirm: true })
     assert.equal(result.removed, 1)
     assert.deepEqual(result.removedIds, [parentId])
     assert.deepEqual(result.parentWithChildren, [childId])
