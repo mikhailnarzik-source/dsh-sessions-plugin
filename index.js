@@ -10,8 +10,9 @@
 import { existsSync } from 'node:fs'
 import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PLACEHOLDER, WEBDAV_SECRET, hasSecret, readSecret, writeSecret } from './lib/secrets.mjs'
 import { mkdtemp, open, rm } from 'node:fs/promises'
@@ -24,11 +25,18 @@ import { readHistory, recordRun, removalDetails } from './lib/history.mjs'
 import { readLedger, sessionState } from './lib/ledger.mjs'
 import { probeYandex } from './lib/yandex.mjs'
 import { probeWebdav } from './lib/webdav.mjs'
+import { sameFolder } from './lib/folder.mjs'
 import { backupProgress } from './lib/progress.mjs'
 import { apply as applyDeletePlugin } from './delete/index.js'
 import { matchProjectPath } from './lib/mirror-meta.mjs'
 import { listLocalSessions, listMirrorSessions, sessionsOfProject, splitLog } from './lib/store.mjs'
-import { pullReplicated, pushReplicated } from './lib/replica.mjs'
+import { pullReplicated, pushReplicated, secondaryConfig } from './lib/replica.mjs'
+import {
+  initializeSecondaryChannel,
+  readSecondaryState,
+  readSecondaryStatus,
+  resetSecondaryInitialization,
+} from './lib/secondary-init.mjs'
 import { applyUpdate, checkForUpdate, describeUpdate, updateState } from './lib/update.js'
 import { MODE_LOCAL, readSessionModes, sessionBadge, sessionModeOf, setSessionMode } from './lib/session-modes.mjs'
 import { clearWorkspacePending, planWorkspace, readWorkspacePending } from './lib/workspace.mjs'
@@ -56,6 +64,8 @@ const PROFILE_PATH = '/api/dsh-sync/profile'
 const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings'
 const TOMBSTONES_PATH = '/api/dsh-sync/tombstones'
 const RESTORE_PATH = '/api/dsh-sync/restore'
+// Сверка резервного канала: сравнить локальное с облаком и разрешить выгрузку.
+const SECONDARY_INIT_PATH = '/api/dsh-sync/secondary-init'
 
 // --- уведомления -----------------------------------------------------------
 // Кольцевой буфер: клиент забирает всё, что появилось после его курсора, и
@@ -461,7 +471,8 @@ async function readState(ctx) {
 
   const pendingUpdate = await readPendingUpdate()
   const backup = await readBackupProgress(config)
-  const backupStatus = await readSecondaryStatus()
+  const backupStatus = await readSecondaryStatus(home)
+  const secondaryState = await readSecondaryState(home)
   const currentFingerprint = await computeFingerprint(ctx)
   const pending = automation.fingerprint !== '' && currentFingerprint !== '' && currentFingerprint !== automation.fingerprint
 
@@ -473,6 +484,12 @@ async function readState(ctx) {
       if (existsSync(candidate)) return join(candidate, 'dsh-sync')
     }
     return ''
+  })()
+  // Резерв по умолчанию — отдельная папка рядом с основным зеркалом облака.
+  const suggestedSecondaryFolder = (() => {
+    if (suggestedFolder === '') return ''
+    const parent = suggestedFolder.replace(/[\\/]dsh-sync$/, '')
+    return parent === suggestedFolder ? '' : join(parent, 'dsh-sync-backup')
   })()
 
   // Диагностика расхождения счётчиков: если локальных сессий не видно, а в
@@ -522,6 +539,16 @@ async function readState(ctx) {
       workspace: config.workspace ?? { enabled: true },
       projectId: projectId ?? '',
       projectPath: project?.path ?? '',
+      // Резерв без секретов: пароль приложения в браузер не отдаём.
+      secondary: config.secondary === undefined || config.secondary === null
+        ? undefined
+        : {
+            backend: config.secondary.backend ?? 'none',
+            folderDir: config.secondary.folderDir ?? '',
+            webdavLogin: config.secondary.webdavLogin ?? '',
+            webdavPath: config.secondary.webdavPath ?? '',
+            remote: config.secondary.remote ?? '',
+          },
     },
     checks,
     ready: checks.every(check => check.ok),
@@ -534,6 +561,24 @@ async function readState(ctx) {
     updatedFrom: pendingUpdate?.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
     backup,
     backupStatus,
+    suggestedSecondaryFolder,
+    // Резервный канал: выбранный бэкенд, статус сверки и последней выгрузки.
+    secondary: {
+      enabled: config?.secondary !== undefined && config?.secondary !== null && config?.secondary.enabled !== false,
+      backend: config?.secondary?.backend ?? 'none',
+      folderDir: config?.secondary?.folderDir ?? '',
+      webdavPath: config?.secondary?.webdavPath ?? '',
+      recommended: 'folder',
+      initialized: secondaryState?.initialized === true,
+      compare: secondaryState?.plan ?? null,
+      initializedAt: secondaryState?.at,
+      pulled: secondaryState?.pulled ?? null,
+      lastPushAt: secondaryState?.lastPushAt ?? null,
+      lastPushOk: secondaryState?.lastPushOk,
+      lastPushUploaded: secondaryState?.lastPushUploaded ?? 0,
+      lastPushMessage: secondaryState?.lastPushMessage ?? '',
+      status: backupStatus,
+    },
     // Тип резервного хранилища без секретов: по нему карточка подписывает полосу.
     secondaryBackend: config?.secondary?.backend ?? 'none',
     // Пароль в настройках не хранится: карточка показывает только факт.
@@ -633,6 +678,8 @@ async function saveSettings(ctx, payload) {
   const config = existsSync(join(home, 'dsh-sync.json'))
     ? await loadConfig(home)
     : { ...defaultConfig(home) }
+  // Настройки резерва менялись? Тогда сверка с облаком снова обязательна.
+  const previousSecondaryJson = JSON.stringify(config.secondary ?? null)
 
   // Перед изменением сохраняем копию: настройки содержат адреса и пароли
   // приложений, и случайная перезапись не должна их терять.
@@ -686,24 +733,52 @@ async function saveSettings(ctx, payload) {
 
   // Резервное хранилище: туда дублируются сессии (без вложений).
   if (typeof payload.secondaryBackend === 'string' && payload.secondaryBackend !== '') {
-    const kind = payload.secondaryBackend
+    const kind = payload.secondaryBackend.trim()
     if (kind === '' || kind === 'none') {
       delete config.secondary
     } else if (['git', 'folder', 'yandex', 'webdav'].includes(kind)) {
-      const secondary = {
-        enabled: true,
-        backend: kind,
-        // Сохраняем уже накопленный кеш: иначе прогресс обнуляется.
-        repoDir: config.secondary?.repoDir ?? join(home, 'dsh-sync', `replica-${kind}`),
-      }
+      const previous = config.secondary
+      // При смене типа резерва кеш начинается заново: старые файлы чужого
+      // бэкенда в новом кеше только мешают прогрессу.
+      const switching = previous?.backend !== kind
+      const repoDir = switching || typeof previous?.repoDir !== 'string' || previous.repoDir === ''
+        ? join(home, 'dsh-sync', `replica-${kind}`)
+        : previous.repoDir
+      const secondary = { enabled: true, backend: kind, repoDir }
       if (kind === 'git') {
-        secondary.remote = typeof payload.secondaryRemote === 'string' ? payload.secondaryRemote.trim() : config.secondary?.remote
+        secondary.remote = typeof payload.secondaryRemote === 'string' ? payload.secondaryRemote.trim() : previous?.remote
+      }
+      if (kind === 'folder') {
+        // Папка облачного клиента: рекомендуемый резерв «из коробки»
+        // (OneDrive, Яндекс.Диск, Syncthing). Путь обязателен и полный.
+        const requested = typeof payload.secondaryFolder === 'string' ? payload.secondaryFolder.trim() : ''
+        const folderDir = requested !== '' ? requested : (previous?.folderDir ?? '')
+        if (folderDir === '') {
+          throw new Error('Укажите папку облака для резервного канала — в неё будет дублироваться зеркало.')
+        }
+        if (!isAbsolute(folderDir)) {
+          throw new Error('Папка облака должна быть указана полным путём, например C:\\Users\\me\\OneDrive\\dsh-sync-backup.')
+        }
+        if (sameFolder(folderDir, config.repoDir)) {
+          throw new Error('Папка резерва совпадает с основным хранилищем — выберите отдельную папку.')
+        }
+        if (sameFolder(folderDir, repoDir)) {
+          // Папка облака = кеш: локальную копию выносим в служебный каталог.
+          secondary.repoDir = join(home, 'dsh-sync', `replica-${kind}`)
+        }
+        // Сменилась папка облака — нужен новый кеш: иначе старые файлы другого
+        // облака смешаются с новыми и сверка покажет ложные расхождения.
+        if (previous?.backend === 'folder' && (previous.folderDir ?? '') !== folderDir) {
+          const digest = createHash('sha256').update(folderDir.toLowerCase()).digest('hex').slice(0, 8)
+          secondary.repoDir = join(home, 'dsh-sync', `replica-folder-${digest}`)
+        }
+        secondary.folderDir = folderDir
       }
       if (kind === 'webdav') {
         const login = typeof payload.secondaryLogin === 'string' ? payload.secondaryLogin.trim() : ''
         const password = typeof payload.secondaryPassword === 'string' ? payload.secondaryPassword.trim() : ''
         if (login !== '') secondary.webdavLogin = login
-        else if (config.secondary?.webdavLogin) secondary.webdavLogin = config.secondary.webdavLogin
+        else if (previous?.webdavLogin) secondary.webdavLogin = previous.webdavLogin
         if (password !== '' && password !== PLACEHOLDER) {
           const saved = await writeSecret(ctx, password)
           if (saved === false) secondary.webdavPassword = password
@@ -711,15 +786,15 @@ async function saveSettings(ctx, payload) {
         } else {
           secondary.passwordStored = await hasSecret(ctx)
         }
-        if (config.secondary?.webdavPassword !== undefined && secondary.webdavPassword === undefined) {
+        if (previous?.webdavPassword !== undefined && secondary.webdavPassword === undefined) {
           // Старое значение из файла переносим в хранилище и убираем из файла.
-          const savedOld = await writeSecret(ctx, config.secondary.webdavPassword)
+          const savedOld = await writeSecret(ctx, previous.webdavPassword)
           if (savedOld) secondary.passwordStored = true
-          else secondary.webdavPassword = config.secondary.webdavPassword
+          else secondary.webdavPassword = previous.webdavPassword
         }
         secondary.webdavPath = typeof payload.secondaryPath === 'string' && payload.secondaryPath.trim() !== ''
           ? payload.secondaryPath.trim()
-          : config.secondary?.webdavPath ?? 'dsh-sync'
+          : previous?.webdavPath ?? 'dsh-sync'
       }
       config.secondary = secondary
     }
@@ -727,6 +802,11 @@ async function saveSettings(ctx, payload) {
   if (typeof payload.useExternal === 'boolean') config.useExternal = payload.useExternal
   config.projects = { [projectId]: { path: projectPath, title: projectId } }
   await saveConfig(home, config)
+  // Резерв настроен заново или изменён — старый отчёт сверки больше не
+  // относится к делу: push в резерв снова требует «Сверить».
+  if (JSON.stringify(config.secondary ?? null) !== previousSecondaryJson) {
+    await resetSecondaryInitialization(home, 'настройки резервного канала изменились')
+  }
   return readState(ctx)
 }
 
@@ -994,6 +1074,9 @@ async function runSync(ctx, action, options = {}) {
       if (result.push.profileError !== undefined) messages.push(`профиль не отправлен: ${result.push.profileError}`)
       if (result.push.workspace !== undefined) messages.push(`рабочие пространства: ${result.push.workspace.workspaces ?? 0}`)
       if (result.push.requireConfirmation !== undefined) messages.push(`удаление ${result.push.requireConfirmation.removed} сессий ждёт подтверждения`)
+      if (result.push.secondary !== undefined) messages.push(`резерв (${config.secondary?.backend ?? 'дубль'}): отправлено ${result.push.secondary.pushed}`)
+      if (result.push.secondaryBlocked !== undefined) messages.push(result.push.secondaryBlocked.message)
+      if (result.push.secondaryError !== undefined) messages.push(`резерв недоступен: ${result.push.secondaryError}`)
       if (result.push.warning) messages.push(result.push.warning)
     }
   } catch (error) {
@@ -1033,6 +1116,11 @@ async function runSync(ctx, action, options = {}) {
     conflictIds: (result.pull?.conflictDetails ?? []).map(item => item.id),
     requireConfirmation: result.push?.requireConfirmation,
     guarded: (result.push?.guarded ?? []).length,
+    secondaryBlocked: result.push?.secondaryBlocked,
+    secondaryError: result.push?.secondaryError,
+    secondary: result.push?.secondary === undefined
+      ? null
+      : { pushed: result.push.secondary.pushed, committed: result.push.secondary.committed === true },
     pull: result.pull
       ? { imported: result.pull.imported, updated: result.pull.updated, conflicts: result.pull.conflicts, attachments: result.pull.attachments?.restored ?? 0 }
       : null,
@@ -1095,22 +1183,6 @@ async function runViaExternal(external, action) {
   }
 }
 
-/** Последний результат выгрузки резерва: нужен, чтобы показать причину сбоя. */
-async function readSecondaryStatus() {
-  try {
-    const parsed = JSON.parse(await readFile(join(dshHome(), 'dsh-sync', 'secondary-status.json'), 'utf8'))
-    if (parsed === null || typeof parsed !== 'object') return undefined
-    return {
-      ok: parsed.ok === true,
-      message: typeof parsed.message === 'string' ? parsed.message.slice(0, 300) : '',
-      at: typeof parsed.at === 'string' ? parsed.at : undefined,
-      percent: typeof parsed.percent === 'number' ? parsed.percent : undefined,
-    }
-  } catch {
-    return undefined
-  }
-}
-
 /** Готовность резервной копии; считается не чаще раза в 10 секунд. */
 let backupProgressCache = { at: 0, key: '', value: undefined }
 
@@ -1125,7 +1197,11 @@ async function readBackupProgress(config) {
     return backupProgressCache.value
   }
   try {
-    const value = await backupProgress(repoDir)
+    // Для папки облака крупные сессии тоже доезжают: локальное копирование
+    // не ограничено «полутора мегабайтами» WebDAV.
+    const value = await backupProgress(repoDir, {
+      maxFileBytes: secondary.backend === 'folder' ? Number.POSITIVE_INFINITY : Number(secondary.maxFileBytes ?? 1_500_000),
+    })
     backupProgressCache = { at: Date.now(), key, value }
     return value
   } catch {
@@ -1932,6 +2008,41 @@ export function apply(ctx) {
   route('config', CONFIG_PATH, async (request) => {
     try {
       return json(await saveSettings(ctx, await body(request)))
+    } catch (error) {
+      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  // Сверка резервного канала: сравнить локальное с облаком, принять облачные
+  // сессии до первой отправки и поднять флаг secondary.initialized.
+  route('secondary-init', SECONDARY_INIT_PATH, async () => {
+    try {
+      const home = dshHome()
+      const config = await loadConfig(home)
+      const result = await initializeSecondaryChannel({
+        home,
+        config,
+        secondary: secondaryConfig(config),
+        dshVersion: await hostDshVersion(),
+      })
+      if (result.ok === true) {
+        // Принятые из облака сессии привязываем к рабочим пространствам — так же,
+        // как после обычного приёма.
+        try {
+          const attached = await attachAllProjects(ctx, config)
+          if (attached > 0) result.attached = attached
+        } catch {
+          // привязка — вспомогательный шаг
+        }
+        try {
+          const queued = await applyWorkspacePending(ctx, config)
+          if (queued > 0) result.workspaceAttached = queued
+        } catch {
+          // привязка из зеркала — вспомогательный шаг
+        }
+        invalidateSessionStates()
+      }
+      return json(result)
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
     }

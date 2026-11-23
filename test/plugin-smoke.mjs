@@ -26,7 +26,7 @@ assert.equal(name, 'dsh-sync')
 assert.deepEqual(inject, ['connection', 'tools', 'sessionPersistence', 'workspaceRegistry'])
 apply(ctx)
 
-assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/restore', '/api/dsh-sync/run', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/tombstones', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
+assert.deepEqual([...routes.keys()].sort(), ['/api/dsh-sync/ack-update', '/api/dsh-sync/browser-settings', '/api/dsh-sync/config', '/api/dsh-sync/create-repo', '/api/dsh-sync/diagnostics', '/api/dsh-sync/notifications', '/api/dsh-sync/profile', '/api/dsh-sync/restore', '/api/dsh-sync/run', '/api/dsh-sync/secondary-init', '/api/dsh-sync/session-mode', '/api/dsh-sync/sessions', '/api/dsh-sync/state', '/api/dsh-sync/tombstones', '/api/dsh-sync/update', '/api/dsh-sync/update/apply', '/api/dsh-sync/yandex-check', '/api/session-delete/delete', '/api/session-delete/inspect'])
 assert.deepEqual([...tools.keys()].sort(), ['sync_run', 'sync_status'])
 
 const call = async (path, payload) => {
@@ -214,6 +214,55 @@ const browserFile = JSON.parse(await readFile(join(home, 'dsh-sync', 'browser-se
 assert.equal(browserFile.settings['dsh-polish'].enabled, true)
 const browserApplied = await call('/api/dsh-sync/browser-settings', { applied: true })
 assert.equal(browserApplied.body.applied, true)
+
+// 17. резервный канал: состояние и сверка без настроенного резерва
+const emptySecondary = await call('/api/dsh-sync/state', {})
+assert.equal(emptySecondary.body.secondary.enabled, false)
+assert.equal(emptySecondary.body.secondary.backend, 'none')
+assert.equal(emptySecondary.body.secondary.recommended, 'folder')
+const noSecondary = await call('/api/dsh-sync/secondary-init', {})
+assert.equal(noSecondary.body.ok, false)
+assert.equal(noSecondary.body.code, 'secondary/not-configured')
+
+// 18. папка облака для резерва: сохранение и сброс сверки при изменении
+const cloudFolder = join(home, 'OneDrive', 'dsh-sync-backup')
+// Без папки облака резерв не включается — понятная ошибка, а не запись в никуда.
+const noFolder = await call('/api/dsh-sync/config', {
+  remote: 'https://example.invalid/sessions.git',
+  projectPath,
+  projectId: 'harness-test',
+  secondaryBackend: 'folder',
+})
+assert.equal(noFolder.status, 500)
+assert.match(noFolder.body.message, /папку облака/)
+await call('/api/dsh-sync/config', {
+  remote: 'https://example.invalid/sessions.git',
+  projectPath,
+  projectId: 'harness-test',
+  secondaryBackend: 'folder',
+  secondaryFolder: cloudFolder,
+})
+const withSecondary = await call('/api/dsh-sync/state', {})
+assert.equal(withSecondary.body.secondary.enabled, true)
+assert.equal(withSecondary.body.secondary.backend, 'folder')
+assert.equal(withSecondary.body.secondary.initialized, false, 'без сверки резерв не готов')
+assert.equal(withSecondary.body.config.secondary.folderDir, cloudFolder)
+const compared = await call('/api/dsh-sync/secondary-init', {})
+assert.equal(compared.body.ok, true, `сверка пустого облака: ${compared.body.message ?? ''}`)
+assert.equal(compared.body.initialized, true)
+const afterCompare = await call('/api/dsh-sync/state', {})
+assert.equal(afterCompare.body.secondary.initialized, true, 'флаг сверки виден панели')
+assert.equal(afterCompare.body.secondary.compare.cloud, 0)
+// Смена папки облака требует новой сверки.
+await call('/api/dsh-sync/config', {
+  remote: 'https://example.invalid/sessions.git',
+  projectPath,
+  projectId: 'harness-test',
+  secondaryBackend: 'folder',
+  secondaryFolder: join(home, 'OneDrive', 'dsh-sync-backup-2'),
+})
+const afterChange = await call('/api/dsh-sync/state', {})
+assert.equal(afterChange.body.secondary.initialized, false, 'после смены папки нужна сверка')
 
 console.log('plugin smoke: OK')
 console.log('  маршруты:', [...routes.keys()].join(', '))

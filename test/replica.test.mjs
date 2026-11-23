@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { zstdCompressSync } from 'node:zlib'
 
 import { pullReplicated, pushReplicated, secondaryConfig } from '../lib/replica.mjs'
+import { initializeSecondaryChannel } from '../lib/secondary-init.mjs'
 import { localSessionDir } from '../lib/store.mjs'
 
 function sessionBytes(projectPath, id) {
@@ -40,6 +41,8 @@ test('отправка дублируется в оба хранилища', asy
       secondary: { enabled: true, backend: 'folder', repoDir: join(root, 'mirror-backup') },
     }
 
+    // Резерв начинает работу только после сверки с облаком.
+    await initializeSecondaryChannel({ home, config, secondary: secondaryConfig(config) })
     const summary = await pushReplicated({ home, config })
     assert.ok(summary.pushed >= 1)
     assert.ok(summary.secondary !== undefined, 'резервное хранилище задействовано')

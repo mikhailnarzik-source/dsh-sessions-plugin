@@ -28,6 +28,7 @@ window.__ModuleLoader__.load({
     const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings';
     const TOMBSTONES_PATH = '/api/dsh-sync/tombstones';
     const RESTORE_PATH = '/api/dsh-sync/restore';
+    const SECONDARY_INIT_PATH = '/api/dsh-sync/secondary-init';
     const shortSha = (value) => (value === null || value === undefined || value === '' ? '?' : String(value).slice(0, 7));
 
     // Подписи страницы «Синхронизация сессий». Только тексты интерфейса:
@@ -620,6 +621,14 @@ window.__ModuleLoader__.load({
           'div',
           { style: { display: 'flex', flexDirection: 'column', gap: 14, marginTop: 4 } },
           ...rows,
+          // Резерв включён, но ещё не сверен: отправка в него заблокирована.
+          hasSecondary && data?.secondary?.enabled === true && data?.secondary?.initialized === false
+            ? h(
+                'span',
+                { style: { fontSize: 11.5, color: 'var(--dsw-alias-state-warn-primary, #e8590c)' } },
+                'Резерв не сверен с облаком — сначала сверка в карточке «Резервный канал».',
+              )
+            : null,
           // backupStatus в SyncProgress: причина сбоя резерва, если она есть.
           data?.backupStatus !== undefined && data.backupStatus.ok !== true && data.backupStatus.message !== ''
             ? h('span', { style: { fontSize: 11.5, color: '#d1242f' } }, data.backupStatus.message)
@@ -896,7 +905,7 @@ function CollapsedItem({ title, summary, badge, children }) {
         const [update, setUpdate] = React.useState(null);
         const [updateNote, setUpdateNote] = React.useState('');
         const [probe, setProbe] = React.useState(null);
-        const [draft, setDraft] = React.useState({ backend: 'git', remote: '', repoDir: '', yandexToken: '', yandexPath: 'dsh-sync', webdavLogin: '', webdavPassword: '', webdavPath: 'dsh-sync', secondaryBackend: 'none', secondaryRemote: '', secondaryLogin: '', secondaryPassword: '', secondaryPath: 'dsh-sync', projectPath: '', projectId: '', attachments: false, autoUpdate: false, useExternal: true });
+        const [draft, setDraft] = React.useState({ backend: 'git', remote: '', repoDir: '', yandexToken: '', yandexPath: 'dsh-sync', webdavLogin: '', webdavPassword: '', webdavPath: 'dsh-sync', secondaryBackend: 'none', secondaryRemote: '', secondaryLogin: '', secondaryPassword: '', secondaryPath: 'dsh-sync', secondaryFolder: '', projectPath: '', projectId: '', attachments: false, autoUpdate: false, useExternal: true });
         const [touched, setTouched] = React.useState(false);
 
         React.useEffect(() => {
@@ -950,11 +959,12 @@ function CollapsedItem({ title, summary, badge, children }) {
             webdavLogin: data.config.webdavLogin ?? '',
             webdavPassword: data.config.webdavPassword ?? '',
             webdavPath: data.config.webdavPath ?? 'dsh-sync',
-            secondaryBackend: data.config.secondary?.backend ?? 'none',
+            secondaryBackend: data.config.secondary?.backend ?? data.secondary?.backend ?? 'none',
             secondaryRemote: data.config.secondary?.remote ?? '',
             secondaryLogin: data.config.secondary?.webdavLogin ?? '',
-            secondaryPassword: data.config.secondary?.webdavPassword ?? '',
-            secondaryPath: data.config.secondary?.webdavPath ?? 'dsh-sync',
+            secondaryPassword: '',
+            secondaryPath: data.config.secondary?.webdavPath ?? data.secondary?.webdavPath ?? 'dsh-sync',
+            secondaryFolder: data.config.secondary?.folderDir ?? data.secondary?.folderDir ?? '',
             useExternal: data.config.useExternal !== false,
           });
         }, [data?.config?.remote, data?.config?.projectPath, data?.config?.projectId, data?.config?.attachments, data?.config?.useExternal, touched]);
@@ -1047,12 +1057,48 @@ function CollapsedItem({ title, summary, badge, children }) {
           }
         };
 
+        /**
+         * Сверка резервного канала: сравнить локальные сессии с облаком,
+         * принять из него данные и разрешить первую выгрузку.
+         */
+        const compareSecondary = async () => {
+          publish({ busy: 'secondary-init', notice: '', error: '' });
+          try {
+            const result = await post(SECONDARY_INIT_PATH, {});
+            if (result?.ok === true) {
+              publish({ busy: '', notice: result.message || 'Сверка резерва выполнена' });
+            } else {
+              publish({ busy: '', error: result?.message ?? 'Не удалось сверить резерв' });
+            }
+            await refresh();
+          } catch (error) {
+            publish({ busy: '', error: `Сверка резерва не удалась: ${explain(error)}` });
+          }
+        };
+
         const checks = data?.checks ?? [];
         const busy = state.busy !== '';
         const status = data?.status;
         const last = data?.lastRun;
         const external = data?.external;
         const mode = data?.mode;
+        const secondary = data?.secondary;
+        const savedSecondary = data?.config?.secondary ?? {};
+        // До первого срабатывания эффекта черновик ещё пустой: для отрисовки
+        // берём сохранённые значения, иначе карточка резерва мигает «выключено».
+        const activeSecondaryBackend = touched ? draft.secondaryBackend : (savedSecondary.backend ?? draft.secondaryBackend);
+        const activeSecondaryFolder = touched ? draft.secondaryFolder : (savedSecondary.folderDir ?? draft.secondaryFolder);
+        const activeSecondaryLogin = touched ? draft.secondaryLogin : (savedSecondary.webdavLogin ?? draft.secondaryLogin);
+        const activeSecondaryPath = touched ? draft.secondaryPath : (savedSecondary.webdavPath ?? draft.secondaryPath);
+        const activeSecondaryRemote = touched ? draft.secondaryRemote : (savedSecondary.remote ?? draft.secondaryRemote);
+        // Настройки резерва в черновике ещё не сохранены: сверка читает файл,
+        // поэтому сначала нужно нажать «Сохранить», а не сверять старое.
+        const secondaryDirty =
+          activeSecondaryBackend !== (secondary?.backend ?? 'none')
+          || (activeSecondaryBackend === 'folder' && activeSecondaryFolder !== (secondary?.folderDir ?? ''))
+          || (activeSecondaryBackend === 'webdav'
+            && (activeSecondaryLogin !== (savedSecondary.webdavLogin ?? '') || activeSecondaryPath !== (savedSecondary.webdavPath ?? 'dsh-sync')))
+          || (activeSecondaryBackend === 'git' && activeSecondaryRemote !== (savedSecondary.remote ?? ''));
 
         return h(
           'div',
@@ -1345,12 +1391,12 @@ function CollapsedItem({ title, summary, badge, children }) {
             ),
           ),
 
-          // --- дополнительно: вложения, автообновление и резерв ---------------
+          // --- дополнительно: вложения и автообновление ----------------------
           h(
             Card,
             {
               title: t('sectionExtra'),
-              hint: 'Вложения, автообновление плагина и вторая копия зеркала.',
+              hint: 'Вложения и автообновление плагина.',
             },
             h(
               'label',
@@ -1368,59 +1414,167 @@ function CollapsedItem({ title, summary, badge, children }) {
               h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-success-primary, #2f9e44)' } }),
               h('span', null, 'Автообновление плагина включено: проверка раз в 6 часов, установка новой версии — автоматически.'),
             ),
+          ),
+
+          // --- резервный канал: второй бэкенд и безопасный первый вход -------
+          h(
+            Card,
+            {
+              title: 'Резервный канал',
+              hint: 'Второе место для копии сессий. Папка облачного клиента (OneDrive, Яндекс.Диск, Syncthing) — рекомендуемый вариант: без сети, паролей и токенов.',
+            },
+            // Переключатель резерва: папка облака, WebDAV, git или «не дублировать».
             h(
               'div',
-              { style: S.field },
-              h('span', { style: S.label }, 'Резервное хранилище (дублирование)'),
-              h(
-                'select',
-                {
-                  style: { ...S.input, colorScheme: themeScheme() },
-                  value: draft.secondaryBackend,
-                  onChange: (event) => set({ secondaryBackend: event.target.value }),
-                },
-                h('option', { value: 'none' }, 'Не дублировать'),
-                h('option', { value: 'git' }, 'Git-репозиторий'),
-                h('option', { value: 'webdav' }, 'Яндекс.Диск (WebDAV)'),
-              ),
-              draft.secondaryBackend === 'git'
-                ? h('input', {
+              { style: S.buttons },
+              ...[
+                { value: 'folder', label: 'Папка облака (рекомендуется)' },
+                { value: 'webdav', label: 'WebDAV' },
+                { value: 'git', label: 'Git' },
+                { value: 'none', label: 'Не дублировать' },
+              ].map((option) => {
+                const active = activeSecondaryBackend === option.value;
+                const choose = () => {
+                  const patch = { secondaryBackend: option.value };
+                  // Подставляем путь рядом с уже найденной папкой облака, чтобы
+                  // резерв включался «из коробки», без ручного поиска каталога.
+                  if (option.value === 'folder' && activeSecondaryFolder === '') {
+                    patch.secondaryFolder = data?.suggestedSecondaryFolder ?? data?.secondary?.folderDir ?? '';
+                  }
+                  set(patch);
+                };
+                return h(
+                  'button',
+                  {
+                    key: option.value,
+                    type: 'button',
+                    className: active ? 'dshs-btn-primary' : undefined,
+                    style: active ? { ...S.primary, height: 32 } : S.buttonSmall,
+                    'aria-pressed': active ? 'true' : 'false',
+                    disabled: busy,
+                    onClick: choose,
+                  },
+                  option.label,
+                );
+              }),
+            ),
+            activeSecondaryBackend === 'folder'
+              ? h(
+                  'div',
+                  { style: S.field },
+                  h('span', { style: S.label }, 'Папка облака для резерва'),
+                  h('input', {
                     style: { ...S.input, colorScheme: themeScheme() },
-                    value: draft.secondaryRemote,
+                    value: activeSecondaryFolder,
+                    placeholder: data?.suggestedSecondaryFolder || 'C:\\Users\\me\\OneDrive\\dsh-sync-backup',
+                    onChange: (event) => set({ secondaryFolder: event.target.value }),
+                  }),
+                  h(
+                    'span',
+                    { style: S.hint },
+                    'Отдельная папка внутри папки облачного диска: клиент сам разнесёт её на другие компьютеры. Не указывайте ту же папку, что основное хранилище.',
+                  ),
+                  data?.suggestedSecondaryFolder && activeSecondaryFolder === ''
+                    ? h(
+                        'button',
+                        { type: 'button', style: S.button, onClick: () => set({ secondaryFolder: data.suggestedSecondaryFolder }) },
+                        `Подставить ${data.suggestedSecondaryFolder}`,
+                      )
+                    : null,
+                )
+              : activeSecondaryBackend === 'webdav'
+              ? h(
+                  'div',
+                  { style: S.field },
+                  h('span', { style: S.label }, 'Логин Яндекса для резерва'),
+                  h('input', {
+                    style: { ...S.input, colorScheme: themeScheme() },
+                    value: activeSecondaryLogin,
+                    placeholder: 'логин Яндекса',
+                    onChange: (event) => set({ secondaryLogin: event.target.value }),
+                  }),
+                  h('span', { style: S.label }, 'Пароль приложения'),
+                  h('input', {
+                    style: { ...S.input, colorScheme: themeScheme() },
+                    type: 'password',
+                    value: draft.secondaryPassword,
+                    placeholder: data?.secondaryPasswordStored === true ? 'пароль сохранён в хранилище' : 'пароль приложения',
+                    onChange: (event) => set({ secondaryPassword: event.target.value }),
+                  }),
+                  h('span', { style: S.label }, 'Папка на Диске'),
+                  h('input', {
+                    style: { ...S.input, colorScheme: themeScheme() },
+                    value: activeSecondaryPath,
+                    placeholder: 'dsh-sync-backup',
+                    onChange: (event) => set({ secondaryPath: event.target.value }),
+                  }),
+                )
+              : activeSecondaryBackend === 'git'
+              ? h(
+                  'label',
+                  { style: S.field },
+                  h('span', { style: S.label }, 'Адрес репозитория резерва'),
+                  h('input', {
+                    style: { ...S.input, colorScheme: themeScheme() },
+                    value: activeSecondaryRemote,
                     placeholder: 'https://github.com/user/dsh-sessions-backup.git',
                     onChange: (event) => set({ secondaryRemote: event.target.value }),
-                  })
-                : null,
-              draft.secondaryBackend === 'webdav'
-                ? h(
-                    'div',
-                    { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-                    h('input', {
-                      style: { ...S.input, colorScheme: themeScheme() },
-                      value: draft.secondaryLogin,
-                      placeholder: 'логин Яндекса',
-                      onChange: (event) => set({ secondaryLogin: event.target.value }),
-                    }),
-                    h('input', {
-                      style: { ...S.input, colorScheme: themeScheme() },
-                      type: 'password',
-                      value: draft.secondaryPassword,
-                      placeholder: data?.secondaryPasswordStored === true ? 'пароль сохранён в хранилище' : 'пароль приложения',
-                      onChange: (event) => set({ secondaryPassword: event.target.value }),
-                    }),
-                    h('input', {
-                      style: { ...S.input, colorScheme: themeScheme() },
-                      value: draft.secondaryPath,
-                      placeholder: 'dsh-sync-backup',
-                      onChange: (event) => set({ secondaryPath: event.target.value }),
-                    }),
-                  )
-                : null,
+                  }),
+                )
+              : null,
+            // Статус сверки и последней выгрузки.
+            secondary?.enabled === true
+              ? h(
+                  'div',
+                  { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
+                  h(
+                    'span',
+                    { style: secondary.initialized ? S.ok : S.note },
+                    secondary.initialized
+                      ? `Сверено: локально ${secondary.compare?.local ?? 0}, в облаке ${secondary.compare?.cloud ?? 0}, расходятся ${secondary.compare?.differ ?? 0}`
+                        + ((secondary.pulled?.imported ?? 0) > 0 ? `; принято из облака: ${secondary.pulled.imported}` : '')
+                      : 'Сначала сверка: отправка в резерв заблокирована, пока состав облака не проверен.',
+                  ),
+                  secondary.initializedAt
+                    ? h('span', { style: S.meta }, `последняя сверка: ${new Date(secondary.initializedAt).toLocaleString('ru-RU')}`)
+                    : null,
+                  secondary.lastPushAt
+                    ? h(
+                        'span',
+                        { style: secondary.lastPushOk === false ? S.error : S.meta },
+                        secondary.lastPushOk === false
+                          ? `последняя выгрузка не удалась: ${secondary.lastPushMessage || 'ошибка'}`
+                          : `последняя выгрузка: ${new Date(secondary.lastPushAt).toLocaleString('ru-RU')} — отправлено ${secondary.lastPushUploaded ?? 0}`,
+                      )
+                    : h('span', { style: S.meta }, 'выгрузка в резерв ещё не выполнялась'),
+                  secondary.backend === 'folder' && secondary.folderDir
+                    ? h('span', { style: S.meta }, `папка облака: ${secondary.folderDir}`)
+                    : null,
+                )
+              : h('span', { style: S.hint }, 'Резерв выключен: сессии дублируются только в основное хранилище.'),
+            secondaryDirty && secondary?.enabled === true
+              ? h('span', { style: S.note }, 'Настройки резерва ещё не сохранены — сначала «Сохранить», потом «Сверить».')
+              : null,
+            h(
+              'div',
+              { style: S.buttons },
               h(
-                'span',
-                { style: S.hint },
-                'Сессии и настройки дублируются в оба места, вложения — только в основное. Если основное хранилище недоступно, приём идёт из резервного.',
+                'button',
+                {
+                  type: 'button',
+                  className: 'dshs-btn-primary',
+                  style: S.primary,
+                  disabled: busy || secondary?.enabled !== true || secondaryDirty,
+                  title: secondaryDirty ? 'Сначала сохраните настройки резерва' : 'Сравнить локальные сессии с облаком и принять данные из него',
+                  onClick: () => void compareSecondary(),
+                },
+                state.busy === 'secondary-init' ? 'Сверка…' : 'Сверить',
               ),
+            ),
+            h(
+              'span',
+              { style: S.hint },
+              'Сверка сравнивает локальные сессии с облаком и сначала принимает данные из облака; только после этого разрешена отправка в резерв. Сессии и настройки дублируются в оба места, вложения — только в основное; если основное недоступно, приём идёт из резервного.',
             ),
           ),
 

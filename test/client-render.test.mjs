@@ -72,7 +72,22 @@ const readyState = {
     projectId: 'harness',
     attachments: true,
     autoUpdate: true,
-    secondary: { backend: 'none' },
+    secondary: { backend: 'folder', folderDir: 'C:\\cloud\\dsh-sync-backup' },
+  },
+  // Резерв включён, но ещё не сверен: карточка должна показать «Сначала сверка».
+  secondary: {
+    enabled: true,
+    backend: 'folder',
+    folderDir: 'C:\\cloud\\dsh-sync-backup',
+    recommended: 'folder',
+    initialized: false,
+    compare: null,
+    initializedAt: null,
+    pulled: null,
+    lastPushAt: null,
+    lastPushOk: null,
+    lastPushUploaded: 0,
+    status: undefined,
   },
   checks: [
     { id: 'node', title: 'Node.js', ok: true, detail: 'v24.13.0' },
@@ -229,7 +244,7 @@ test('шапка: иконка в круге, заголовок, подзаго
 })
 
 test('секции-карточки с заголовками и единым оформлением', () => {
-  const titles = ['Синхронизация', 'Подключение', 'Дополнительно', 'Проверка окружения', 'Обслуживание', 'Удалённые']
+  const titles = ['Синхронизация', 'Подключение', 'Дополнительно', 'Резервный канал', 'Проверка окружения', 'Обслуживание', 'Удалённые']
   for (const title of titles) {
     const heading = nodes.find((node) => node.type === 'h2' && textOf(node).trim() === title)
     assert.ok(heading, `секция «${title}» есть на странице`)
@@ -250,19 +265,42 @@ test('поля настроек и кнопки сохранены', () => {
     'Путь к проекту на этом компьютере',
     'Идентификатор проекта (одинаковый на всех устройствах)',
     'Синхронизировать вложения (картинки и файлы из чата)',
-    'Резервное хранилище (дублирование)',
+    'Папка облака для резерва',
   ]) {
     assert.ok(texts.includes(label), `поле «${label}» на месте`)
   }
 
   const selects = nodes.filter((node) => node.type === 'select')
-  assert.ok(selects.length >= 2, 'есть выбор хранилища и резерва')
+  assert.ok(selects.length >= 1, 'есть выбор основного хранилища')
   const backends = selects[0].children.map((option) => option?.props?.value)
   assert.deepEqual(backends, ['git', 'folder', 'webdav', 'yandex'], 'все типы хранилищ сохранены')
 
-  for (const label of ['Синхронизировать', 'Только принять', 'Только отправить', 'Сохранить', 'Создать репозиторий', 'Диагностика']) {
+  for (const label of ['Синхронизировать', 'Только принять', 'Только отправить', 'Сохранить', 'Создать репозиторий', 'Диагностика', 'Сверить']) {
     assert.ok(buttonTexts.includes(label), `кнопка «${label}» на месте`)
   }
+})
+
+test('карточка «Резервный канал»: переключатель folder/webdav, статус и «Сверить»', () => {
+  const card = nodes.find((node) => node.type === 'section' && textOf(node).includes('Резервный канал'))
+  assert.ok(card, 'карточка «Резервный канал» есть на странице')
+  assert.match(textOf(card), /Папка облака \(рекомендуется\)/, 'папка облака предложена как рекомендуемый вариант')
+  assert.match(textOf(card), /WebDAV/, 'WebDAV оставлен как вариант')
+  assert.match(textOf(card), /Сначала сверка/, 'без сверки видно предупреждение «Сначала сверка»')
+  assert.match(textOf(card), /папка облака: C:\\cloud\\dsh-sync-backup/, 'показан выбранный путь облака')
+
+  const toggles = walk(card).filter((node) => node.type === 'button' && node.props['aria-pressed'] !== undefined)
+  assert.ok(toggles.length >= 2, 'переключатель резерва — кнопки-чипы')
+  for (const toggle of toggles) {
+    assert.equal(toggle.props.style.height, 32, 'переключатель — 32 px')
+    assert.equal(toggle.props.style.borderRadius, 10, 'переключатель — радиус 10')
+  }
+  const folderToggle = toggles.find((node) => textOf(node).includes('Папка облака'))
+  assert.equal(folderToggle.props['aria-pressed'], 'true', 'папка облака выбрана')
+  const webdavToggle = toggles.find((node) => textOf(node).includes('WebDAV'))
+  assert.equal(webdavToggle.props['aria-pressed'], 'false', 'WebDAV не выбран')
+  const compare = nodes.find((node) => node.type === 'button' && textOf(node).trim() === 'Сверить')
+  assert.ok(compare, 'кнопка «Сверить» на месте')
+  assert.equal(compare.props.disabled, false, 'при сохранённых настройках сверка доступна')
 })
 
 test('проверка окружения: строки с зелёными точками', () => {
