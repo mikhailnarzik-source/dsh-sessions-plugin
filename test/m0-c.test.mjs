@@ -136,15 +136,15 @@ async function clearOutboxQueue(home) {
 
 // --- H2: названия ----------------------------------------------------------
 
-test('H2: titleOfLogBytes читает первое событие session/title из zstd-фреймов', () => {
+test('H2: titleOfLogBytes читает последнее событие session/title из zstd-фреймов', () => {
   const id = `session-${randomUUID()}`
   const bytes = makeLog(headerFor('C:\\work\\alpha', id), [userEvent('привет'), titleEvent('Первый заголовок'), titleEvent('Второй заголовок')])
-  assert.equal(titleOfLogBytes(bytes), 'Первый заголовок')
+  assert.equal(titleOfLogBytes(bytes), 'Второй заголовок', 'DSH пишет сначала предварительное название, затем настоящее')
   assert.equal(titleOfLogBytes(makeLog(headerFor('C:\\work\\alpha', id), [userEvent('без названия')])), '')
   assert.equal(titleOfLogBytes(Buffer.alloc(0)), '')
 })
 
-test('H2: цепочка названий — session.title → лог → session.json зеркала → «Без названия»', async () => {
+test('H2: цепочка названий — лог (последнее) → session.title → session.json зеркала → «Без названия»', async () => {
   const { root, home } = await makeHome()
   try {
     const id = `session-${randomUUID()}`
@@ -152,16 +152,16 @@ test('H2: цепочка названий — session.title → лог → sessi
     await mkdir(projectPath, { recursive: true })
     const logPath = await writeLocalLog(home, projectPath, id, [titleEvent('Название из лога')])
 
-    // 1. session.title сильнее лога.
+    // 1. Лог сильнее переданного session.title: в логе последнее событие — настоящее.
     const fromSession = await resolveSessionTitle({ id, title: 'Название из DSH', path: logPath })
-    assert.equal(fromSession.title, 'Название из DSH')
-    assert.equal(fromSession.titleSource, 'session')
+    assert.equal(fromSession.title, 'Название из лога')
+    assert.equal(fromSession.titleSource, 'log')
 
-    // 2. Пустой session.title — берём событие из лога.
-    const fromLog = await resolveSessionTitle({ id, title: '', path: logPath })
-    assert.equal(fromLog.title, 'Название из лога')
-    assert.equal(fromLog.titleSource, 'log')
-    assert.equal(fromLog.shortId, shortSessionId(id))
+    // 2. Лога нет — берём переданное session.title.
+    const fromGiven = await resolveSessionTitle({ id, title: 'Название из DSH' })
+    assert.equal(fromGiven.title, 'Название из DSH')
+    assert.equal(fromGiven.titleSource, 'session')
+    assert.equal(fromGiven.shortId, shortSessionId(id))
 
     // 3. Нет лога — session.json рядом с копией зеркала.
     const repoDir = join(root, 'mirror')
@@ -206,7 +206,7 @@ test('H2: кеш лога обновляется по mtime и не растёт
   }
 })
 
-test('H2: название дальше первых 2 МБ лога не читается (лог не грузим целиком)', async () => {
+test('H2: название дальше первых 2 МБ читается из хвоста лога (позднее переименование)', async () => {
   const { root, home } = await makeHome()
   try {
     const id = `session-${randomUUID()}`
@@ -219,7 +219,7 @@ test('H2: название дальше первых 2 МБ лога не чит
     await mkdir(join(localSessionDir(home, projectPath, id)), { recursive: true })
     await writeFile(logPath, `${filler}${tail}`, 'utf8')
     const limited = await resolveSessionTitle({ id, title: '', path: logPath })
-    assert.equal(limited.title, UNTITLED, 'заголовок за пределами 2 МБ не читаем')
+    assert.equal(limited.title, 'Поздний заголовок', 'хвост лога читается: последнее название важнее')
     const bytes = await readFile(logPath)
     assert.equal(titleOfLogBytes(bytes, { maxBytes: bytes.length }), 'Поздний заголовок')
   } finally {

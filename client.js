@@ -41,6 +41,10 @@ window.__ModuleLoader__.load({
     // «Убрать дубли в карантин»: подтверждённое действие (канонические не трогаем).
     const DUPLICATES_QUARANTINE_PATH = '/api/dsh-sync/duplicates/quarantine';
     const SECONDARY_INIT_PATH = '/api/dsh-sync/secondary-init';
+    // Отмена полной сверки резерва. Прогресс приходит в /state полем
+    // `secondary.init`, поэтому полоса обновляется существующим опросом
+    // состояния (GET /secondary-init/status — для внешнего наблюдения).
+    const SECONDARY_INIT_CANCEL_PATH = '/api/dsh-sync/secondary-init/cancel';
     // Лёгкая сверка резерва: PROPFIND + profile/manifest.json без скачивания
     // логов. Ответ: { ok, local, cloud, onlyLocal, onlyCloud, differ, code }.
     const SECONDARY_PROBE_PATH = '/api/dsh-sync/secondary-probe';
@@ -446,12 +450,16 @@ window.__ModuleLoader__.load({
     // интерфейсе не используются — `__test.setDraft`/`resetDraft`.
     let draftOverride = null;
     let touchedOverride = false;
+    // Компонент полосы прогресса резерва живёт внутри apply(); сюда кладём
+    // ссылку, чтобы headless-тест мог отрисовать его через `__test`.
+    let reserveProgressComponent = null;
 
     /**
-     * Статус резервного канала для бейджа карточки. Ровно пять состояний из
-     * аудита: не включён / не сохранён / не сверен / сверен / ошибка.
+     * Статус резервного канала для бейджа карточки. Состояния из аудита:
+     * не включён / не сохранён / не сверен / сверяется / сверен / ошибка.
+     * `init` — живой прогресс полной сверки (`data.secondary.init`).
      */
-    function reserveStatusOf({ secondary, activeBackend, dirty, probe } = {}) {
+    function reserveStatusOf({ secondary, activeBackend, dirty, probe, init } = {}) {
       const backend = activeBackend ?? secondary?.backend ?? 'none';
       if (backend === 'none') {
         return { key: 'off', label: 'не включён', tone: 'muted', hint: 'Резерв выключен: сессии хранятся только в основном хранилище.' };
@@ -459,8 +467,29 @@ window.__ModuleLoader__.load({
       if (dirty === true) {
         return { key: 'dirty', label: 'не сохранён', tone: 'warn', hint: 'Настройки резерва ещё не сохранены — сначала «Сохранить», потом «Сверить».' };
       }
+      // Полная сверка идёт прямо сейчас: это отдельное состояние, не ошибка.
+      const comparing = init?.running === true
+        || secondary?.init?.running === true
+        || secondary?.status?.running === true;
+      if (comparing) {
+        const progress = init?.progress ?? secondary?.init?.progress ?? secondary?.status?.progress ?? null;
+        const done = Number(progress?.filesDone ?? 0);
+        const total = Number(progress?.filesTotal ?? 0);
+        return {
+          key: 'comparing',
+          label: 'сверяется',
+          tone: 'info',
+          hint: total > 0
+            ? `Полная сверка идёт: ${done} из ${total} файлов. Уже скачанное сохраняется — сверку можно отменить.`
+            : 'Полная сверка идёт: читаем состав облака. Уже скачанное сохраняется — сверку можно отменить.',
+        };
+      }
       const status = secondary?.status;
-      const statusFailed = status !== undefined && status !== null && status.ok === false && !/needs-compare/.test(String(status.code ?? ''));
+      // Отмена — не ошибка канала: после неё резерв снова «не сверен».
+      const statusFailed = status !== undefined && status !== null
+        && status.ok === false
+        && status.cancelled !== true
+        && !/needs-compare|cancelled|отмен/i.test(String(status.code ?? ''));
       if ((probe !== null && probe !== undefined && probe.ok === false) || statusFailed) {
         const source = probe !== null && probe !== undefined && probe.ok === false ? probe : status;
         return { key: 'error', label: 'ошибка', tone: 'error', hint: reserveErrorText(source) };
@@ -472,13 +501,16 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Человеческий текст ошибки сверки: 401/403, таймаут, TLS и
-     * неподдерживаемый канал — с действием, а не «HTTP 403».
+     * Человеческий текст ошибки сверки: 401/403, таймаут, TLS, квота, сеть и
+     * неподдерживаемый канал — с действием, а не «HTTP 403». Если известен
+     * файл, на котором сорвалось скачивание, он называется в тексте.
      */
     function reserveErrorText(result) {
       const code = String(result?.code ?? '');
       const message = String(result?.message ?? '');
       const both = `${code} ${message}`;
+      const file = typeof result?.file === 'string' && result.file !== '' ? result.file : '';
+      const withFile = (text) => (file === '' ? text : `${text} Файл: ${file}.`);
       if (/secondary\/not-configured/.test(code)) {
         return 'Резерв не включён: выберите режим в карточке «Резервный канал» и нажмите «Сохранить».';
       }
@@ -486,15 +518,27 @@ window.__ModuleLoader__.load({
         return 'Этот канал не умеет лёгкую сверку (только PROPFIND и манифест). Нажмите «Синхронизировать резерв» — она выполнит полную сверку с загрузкой.';
       }
       if (/reserve\/unauthorized|\b401\b|\b403\b|не принял логин|пароль приложения/i.test(both)) {
-        return 'Логин или пароль приложения не принят (401/403). Проверьте логин Яндекс.Диска и пароль приложения «Файлы», затем сохраните настройки и повторите «Сверить».';
+        return withFile('Логин или пароль приложения не принят (401/403). Проверьте логин Яндекс.Диска и пароль приложения «Файлы», затем сохраните настройки и повторите сверку.');
       }
-      if (/reserve\/timeout|Timeout|уложилась|истекло/i.test(both)) {
-        return 'Облако не ответило за отведённое время (10–30 с). Проверьте интернет и повторите «Сверить»; для крупного облака используйте «Синхронизировать резерв».';
+      if (/reserve\/timeout|уложилась/i.test(both)) {
+        return withFile('Облако не ответило за отведённое время (10–30 с). Проверьте интернет и повторите «Сверить»; для крупного облака используйте «Синхронизировать резерв».');
+      }
+      if (/Timeout|timeout|истекло/i.test(both)) {
+        return withFile('Облако не ответило за отведённое время (файл — 30 с, операция — 15 мин). Проверьте интернет и повторите: уже скачанное не скачивается заново, сверка продолжится с места остановки.');
       }
       if (/TLS|SSL|certificate|schannel|EPROTO|сертификат/i.test(both)) {
-        return 'Соединение TLS не установлено: проверьте системные сертификаты и время на компьютере, затем повторите «Сверить».';
+        return 'Соединение TLS не установлено: проверьте системные сертификаты и время на компьютере, затем повторите сверку.';
       }
-      return message || 'Сверка резерва не удалась: проверьте настройки канала и повторите.';
+      if (/quota|507|недостаточно места|места на диске|переполнен/i.test(both)) {
+        return 'В облаке закончилось место или превышен лимит запросов. Освободите место на Диске и повторите сверку — скачанное сохранено.';
+      }
+      if (/cancelled|отменена/i.test(both)) {
+        return 'Сверка отменена. Уже скачанное сохранено: при следующем запуске скачивание продолжится с места остановки.';
+      }
+      if (/network|сеть|fetch failed|ECONN|EACCES|ENOTFOUND|оборвалось/i.test(both)) {
+        return withFile('Сеть недоступна или соединение оборвалось. Проверьте интернет и повторите: скачивание продолжится с места остановки.');
+      }
+      return withFile(message || 'Сверка резерва не удалась: проверьте настройки канала и повторите.');
     }
 
     /** Есть ли несохранённые изменения в карточке «Хранилище». */
@@ -675,6 +719,21 @@ window.__ModuleLoader__.load({
             // Статус резерва и результат лёгкой сверки.
             '.dshs-reserve-status{box-sizing:border-box;display:inline-flex;align-items:center;height:24px;padding:0 9px;border-radius:8px;font-size:11.5px;font-weight:600;line-height:1;white-space:nowrap}',
             '.dshs-reserve-probe{display:flex;flex-direction:column;gap:4px;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid rgba(128,128,128,0.24);background:rgba(128,128,128,0.06)}',
+            // Полоса прогресса полной сверки резерва: файлы/МБ, текущий файл,
+            // «Отменить». Адаптив: шапка и подписи переносятся, ничего не вылезает.
+            '.dshs-reserve-progress{display:flex;flex-direction:column;gap:7px;min-width:0;padding:10px 12px;border-radius:10px;border:1px solid rgba(128,128,128,0.24);background:rgba(128,128,128,0.06)}',
+            '.dshs-reserve-progress-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;min-width:0}',
+            '.dshs-reserve-progress-title{font-size:12.5px;font-weight:600;line-height:1.3;min-width:0}',
+            '.dshs-reserve-progress-count{font-size:11.5px;font-weight:600;line-height:1.3;opacity:.85;white-space:nowrap;flex:0 0 auto}',
+            '.dshs-reserve-progress-track{position:relative;height:6px;border-radius:3px;background:rgba(128,128,128,0.24);overflow:hidden}',
+            '.dshs-reserve-progress-fill{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,#6EE2FF,#4882FF);transition:width .3s ease}',
+            '.dshs-reserve-progress[data-state="error"] .dshs-reserve-progress-fill{background:linear-gradient(90deg,#f07070,#d1242f)}',
+            '.dshs-reserve-progress-meta{font-size:11.5px;line-height:1.5;opacity:.82;overflow-wrap:anywhere}',
+            '.dshs-reserve-progress-file{font-size:11.5px;line-height:1.45;opacity:.72;overflow-wrap:anywhere;word-break:break-word}',
+            '.dshs-reserve-progress-error{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-state-error-primary,#d1242f);overflow-wrap:anywhere;text-align:justify;hyphens:auto}',
+            '.dshs-reserve-progress-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:2px}',
+            '@media (prefers-reduced-motion:reduce){.dshs-reserve-progress-fill{transition:none}}',
+            '@media (max-width:480px){.dshs-reserve-progress{padding:9px 10px}.dshs-reserve-progress-count{white-space:normal}}',
             '.dshs-danger-block{display:flex;flex-direction:column;gap:8px;min-width:0;padding:10px 12px;border-radius:10px;border:1px solid rgba(209,36,47,0.28);background:rgba(209,36,47,0.06)}',
             // Поиск по списку сессий: поле и «Показать ещё».
             '.dshs-sessions-search{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
@@ -984,6 +1043,125 @@ window.__ModuleLoader__.load({
             : null,
         );
       }
+
+      /** Фазы полной сверки — те же слова, что в статусе host-части. */
+      const RESERVE_PHASES = {
+        starting: 'подготовка',
+        listing: 'читаем состав облака',
+        download: 'скачиваем файлы',
+        plan: 'считаем расхождения',
+        pull: 'принимаем данные из облака',
+        done: 'готово',
+        error: 'ошибка',
+        cancelled: 'отменено',
+      };
+
+      /** «1,4 МБ» из байт — как в остальных подписях страницы. */
+      function megabytesText(bytes) {
+        return `${(Number(bytes ?? 0) / 1024 / 1024).toFixed(1).replace('.', ',')} МБ`;
+      }
+
+      /** Хвост длинного пути: имя файла и одна папка перед ним. */
+      function shortReserveFile(rel) {
+        const text = String(rel ?? '');
+        const parts = text.split('/').filter((part) => part !== '');
+        if (parts.length <= 2) return text;
+        return `…/${parts.slice(-2).join('/')}`;
+      }
+
+      /**
+       * Полоса прогресса полной сверки резерва (П6/П7).
+       *
+       * Показывает «N из M файлов», «X из Y МБ», текущий файл и фазу; во время
+       * работы — кнопку «Отменить». После завершения — отчёт: скачано,
+       * пропущено, ошибки с файлом и подсказкой. Источник данных —
+       * `data.secondary.init` (живой снимок) и `data.secondary.status`
+       * (сохранённый итог `scope: 'secondary-init'`).
+       */
+      function ReserveProgress({ init, status, busy, onCancel }) {
+        const progress = init?.progress ?? null;
+        const running = init?.running === true || status?.running === true;
+        const totals = status?.totals ?? progress?.totals ?? null;
+        const failedNow = status?.ok === false && running !== true;
+        const report = status?.scope === 'secondary-init' || totals !== null;
+        if (running !== true && report !== true && failedNow !== true) return null;
+        const filesTotal = Number(progress?.filesTotal ?? totals?.files ?? 0);
+        const filesDone = Number(progress?.filesDone ?? (totals ? Number(totals.downloaded ?? 0) + Number(totals.skipped ?? 0) : 0));
+        const bytesTotal = Number(progress?.bytesTotal ?? totals?.bytes ?? 0);
+        const bytesDone = Number(progress?.bytesDone ?? (running === true ? 0 : Number(totals?.bytes ?? 0)));
+        const percent = Math.max(0, Math.min(100, Math.round(Number(
+          progress?.percent ?? status?.percent ?? (running === true ? 0 : 100),
+        ))));
+        const phase = String(progress?.phase ?? status?.phase ?? (running === true ? 'download' : 'done'));
+        const currentFile = typeof progress?.currentFile === 'string' ? progress.currentFile : '';
+        const cancelRequested = init?.cancelRequested === true;
+        const file = typeof status?.file === 'string' ? status.file : '';
+        const hint = typeof status?.hint === 'string' && status.hint !== '' ? status.hint : '';
+        const failText = failedNow
+          ? `${status?.message || 'полная сверка резерва не удалась'}${file !== '' ? ` Файл: ${file}.` : ''}${hint !== '' ? ` ${hint}` : ''}`
+          : '';
+        const counts = totals !== null
+          ? `скачано: ${Number(totals.downloaded ?? 0)} · пропущено: ${Number(totals.skipped ?? 0)}${Number(totals.failed ?? 0) > 0 ? ` · ошибок: ${Number(totals.failed)}` : ''}`
+          : '';
+        return h(
+          'div',
+          {
+            className: 'dshs-reserve-progress',
+            'data-state': running === true ? 'running' : failedNow ? 'error' : 'done',
+          },
+          h(
+            'div',
+            { className: 'dshs-reserve-progress-head' },
+            h('span', { className: 'dshs-reserve-progress-title' }, running === true ? 'Полная сверка резерва' : 'Сверка резерва завершена'),
+            h('span', { className: 'dshs-reserve-progress-count' }, `${filesDone} из ${filesTotal} файлов`),
+          ),
+          h(
+            'div',
+            {
+              className: 'dshs-reserve-progress-track',
+              role: 'progressbar',
+              'aria-valuemin': '0',
+              'aria-valuemax': '100',
+              'aria-valuenow': String(percent),
+              'aria-label': 'Прогресс полной сверки резерва',
+            },
+            h('span', { className: 'dshs-reserve-progress-fill', style: { width: `${percent}%` } }),
+          ),
+          h(
+            'span',
+            { className: 'dshs-reserve-progress-meta' },
+            `${megabytesText(bytesDone)} из ${megabytesText(bytesTotal)} · ${percent}%${RESERVE_PHASES[phase] !== undefined ? ` · ${RESERVE_PHASES[phase]}` : ''}`,
+          ),
+          running === true && currentFile !== ''
+            ? h('span', { className: 'dshs-reserve-progress-file', title: currentFile }, `сейчас: ${shortReserveFile(currentFile)}`)
+            : null,
+          running !== true && counts !== ''
+            ? h('span', { className: 'dshs-reserve-progress-file' }, counts)
+            : null,
+          failText !== ''
+            ? h('span', { className: 'dshs-reserve-progress-error' }, failText)
+            : null,
+          running === true
+            ? h(
+                'div',
+                { className: 'dshs-reserve-progress-actions' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dshs-reserve-cancel',
+                    style: S.buttonSmall,
+                    disabled: busy === true && cancelRequested === true,
+                    title: 'Остановить скачивание: уже скачанное останется, следующий запуск продолжит с места остановки',
+                    onClick: () => { if (typeof onCancel === 'function') onCancel(); },
+                  },
+                  cancelRequested === true ? 'Отмена…' : 'Отменить',
+                ),
+              )
+            : null,
+        );
+      }
+      reserveProgressComponent = ReserveProgress;
 
 
       /** Иконка синхронизации: две стрелки по кругу (шапка страницы). */
@@ -1909,14 +2087,22 @@ function CollapsedItem({ title, summary, badge, children }) {
         /**
          * «Синхронизировать резерв» — полная сверка с загрузкой: принимает
          * данные из облака и разрешает первую выгрузку. Отдельная кнопка,
-         * чтобы лёгкая сверка не тянула блобы.
+         * чтобы лёгкая сверка не тянула блобы. Пока операция идёт, карточка
+         * каждые 2 с обновляет /state и показывает полосу прогресса
+         * (`secondary.init`), а «Отменить» зовёт POST /secondary-init/cancel.
          */
         const syncSecondaryFull = async () => {
           publish({ busy: 'secondary-init', notice: '', error: '' });
           try {
             const result = await post(SECONDARY_INIT_PATH, {});
             if (result?.ok === true) {
-              publish({ busy: '', notice: result.message || 'Резерв синхронизирован' });
+              const totals = result?.totals ?? null;
+              const report = totals !== null
+                ? `скачано ${Number(totals.downloaded ?? 0)}, пропущено ${Number(totals.skipped ?? 0)}${Number(totals.failed ?? 0) > 0 ? `, ошибок ${Number(totals.failed)}` : ''}`
+                : '';
+              publish({ busy: '', notice: result.message ? `${result.message}${report !== '' ? ` (${report})` : ''}` : 'Резерв синхронизирован' });
+            } else if (result?.cancelled === true || result?.code === 'cancelled') {
+              publish({ busy: '', notice: result?.message ?? 'Сверка отменена — уже скачанное сохранено.', error: '' });
             } else {
               const hint = typeof result?.hint === 'string' && result.hint !== '' ? result.hint : reserveErrorText(result);
               publish({ busy: '', error: hint || (result?.message ?? 'Синхронизация резерва не удалась') });
@@ -1924,6 +2110,23 @@ function CollapsedItem({ title, summary, badge, children }) {
             await refresh();
           } catch (error) {
             publish({ busy: '', error: `Синхронизация резерва не удалась: ${explain(error)}` });
+          }
+        };
+
+        /**
+         * «Отменить» полную сверку резерва: скачивание останавливается, уже
+         * скачанные файлы и `.part` остаются — следующий запуск продолжит.
+         */
+        const cancelSecondaryFull = async () => {
+          try {
+            const result = await post(SECONDARY_INIT_CANCEL_PATH, {});
+            publish({
+              notice: result?.message ?? (result?.ok === true ? 'Отмена запрошена' : 'Сверка уже завершена'),
+              error: '',
+            });
+            await refresh();
+          } catch (error) {
+            publish({ error: `Не удалось отменить сверку: ${explain(error)}` });
           }
         };
 
@@ -2081,6 +2284,7 @@ function CollapsedItem({ title, summary, badge, children }) {
           activeBackend: activeSecondaryBackend,
           dirty: secondaryDirty,
           probe: secondaryProbe,
+          init: secondary?.init,
         });
 
         /**
@@ -2735,6 +2939,9 @@ function CollapsedItem({ title, summary, badge, children }) {
                     { style: secondary.initialized ? S.ok : S.note },
                     secondary.initialized
                       ? `Сверено: локально ${secondary.compare?.local ?? 0}, в облаке ${secondary.compare?.cloud ?? 0}, расходятся ${secondary.compare?.differ ?? 0}`
+                        + (Number(secondary.files ?? 0) > 0
+                          ? `; файлов ${secondary.files} (${megabytesText(secondary.bytes ?? 0)})`
+                          : '')
                         + ((secondary.pulled?.imported ?? 0) > 0 ? `; принято из облака: ${secondary.pulled.imported}` : '')
                       : 'Сначала сверка: отправка в резерв заблокирована, пока состав облака не проверен.',
                   ),
@@ -2753,7 +2960,9 @@ function CollapsedItem({ title, summary, badge, children }) {
                   secondary.backend === 'folder' && secondary.folderDir
                     ? h('span', { style: S.meta }, `папка облака: ${secondary.folderDir}`)
                     : null,
-                  secondary?.status?.ok === false && secondary.status.message
+                  secondary?.status?.ok === false
+                    && secondary.status.cancelled !== true
+                    && secondary.status.message
                     ? h('span', { style: S.error }, reserveErrorText(secondary.status))
                     : null,
                 )
@@ -2817,11 +3026,20 @@ function CollapsedItem({ title, summary, badge, children }) {
                 state.busy === 'secondary-init' ? 'Синхронизация…' : 'Синхронизировать резерв',
               ),
             ),
-            state.busy === 'secondary-init' ? h(SyncProgress, { data }) : null,
+            // Прогресс и отчёт полной сверки: полоса «N из M файлов, X из Y МБ»,
+            // текущий файл, «Отменить» во время работы и итог после неё.
+            secondary?.enabled === true
+              ? h(ReserveProgress, {
+                  init: secondary?.init,
+                  status: secondary?.status,
+                  busy,
+                  onCancel: () => void cancelSecondaryFull(),
+                })
+              : null,
             h(
               'span',
               { style: S.hint },
-              '«Сверить» сравнивает только состав: PROPFIND корня и profile/manifest.json, без скачивания логов, 10–30 с. «Синхронизировать резерв» — полная сверка с загрузкой: сначала принимает данные из облака, потом разрешает выгрузку. Сессии и настройки дублируются в оба места, вложения — только в основное.',
+              '«Сверить» сравнивает только состав: PROPFIND корня и profile/manifest.json, без скачивания логов, 10–30 с. «Синхронизировать резерв» — полная сверка с загрузкой: сначала принимает данные из облака, потом разрешает выгрузку; файлы качаются резюмируемо (30 с на файл, 15 мин на операцию, кнопка «Отменить»), уже скачанное не перекачивается. Сессии и настройки дублируются в оба места, вложения — только в основное.',
             ),
           ),
 
@@ -6964,6 +7182,9 @@ function CollapsedItem({ title, summary, badge, children }) {
       reserveStatusOf,
       reserveErrorText,
       reserveStatusLabel: (payload) => reserveStatusOf(payload).label,
+      // Полоса прогресса полной сверки резерва: для headless-тестов рендера
+      // (N из M файлов, X из Y МБ, текущий файл, кнопка «Отменить»).
+      ReserveProgress: (props) => (typeof reserveProgressComponent === 'function' ? reserveProgressComponent(props ?? {}) : null),
       storageDirtyOf,
       // План «Проверить» для тестов карточки: в живом интерфейсе его приносит
       // маршрут /api/dsh-sync/plan по кнопке.

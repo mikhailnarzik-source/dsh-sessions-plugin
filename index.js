@@ -24,7 +24,7 @@ import { collectDiagnostics } from './lib/diagnostics.mjs'
 import { readHistory, localSkipStats, recordRun, removalDetails, subagentStats } from './lib/history.mjs'
 import { readLedger, sessionState } from './lib/ledger.mjs'
 import { probeYandex } from './lib/yandex.mjs'
-import { probeWebdav } from './lib/webdav.mjs'
+import { classifyReserveError, probeWebdav } from './lib/webdav.mjs'
 import { sameFolder } from './lib/folder.mjs'
 import { backupProgress } from './lib/progress.mjs'
 import { apply as applyDeletePlugin } from './delete/index.js'
@@ -45,11 +45,14 @@ import {
 import { buildSessionGroups, descendantsOf, rootOf } from './lib/session-groups.mjs'
 import { pullReplicated, pushReplicated, secondaryConfig } from './lib/replica.mjs'
 import {
+  cancelSecondaryInit,
   initializeSecondaryChannel,
   probeSecondaryChannel,
+  readSecondaryInitStatus,
   readSecondaryState,
   readSecondaryStatus,
   resetSecondaryInitialization,
+  secondaryInitSnapshot,
 } from './lib/secondary-init.mjs'
 import { applyUpdate, checkForUpdate, describeUpdate, updateState } from './lib/update.js'
 import {
@@ -115,6 +118,10 @@ const DUPLICATES_PATH = '/api/dsh-sync/duplicates'
 const DUPLICATES_QUARANTINE_PATH = '/api/dsh-sync/duplicates/quarantine'
 // Сверка резервного канала: сравнить локальное с облаком и разрешить выгрузку.
 const SECONDARY_INIT_PATH = '/api/dsh-sync/secondary-init'
+// Прогресс полной сверки резерва (GET): файлы/байты/текущий файл и состояние.
+const SECONDARY_INIT_STATUS_PATH = '/api/dsh-sync/secondary-init/status'
+// Отмена полной сверки резерва: скачивание останавливается, `.part` остаётся.
+const SECONDARY_INIT_CANCEL_PATH = '/api/dsh-sync/secondary-init/cancel'
 // Лёгкая сверка резерва: только PROPFIND корня и profile/manifest.json,
 // без скачивания логов (timeout 10–30 с). «Сверить» в карточке резерва.
 const SECONDARY_PROBE_PATH = '/api/dsh-sync/secondary-probe'
@@ -893,6 +900,9 @@ async function readState(ctx) {
   const backup = await readBackupProgress(config)
   const backupStatus = await readSecondaryStatus(home)
   const secondaryState = await readSecondaryState(home)
+  // Живой прогресс полной сверки резерва: пока она идёт, карточка показывает
+  // полосу «N из M файлов, X из Y МБ, сейчас: файл» и кнопку «Отменить».
+  const secondaryActive = secondaryInitSnapshot()
   // H6: очередь невыполненных операций — счётчик «в очереди: N» для панели.
   const outbox = await outboxSummary(home)
   const currentFingerprint = await computeFingerprint(ctx)
@@ -1032,12 +1042,22 @@ async function readState(ctx) {
       initialized: secondaryState?.initialized === true,
       compare: secondaryState?.plan ?? null,
       initializedAt: secondaryState?.at,
+      // Файлы и байты, скачанные в кеш резерва при сверке (итог операции).
+      files: secondaryState?.files ?? 0,
+      bytes: secondaryState?.bytes ?? 0,
       pulled: secondaryState?.pulled ?? null,
       lastPushAt: secondaryState?.lastPushAt ?? null,
       lastPushOk: secondaryState?.lastPushOk,
       lastPushUploaded: secondaryState?.lastPushUploaded ?? 0,
       lastPushMessage: secondaryState?.lastPushMessage ?? '',
       status: backupStatus,
+      // Живой прогресс полной сверки (в памяти): running, progress, отмена.
+      init: {
+        running: secondaryActive.running === true,
+        cancelRequested: secondaryActive.cancelRequested === true,
+        startedAt: secondaryActive.startedAt,
+        progress: secondaryActive.progress ?? null,
+      },
     },
     // Тип резервного хранилища без секретов: по нему карточка подписывает полосу.
     secondaryBackend: config?.secondary?.backend ?? 'none',
@@ -4000,7 +4020,9 @@ export function apply(ctx) {
   })
 
   // Сверка резервного канала: сравнить локальное с облаком, принять облачные
-  // сессии до первой отправки и поднять флаг secondary.initialized.
+  // сессии до первой отправки и поднять флаг secondary.initialized. Теперь
+  // возвращает и totals (файлы/байты/скачано/пропущено), а ход работы виден
+  // через GET /secondary-init/status и отменяется POST /secondary-init/cancel.
   route('secondary-init', SECONDARY_INIT_PATH, async () => {
     try {
       const home = dshHome()
@@ -4030,10 +4052,66 @@ export function apply(ctx) {
         }
         invalidateSessionStates()
       }
-      return json(result)
+      return json({ ...result, hint: typeof result.hint === 'string' && result.hint !== '' ? result.hint : reserveHint(result) })
     } catch (error) {
-      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+      const described = classifyReserveError(error, {})
+      const failed = {
+        ok: false,
+        code: described.code,
+        backend: 'unknown',
+        file: described.file,
+        message: `полная сверка резерва не удалась: ${described.message}`,
+        hint: described.hint,
+      }
+      return json(failed, 500)
     }
+  })
+
+  // Прогресс полной сверки резерва: GET — для полосы прогресса в карточке.
+  // Во время работы отвечает из памяти процесса: основную синхронизацию не
+  // ждёт и не блокирует.
+  route('secondary-init-status', SECONDARY_INIT_STATUS_PATH, async () => {
+    try {
+      const home = dshHome()
+      let config = { projects: {} }
+      try {
+        config = await loadConfig(home)
+      } catch {
+        // статус можно отдать и без настроек
+      }
+      const secondary = secondaryConfig(config)
+      const status = await readSecondaryInitStatus({ home, secondary })
+      return json({
+        ...status,
+        backend: status.backend ?? secondary?.backend ?? 'none',
+        at: status.at ?? new Date().toISOString(),
+      })
+    } catch (error) {
+      return json({
+        ok: false,
+        state: 'error',
+        label: 'ошибка',
+        running: false,
+        progress: null,
+        code: 'secondary/status-failed',
+        message: `статус резерва не прочитан: ${error instanceof Error ? error.message : String(error)}`,
+        hint: 'Обновите страницу и повторите; если не помогает — перезапустите DSH.',
+      }, 500)
+    }
+  }, ['GET'])
+
+  // Отмена полной сверки резерва: кнопка «Отменить» рядом с полосой прогресса.
+  // Останавливает скачивание; уже скачанные файлы и `.part` остаются — следующий
+  // запуск продолжит с места остановки.
+  route('secondary-init-cancel', SECONDARY_INIT_CANCEL_PATH, async () => {
+    const result = cancelSecondaryInit('кнопка «Отменить»')
+    const snapshot = secondaryInitSnapshot()
+    return json({
+      ...result,
+      running: snapshot.running === true,
+      cancelRequested: snapshot.cancelRequested === true,
+      progress: snapshot.progress,
+    })
   })
 
   // «Сверить» резервного канала — лёгкая сверка (U3): PROPFIND корня и чтение
