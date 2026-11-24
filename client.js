@@ -1032,7 +1032,7 @@ function CollapsedItem({ title, summary, badge, children }) {
         const view = props?.view;
         const state = useSnapshot();
         const data = state.data;
-        const [update, setUpdate] = React.useState(null);
+        const [update, setUpdate] = React.useState(updateOverride);
         const [updateNote, setUpdateNote] = React.useState('');
         const [probe, setProbe] = React.useState(null);
         const [draft, setDraft] = React.useState({ backend: 'git', remote: '', repoDir: '', yandexToken: '', yandexPath: 'dsh-sync', webdavLogin: '', webdavPassword: '', webdavPath: 'dsh-sync', secondaryBackend: 'none', secondaryRemote: '', secondaryLogin: '', secondaryPassword: '', secondaryPath: 'dsh-sync', secondaryFolder: '', projectPath: '', projectId: '', attachments: false, autoUpdate: false, useExternal: true });
@@ -2198,19 +2198,25 @@ function CollapsedItem({ title, summary, badge, children }) {
           h(
             Card,
             { title: t('sectionMaintenance'), hint: 'Проверка версии плагина и служебные действия.' },
+            // Заголовок плашки обновления называет плагин: без него непонятно,
+            // чьё это обновление. Виден только когда обновление доступно.
+            update?.status === 'behind'
+              ? h('span', { style: { ...S.label, fontWeight: 600 } }, `${t('title')}: доступно обновление`)
+              : null,
             h(
               'span',
               { style: S.hint },
               update === null
                 ? 'Проверяем версию…'
-                // Host-часть отдаёт готовую подпись: версия + короткий коммит,
-                // а для локальной установки — «автообновление не применяется».
-                : typeof update.description === 'string' && update.description !== ''
-                  ? update.description
-                  : update.status === 'local'
-                    ? 'Локальная установка — автообновление не применяется; свежий код уже на месте.'
-                    : update.status === 'behind'
-                      ? `Доступно обновление: ${shortSha(update.installed)} → ${shortSha(update.latest)} — установится автоматически.`
+                // «Доступно обновление» собираем здесь: строка должна называть
+                // плагин, а не только версии. Остальные статусы host-часть отдаёт
+                // готовой подписью — версия и короткий коммит.
+                : update.status === 'behind'
+                  ? `плагин «${t('title')}»: ${update.version ? `v${update.version} ` : ''}${shortSha(update.installed)} → ${shortSha(update.latest)} — установится автоматически.`
+                  : typeof update.description === 'string' && update.description !== ''
+                    ? update.description
+                    : update.status === 'local'
+                      ? 'Локальная установка — автообновление не применяется; свежий код уже на месте.'
                       : update.status === 'current'
                         ? `Актуально (${shortSha(update.installed)})`
                         : update.detail !== undefined && update.detail !== ''
@@ -2920,6 +2926,9 @@ function CollapsedItem({ title, summary, badge, children }) {
     // карточка плагина, и строка в подвале боковой панели.
     const listeners = new Set();
     let snapshot = { loading: true, data: null, error: '', busy: '', notice: '', plan: null, planError: '', planNote: '' };
+    // Состояние обновления для headless-тестов рендера: в живом интерфейсе
+    // всегда null и заполняется ответом маршрута /api/dsh-sync/update.
+    let updateOverride = null;
     const useSnapshot = () => {
       const [, force] = React.useReducer((n) => n + 1, 0);
       React.useEffect(() => {
@@ -5785,6 +5794,12 @@ function CollapsedItem({ title, summary, badge, children }) {
         for (const listener of listeners) listener();
       },
       readPlan: () => snapshot.plan,
+      // Состояние обновления для headless-тестов плашки: в живом интерфейсе его
+      // приносит маршрут /api/dsh-sync/update, значение null — «ещё не проверено».
+      setUpdateState: (value) => {
+        updateOverride = value ?? null;
+      },
+      readUpdateState: () => updateOverride,
       // Отчёт «Найти дубли» для тестов карточки: в живом интерфейсе его
       // приносит маршрут /api/dsh-sync/duplicates по кнопке.
       setDuplicates: (value) => {

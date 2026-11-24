@@ -328,6 +328,34 @@ test('в секции обслуживания — проверка обновл
   assert.match(textOf(maintenance), /Проверяем версию|Актуально|Доступно обновление|Локальная установка|Состояние неизвестно/, 'статус проверки версии виден')
 })
 
+test('плашка обновления называет плагин и не теряет кнопку «Обновить»', () => {
+  exported.__test.setUpdateState({
+    status: 'behind',
+    installed: 'aaaaaaa1111',
+    latest: 'bbbbbbb2222',
+    version: '1.0.70',
+    // Host-часть отдаёт подпись без названия плагина: клиент должен добавить его сам.
+    description: 'доступно обновление: v1.0.70 (aaaaaaa) → bbbbbbb',
+  })
+  try {
+    const cardTree = resolveNode(main.component({}))
+    const maintenance = walk(cardTree).find((node) => node.type === 'section' && textOf(node).includes('Обслуживание'))
+    assert.ok(maintenance, 'секция «Обслуживание» найдена')
+    const maintenanceText = textOf(maintenance)
+    assert.match(maintenanceText, /Синхронизация сессий: доступно обновление/, 'заголовок называет плагин')
+    assert.match(
+      maintenanceText,
+      /плагин «Синхронизация сессий»: v1\.0\.70 aaaaaaa → bbbbbbb/,
+      'строка версий называет плагин и показывает обе версии',
+    )
+    const updateButton = walk(maintenance).find((node) => node.type === 'button' && textOf(node).trim() === 'Обновить')
+    assert.ok(updateButton, 'кнопка «Обновить» на месте')
+    assert.equal(typeof updateButton.props.onClick, 'function', 'обновление подключено')
+  } finally {
+    exported.__test.setUpdateState(null)
+  }
+})
+
 test('кнопки страницы: 36/32, радиус 10, мягкая заливка brand, ширина по тексту', () => {
   const buttons = nodes.filter((node) => node.type === 'button')
   assert.ok(buttons.length >= 6, `кнопок на странице: ${buttons.length}`)
