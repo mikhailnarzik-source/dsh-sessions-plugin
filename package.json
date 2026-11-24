@@ -1,59 +1,59 @@
-﻿{
-    "name":  "dsh-sessions",
-    "version":  "1.0.71",
-    "description":  "РЎРµСЃСЃРёРё DeepSeek Harness: СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ РјРµР¶РґСѓ СѓСЃС‚СЂРѕР№СЃС‚РІР°РјРё (git, РѕР±Р»Р°РєРѕ, РЇРЅРґРµРєСЃ.Р”РёСЃРє), РїСЂРѕС„РёР»СЊ Рё СЂР°Р±РѕС‡РёРµ РїСЂРѕСЃС‚СЂР°РЅСЃС‚РІР°, СЂРµР¶РёРј В«Р»РѕРєР°Р»СЊРЅР°СЏ / РѕР±Р»Р°С‡РЅР°СЏВ», СѓРґР°Р»РµРЅРёРµ СЃРµСЃСЃРёРё СЃ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµРј Рё РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРёРµ РёР· РєР°СЂР°РЅС‚РёРЅР°",
-    "type":  "module",
-    "license":  "MIT",
-    "keywords":  [
-                     "dsh",
-                     "dsh-plugin",
-                     "deepseek-harness",
-                     "session-sync",
-                     "session-delete"
-                 ],
-    "exports":  {
-                    ".":  "./index.js",
-                    "./client":  "./client.js",
-                    "./locale/*.json":  "./locale/*.json",
-                    "./icon":  "./icon.svg"
-                },
-    "bin":  {
-                "dsh-sessions":  "./cli.mjs"
-            },
-    "files":  [
-                  "index.js",
-                  "client.js",
-                  "cli.mjs",
-                  "lib",
-                  "delete",
-                  "cordis.patch.yml",
-                  "locale",
-                  "docs",
-                  "icon.svg",
-                  "README.md",
-                  "LICENSE"
-              ],
-    "engines":  {
-                    "node":  "\u003e=22.15"
-                },
-    "scripts":  {
-                    "test":  "node --import ./test/setup.mjs --test test/*.test.mjs"
-                },
-    "dsh":  {
-                "bundle":  {
-                               "patch":  "./cordis.patch.yml"
-                           },
-                "client":  {
-                               "platform":  "web",
-                               "immediately":  true,
-                               "inject":  [
-                                              "@deepseek-ai/dsh-client-connection",
-                                              "@deepseek-ai/dsh-client-locale",
-                                              "@deepseek-ai/dsh-client-ui-plugin-manager",
-                                              "@deepseek-ai/dsh-client-ui-slots",
-                                              "@deepseek-ai/dsh-client-ui-workspace"
-                                          ]
-                           }
-            },
-    "icon":  "./icon.svg"
+{
+  "name": "dsh-sessions",
+  "version": "1.0.71",
+  "description": "РЎРµСЃСЃРёРё DeepSeek Harness: СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ РјРµР¶РґСѓ СѓСЃС‚СЂРѕР№СЃС‚РІР°РјРё (git, РѕР±Р»Р°РєРѕ, РЇРЅРґРµРєСЃ.Р”РёСЃРє), РїСЂРѕС„РёР»СЊ Рё СЂР°Р±РѕС‡РёРµ РїСЂРѕСЃС‚СЂР°РЅСЃС‚РІР°, СЂРµР¶РёРј В«Р»РѕРєР°Р»СЊРЅР°СЏ / РѕР±Р»Р°С‡РЅР°СЏВ», СѓРґР°Р»РµРЅРёРµ СЃРµСЃСЃРёРё СЃ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµРј Рё РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРёРµ РёР· РєР°СЂР°РЅС‚РёРЅР°",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "session-sync",
+    "session-delete"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "bin": {
+    "dsh-sessions": "./cli.mjs"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cli.mjs",
+    "lib",
+    "delete",
+    "cordis.patch.yml",
+    "locale",
+    "docs",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.15"
+  },
+  "scripts": {
+    "test": "node --import ./test/setup.mjs --test test/*.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  },
+  "icon": "./icon.svg"
 }
