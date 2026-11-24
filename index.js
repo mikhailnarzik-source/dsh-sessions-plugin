@@ -42,7 +42,7 @@ import {
   unsupportedBackendMessage,
   OUTBOX_SHUTDOWN_TIMEOUT_MS,
 } from './lib/outbox.mjs'
-import { buildSessionGroups } from './lib/session-groups.mjs'
+import { buildSessionGroups, descendantsOf, rootOf } from './lib/session-groups.mjs'
 import { pullReplicated, pushReplicated, secondaryConfig } from './lib/replica.mjs'
 import {
   initializeSecondaryChannel,
@@ -64,7 +64,7 @@ import {
 } from './lib/session-modes.mjs'
 import { clearWorkspacePending, planWorkspace, readLocalWorkspaces, readWorkspacePending } from './lib/workspace.mjs'
 import { applyPendingProfile, clearPendingBrowserSettings, discardProfilePlan, readJournal, readPendingBrowserSettings, readProfileStatus, refreshProfilePlan, writeBrowserSettings } from './lib/profile.mjs'
-import { QUARANTINE_DAYS, listTombstones, readTombstones, restoreTombstones, writeTombstones } from './lib/tombstones.mjs'
+import { QUARANTINE_DAYS, isActiveTombstone, listTombstones, readTombstones, restoreTombstones, writeTombstones } from './lib/tombstones.mjs'
 import {
   cloudCopyPath,
   deleteCloudCopy,
@@ -438,6 +438,186 @@ async function checkEnvironment(config) {
   return checks
 }
 
+// --- группы «родитель + субагенты»: счётчики и отчёт -------------------------
+
+/** Русская форма «вместе с N субагентами»: 1 субагентом, 2 субагентами, 11 субагентами, 21 субагентом. */
+export function subagentsPhrase(count) {
+  const value = Math.abs(Number(count) || 0)
+  const tail = value % 100
+  const last = value % 10
+  if (tail >= 11 && tail <= 14) return `${value} субагентами`
+  if (last === 1) return `${value} субагентом`
+  return `${value} субагентами`
+}
+
+/**
+ * Сводка групп по списку сессий: `[{ id, parentSession }]`.
+ *
+ * `groups` — сколько семей «родитель + дети» (одиночные сессии не считаются),
+ * `subagents` — сессии с родителем, `orphans` — субагенты, чьего родителя в
+ * списке нет. Возвращает готовую строку отчёта «групп: N, субагентов: M,
+ * сирот: K» для журнала и панели.
+ */
+export function computeSessionGroupStats(entries = []) {
+  const list = (Array.isArray(entries) ? entries : [])
+    .filter(entry => entry !== null && typeof entry === 'object' && typeof entry.id === 'string' && entry.id !== '')
+    .map(entry => ({
+      id: entry.id,
+      parentSession: typeof entry.parentSession === 'string' ? entry.parentSession.trim() : '',
+    }))
+  const ids = new Set(list.map(entry => entry.id))
+  const groups = buildSessionGroups(list.map(entry => ({
+    id: entry.id,
+    header: entry.parentSession === '' ? undefined : { id: entry.id, parentSession: entry.parentSession },
+  })))
+  const subagents = list.filter(entry => entry.parentSession !== '').length
+  const roots = new Set()
+  let groupsWithChildren = 0
+  for (const entry of list) {
+    if (roots.has(entry.id)) continue
+    const rawRoot = rootOf(groups.parentById, entry.id)
+    const root = ids.has(rawRoot) ? rawRoot : entry.id
+    if (roots.has(root)) continue
+    roots.add(root)
+    if ((groups.childrenByParent.get(root) ?? []).length > 0) groupsWithChildren += 1
+  }
+  let orphans = 0
+  for (const parent of groups.parentById.values()) if (!ids.has(parent)) orphans += 1
+  return {
+    sessions: list.length,
+    groups: groupsWithChildren,
+    subagents,
+    orphans,
+    groupLine: `групп: ${groupsWithChildren}, субагентов: ${subagents}, сирот: ${orphans}`,
+  }
+}
+
+/**
+ * Дописать в запись журнала строку групп и счётчики.
+ * Строка добавляется один раз: повторный запуск в дочернем процессе её уже мог
+ * поставить, второй раз сообщение не дублируем.
+ */
+export function decorateSessionGroupReport(record, entries = []) {
+  if (record === null || typeof record !== 'object') return record
+  const stats = computeSessionGroupStats(entries)
+  // Записи об ошибке строку не получают: там важна причина, а не состав групп.
+  if (record.ok === false) {
+    record.groupsCount = stats.groups
+    record.orphanCount = stats.orphans
+    return record
+  }
+  record.groupsCount = stats.groups
+  record.orphanCount = stats.orphans
+  record.groupLine = stats.groupLine
+  const message = typeof record.message === 'string' ? record.message : ''
+  if (!message.includes('групп:')) record.message = message === '' ? stats.groupLine : `${message}; ${stats.groupLine}`
+  return record
+}
+
+/**
+ * Дописать в отчёт удаления «вместе с N субагентами»: родитель уходит в
+ * карантин не один, причина у детей — `children`.
+ */
+export function decoratePruneChildren(record) {
+  if (record === null || typeof record !== 'object') return record
+  const children = Number(record.childrenQuarantined
+    ?? record.prune?.childrenQuarantined
+    ?? 0) || 0
+  record.childrenQuarantined = children
+  if (children <= 0) return record
+  const message = typeof record.message === 'string' ? record.message : ''
+  if (!message.includes('вместе с')) {
+    record.message = `${message}${message === '' ? '' : '; '}удалено в карантин вместе с ${subagentsPhrase(children)}`
+  }
+  return record
+}
+
+/** Список локальных сессий `{ id, parentSession }` для сводки по группам. */
+async function localGroupEntries(ctx, home, config) {
+  const byId = new Map()
+  for (const entry of Object.values(config?.projects ?? {})) {
+    const projectPath = typeof entry?.path === 'string' ? entry.path : ''
+    if (projectPath === '') continue
+    try {
+      const located = await localSessionsFor(ctx, home, projectPath)
+      for (const session of located.sessions) {
+        if (typeof session.id !== 'string' || session.id === '' || byId.has(session.id)) continue
+        byId.set(session.id, {
+          id: session.id,
+          parentSession: typeof session.parent === 'string' ? session.parent : '',
+        })
+      }
+    } catch {
+      // сводка по группам вспомогательная: один проект не должен ломать отчёт
+    }
+  }
+  return [...byId.values()]
+}
+
+/** `children` из описания сессии в зеркале: чего не хватает локально. */
+async function mirrorSessionChildren({ repoDir, projectId, sessionId }) {
+  if (typeof repoDir !== 'string' || repoDir === '' || projectId === '' || sessionId === '') return []
+  try {
+    const raw = await readFile(join(cloudCopyPath(repoDir, projectId, sessionId), 'session.json'), 'utf8')
+    const data = JSON.parse(raw)
+    return Array.isArray(data?.children)
+      ? data.children.filter(id => typeof id === 'string' && id !== '')
+      : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Группа удалённых сессий по меткам: корень вверх по `parent`, затем все активные
+ * потомки вниз. Нужна, чтобы восстановление по id ребёнка возвращало всю семью.
+ * `expired`/`restored`/`superseded` в группу не входят: их вернуть нельзя.
+ */
+export function tombstoneGroup({ tombstones, id } = {}) {
+  const entries = tombstones?.sessions ?? {}
+  const byCanonical = new Map()
+  for (const [storedId, entry] of Object.entries(entries)) {
+    const key = normalizeSessionId(storedId)
+    if (key !== '') byCanonical.set(key, { storedId, entry })
+  }
+  const active = key => byCanonical.has(key) && isActiveTombstone(byCanonical.get(key).entry)
+  const parentOf = key => {
+    const entry = byCanonical.get(key)?.entry
+    if (entry === null || typeof entry !== 'object') return ''
+    return typeof entry.parent === 'string' ? normalizeSessionId(entry.parent.trim()) : ''
+  }
+  const requested = normalizeSessionId(typeof id === 'string' ? id : '')
+  if (requested === '') return { requested: '', root: '', ids: [], children: 0, size: 0 }
+  // Вверх до активного корня: ребёнок без родителя остаётся собственным корнем.
+  let root = requested
+  const seen = new Set([requested])
+  for (let depth = 0; depth < 32; depth++) {
+    const parent = parentOf(root)
+    if (parent === '' || seen.has(parent) || !active(parent)) break
+    seen.add(parent)
+    root = parent
+  }
+  if (!active(root)) root = requested
+  // Вниз: все активные потомки корня.
+  const ids = [root]
+  const queue = [root]
+  while (queue.length > 0) {
+    const current = queue.shift()
+    for (const [key] of byCanonical) {
+      if (ids.includes(key) || !active(key) || parentOf(key) !== current) continue
+      ids.push(key)
+      queue.push(key)
+    }
+  }
+  return {
+    requested,
+    root,
+    ids,
+    children: Math.max(0, ids.length - 1),
+    size: ids.length,
+  }
+}
+
 /** Текущее состояние: окружение, настройки, счётчики и последний запуск. */
 async function readState(ctx) {
   const home = dshHome()
@@ -472,6 +652,12 @@ async function readState(ctx) {
   scanned = located.total
   scanError = located.error
   for (const session of located.sessions) cwds.add(session.cwd)
+  // Группы «родитель + субагенты» — по заголовкам локальных сессий, без чтения
+  // логов: этого достаточно для счётчиков в шапке карточки.
+  const groupStats = computeSessionGroupStats(located.sessions.map(session => ({
+    id: session.id,
+    parentSession: typeof session.parent === 'string' ? session.parent : '',
+  })))
 
   try {
     const mine = located.sessions
@@ -609,13 +795,24 @@ async function readState(ctx) {
     },
     checks,
     ready: checks.every(check => check.ok),
-    status: { local, mirror, onlyLocal, onlyMirror, subagents, subagentsAvailable },
+    // Группы «родитель + субагенты»: счётчики для шапки карточки и строки отчёта.
+    status: {
+      local,
+      mirror,
+      onlyLocal,
+      onlyMirror,
+      subagents,
+      subagentsAvailable,
+      groups: groupStats.groups,
+      orphans: groupStats.orphans,
+      groupLine: groupStats.groupLine,
+    },
     modes,
     profile,
     workspace,
     suggestedFolder,
     version: packageVersion,
-    updatedFrom: pendingUpdate?.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
+    updatedFrom: pendingUpdate !== undefined && pendingUpdate !== null && pendingUpdate.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
     backup,
     backupStatus,
     // Очередь операций: count — «в очереди: N», pending — последние ошибки.
@@ -1186,6 +1383,11 @@ async function runSync(ctx, action, options = {}) {
           viaChild.message = `${viaChild.message}; ${localOnly.warning}`
         }
       }
+      // Строка отчёта «групп: N, субагентов: M, сирот: K» — по локальному
+      // составу сессий: дочерний процесс считает только обмен, а не группы.
+      decorateSessionGroupReport(viaChild, await localGroupEntries(ctx, home, config))
+      // Удаление родителя уносит детей: в ответе видно, сколько субагентов.
+      if (action === 'prune') decoratePruneChildren(viaChild)
     }
     return viaChild
   }
@@ -1381,6 +1583,8 @@ async function runSync(ctx, action, options = {}) {
       ? { pushed: result.push.pushed, committed: result.push.committed, attachments: result.push.attachments?.added ?? 0, skippedLocal: skipped.pushSkippedLocal, localMirrorProtected: skipped.localMirrorProtected }
       : null,
   }
+  // Строка отчёта по группам: «групп: N, субагентов: M, сирот: K».
+  decorateSessionGroupReport(record, await localGroupEntries(ctx, home, config))
   await writeLastRun(record)
   invalidateSessionStates()
   return record
@@ -1507,6 +1711,8 @@ async function runPrune(ctx, payload = {}) {
   if (viaChild !== undefined) {
     invalidateSessionStates()
     if (viaChild.skipped === true) return { ok: false, action: 'prune', message: viaChild.message }
+    // «Вместе с N субагентами»: родитель уходит в карантин не один.
+    decoratePruneChildren(viaChild)
     return viaChild
   }
 
@@ -1528,8 +1734,12 @@ async function runPrune(ctx, payload = {}) {
       removedDetails: summary.removedDetails ?? [],
       committed: summary.committed === true,
       skippedDeletions: summary.skippedDeletions,
+      childrenQuarantined: summary.childrenQuarantined ?? 0,
+      childrenMissing: summary.childrenMissing ?? [],
+      orphanIds: summary.orphanIds ?? summary.orphansProtected ?? [],
       durationMs: Date.now() - started,
     }
+    decoratePruneChildren(record)
     await writeLastRun(record)
     invalidateSessionStates()
     if (record.removed > 0) pushNotice('sync', `Удалено в карантин: ${record.removed}. Вернуть можно в карточке «Удалённые».`)
@@ -2191,6 +2401,9 @@ async function sessionStates(ctx) {
           ? new Date(ledgerRecord.at).toISOString()
           : null,
         cloudCopy,
+        // Группа «родитель + субагенты»: связь приходит из заголовка лога,
+        // остальные поля (groupId/children/орфан) считаются одним проходом ниже.
+        parentSession: typeof session.parent === 'string' ? session.parent : '',
         // Объявление «локальная навсегда»: сессия не уходит и не принимается
         // ни на одном устройстве, пока объявление не снимут «Сделать облачной».
         declared: declaredIds.has(normalizeSessionId(session.id)),
@@ -2199,8 +2412,55 @@ async function sessionStates(ctx) {
     }
   }
 
+  // Группы: родитель + субагенты. Связи — только по заголовкам локальных
+  // сессий (без чтения логов). Для сессий с детьми дополнительно смотрим
+  // `session.json` зеркала: дети, которых нет локально, показываются как
+  // «ещё N в облаке» и не теряются при удалении.
+  const groupIndex = buildSessionGroups(sessions.map(session => ({
+    id: session.id,
+    header: session.parentSession === '' ? undefined : { id: session.id, parentSession: session.parentSession },
+  })))
+  const localIds = new Set(sessions.map(session => session.id))
+  const groupSizeByRoot = new Map()
+  for (const session of sessions) {
+    const rawRoot = rootOf(groupIndex.parentById, session.id)
+    const root = localIds.has(rawRoot) ? rawRoot : session.id
+    if (groupSizeByRoot.has(root)) continue
+    groupSizeByRoot.set(root, 1 + descendantsOf(groupIndex.childrenByParent, root).length)
+  }
+  for (const session of sessions) {
+    const parentSession = session.parentSession
+    const children = (groupIndex.childrenByParent.get(session.id) ?? []).filter(id => id !== session.id)
+    const rawRoot = rootOf(groupIndex.parentById, session.id)
+    const groupId = localIds.has(rawRoot) ? rawRoot : session.id
+    let mirrorChildren = []
+    if (children.length > 0) {
+      const fromMirror = await mirrorSessionChildren({
+        repoDir: config.repoDir,
+        projectId: session.projectId,
+        sessionId: session.id,
+      })
+      mirrorChildren = fromMirror.filter(id => !localIds.has(id) && id !== session.id)
+    }
+    session.groupId = groupId
+    session.children = children
+    session.childrenCount = children.length
+    // Ребёнок без родителя: родителя нет на этом устройстве (сирота).
+    session.orphan = parentSession !== '' && !localIds.has(parentSession)
+    session.parentMissing = session.orphan === true
+    session.childrenMissing = mirrorChildren
+    session.childrenMissingCount = mirrorChildren.length
+    session.groupSize = groupSizeByRoot.get(groupId) ?? 1
+  }
+
   const localCount = sessions.filter(session => session.mode === MODE_LOCAL).length
   const unattached = sessions.filter(session => session.badge === 'unattached').length
+  // Счётчики групп для шапки карточки и строки отчёта.
+  const groupStats = computeSessionGroupStats(sessions.map(session => ({
+    id: session.id,
+    parentSession: session.parentSession,
+  })))
+  const orphanIds = sessions.filter(session => session.orphan === true).map(session => session.id)
   // Миграция: локальные сессии, у которых в зеркале осталась копия. Для них
   // панель показывает «Убрать облачные копии локальных сессий».
   const migrationIds = sessions
@@ -2211,6 +2471,14 @@ async function sessionStates(ctx) {
     ok: true,
     states,
     sessions,
+    // Группы «родитель + субагенты»: счётчики и строка отчёта для панели.
+    groups: {
+      count: groupStats.groups,
+      subagents: groupStats.subagents,
+      orphans: groupStats.orphans,
+      line: groupStats.groupLine,
+      orphanIds: orphanIds.slice(0, 100),
+    },
     modes: { local: localCount, cloud: sessions.length - localCount },
     localOnly: {
       count: declaredIds.size,
@@ -2673,7 +2941,24 @@ async function restoreSessions(ctx, payload = {}) {
   }
 
   const tombstonesBefore = await readTombstones(config.repoDir)
-  const resolved = resolveTombstoneIds({ tombstones: tombstonesBefore, ids: requestedRaw, all })
+  // Группа восстанавливается целиком с любого участника: щёлкнув «Восстановить»
+  // у субагента, получаем и родителя, и всех детей. Порядок — от корня вниз.
+  const expandedRequested = []
+  const requestedGroups = []
+  for (const id of requestedRaw) {
+    const group = tombstoneGroup({ tombstones: tombstonesBefore, id })
+    if (group.ids.length === 0) {
+      if (!expandedRequested.includes(id)) expandedRequested.push(id)
+      continue
+    }
+    if (!requestedGroups.some(item => item.root === group.root)) requestedGroups.push(group)
+    for (const member of group.ids) if (!expandedRequested.includes(member)) expandedRequested.push(member)
+  }
+  const resolved = resolveTombstoneIds({
+    tombstones: tombstonesBefore,
+    ids: expandedRequested.length > 0 ? expandedRequested : requestedRaw,
+    all,
+  })
   const canonicalRequested = resolved.canonical.length > 0
     ? resolved.canonical
     : requestedRaw.map(canonicalRestoreId).filter(id => id !== '')
@@ -2866,6 +3151,21 @@ async function restoreSessions(ctx, payload = {}) {
   if (result.failed.length > 0) notes.push(`не удалось: ${result.failed.length}`)
   if (superseded.length > 0) notes.push(`конфликтующих копий в карантин (superseded): ${superseded.length}`)
   if (idFixed.length > 0) notes.push(`id приведён к каноническому: ${idFixed.length}`)
+  // Отчёт о восстановлении группы: с какого id начали, что вернули целиком.
+  const groupRequest = requestedGroups[0]
+  const groupSize = expandedRequested.length
+  const restoredGroup = {
+    requested: requestedRaw,
+    ...(groupRequest === undefined ? {} : { root: groupRequest.root }),
+    size: groupSize,
+    children: Math.max(0, groupSize - 1),
+    ids: canonicalRestored,
+    restored,
+    group: groupSize > 1,
+  }
+  if (restored > 0 && groupSize > 1 && !notes.some(note => note.includes('группы'))) {
+    notes.push(`вся группа: ${restored} (вместе с ${subagentsPhrase(groupSize - 1)})`)
+  }
   const message = restored > 0
     ? `восстановлено сессий: ${restored}${notes.length > 0 ? `, ${notes.join(', ')}` : ''}`
     : result.failed.length > 0
@@ -2882,6 +3182,7 @@ async function restoreSessions(ctx, payload = {}) {
     restored,
     restoredIds: canonicalRestored,
     restoredFrom,
+    restoredGroup,
     // D4: рейтинг копий и канонический id с детьми — в журнале восстановления.
     ...(restoreRank.length > 0
       ? {
@@ -3601,6 +3902,49 @@ export function apply(ctx) {
         row.shortId = resolved.shortId
         row.titleSource = resolved.titleSource
       }
+      // Группа удалённых: у родителя видно, сколько субагентов ушло вместе с
+      // ним, у ребёнка — к какому родителю он относится. Восстановление
+      // группы — одной кнопкой (маршрут restore принимает любой id группы).
+      const byId = new Map(sessions.map(row => [normalizeSessionId(row.id), row]))
+      const childrenOf = new Map()
+      const rootOfDeleted = (row) => {
+        let current = row
+        const seen = new Set([normalizeSessionId(row.id)])
+        for (let depth = 0; depth < 32; depth++) {
+          const parentKey = typeof current?.parent === 'string' ? normalizeSessionId(current.parent) : ''
+          if (parentKey === '' || seen.has(parentKey) || !byId.has(parentKey)) break
+          seen.add(parentKey)
+          current = byId.get(parentKey)
+        }
+        return current ?? row
+      }
+      for (const row of sessions) {
+        const parentKey = typeof row.parent === 'string' ? normalizeSessionId(row.parent) : ''
+        if (parentKey === '' || !byId.has(parentKey)) continue
+        if (!childrenOf.has(parentKey)) childrenOf.set(parentKey, [])
+        childrenOf.get(parentKey).push(row.id)
+      }
+      for (const row of sessions) {
+        const key = normalizeSessionId(row.id)
+        const children = childrenOf.get(key) ?? []
+        const root = rootOfDeleted(row)
+        row.parentSession = typeof row.parent === 'string' ? row.parent : ''
+        row.groupId = root?.id ?? row.id
+        row.groupRootTitle = root?.title ?? ''
+        row.children = children
+        row.childrenCount = children.length
+        row.orphan = row.parentSession !== '' && !byId.has(normalizeSessionId(row.parentSession))
+      }
+      // Размер группы одинаков у всех её участников: корень + все потомки.
+      const groupSizeByRoot = new Map()
+      for (const row of sessions) {
+        const groupId = row.groupId
+        if (groupSizeByRoot.has(groupId)) continue
+        const size = 1 + (childrenOf.get(normalizeSessionId(groupId)) ?? [])
+          .reduce((total, childId) => total + 1 + (childrenOf.get(normalizeSessionId(childId)) ?? []).length, 0)
+        groupSizeByRoot.set(groupId, size)
+      }
+      for (const row of sessions) row.groupSize = groupSizeByRoot.get(row.groupId) ?? 1
       return json({
         ok: true,
         quarantineDays: QUARANTINE_DAYS,

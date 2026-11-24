@@ -541,6 +541,22 @@ window.__ModuleLoader__.load({
             '.dshs-deleted-row{display:flex;align-items:center;gap:10px;min-width:0;padding:7px 10px;border-radius:10px;border:1px solid transparent}',
             '.dshs-deleted-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.1));border-color:var(--dsw-alias-border-l2,rgba(128,128,128,0.22))}',
             '.dshs-deleted-text{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}',
+            // --- группы «родитель + субагенты» ------------------------------
+            // Субагенты вложены под родителем: отступ и вертикальная линия связи.
+            '.dshs-modes-row[data-subagent="true"]{margin-left:18px;border-left:2px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));border-radius:0 10px 10px 0}',
+            '.dshs-group-toggle{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:4px;height:32px;padding:0 10px;border-radius:10px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,0.35));background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:600;line-height:1;cursor:pointer;white-space:nowrap;flex:0 0 auto}',
+            '.dshs-group-toggle:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16));border-color:var(--dsw-alias-border-l4,rgba(150,150,150,0.65))}',
+            '.dshs-group-toggle:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:2px}',
+            '.dshs-group-toggle[data-open="true"]{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 16%,transparent)}',
+            // «+N»: сколько субагентов свёрнуто под родителем.
+            '.dshs-group-badge{box-sizing:border-box;display:inline-flex;align-items:center;height:22px;padding:0 7px;border-radius:7px;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 12%,transparent);font-size:11px;font-weight:700;line-height:1;white-space:nowrap;flex:0 0 auto}',
+            // «сирота»: субагент без родителя на этом устройстве.
+            '.dshs-orphan-badge{box-sizing:border-box;display:inline-flex;align-items:center;height:22px;padding:0 7px;border-radius:7px;border:1px dashed rgba(247,190,76,0.6);background:rgba(247,190,76,0.14);font-size:11px;font-weight:600;line-height:1;white-space:nowrap;flex:0 0 auto;cursor:help}',
+            '.dshs-groups-counter{display:inline-flex;align-items:center;gap:6px;box-sizing:border-box;min-height:24px;padding:0 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.06);font-size:11.5px;font-weight:600;line-height:1.2;white-space:nowrap;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}',
+            // Заголовок карточки не распирает шапку: счётчик уходит вправо и
+            // переносится, если места мало.
+            '.dshs-sync-card h2{min-width:0;overflow-wrap:anywhere}',
+            '@media (max-width:640px){.dshs-groups-counter{white-space:normal;font-size:11px}.dshs-sync-card h2{flex:1 1 auto}}',
           ].join('\n');
           document.head.appendChild(style);
           return () => style.remove();
@@ -793,12 +809,19 @@ window.__ModuleLoader__.load({
 
       /** Секция-карточка страницы: заголовок с акцентом, пояснение, содержимое. */
       function Card(props) {
-        const { title, hint, actions } = props;
+        const { title, hint, actions, meta } = props;
         const children = props.children;
         return h(
           'section',
           { className: 'dshs-sync-card', style: S.card },
-          h('div', { style: S.cardHead }, h('span', { style: S.accent }), h('h2', { style: S.cardTitle }, title)),
+          h(
+            'div',
+            { style: S.cardHead },
+            h('span', { style: S.accent }),
+            h('h2', { style: S.cardTitle }, title),
+            // Счётчик в шапке карточки: у «Сессий и режима» — группы и субагенты.
+            meta === undefined || meta === null ? null : h('span', { style: { marginLeft: 'auto', minWidth: 0, display: 'flex' } }, meta),
+          ),
           hint ? h('p', { style: S.hint }, hint) : null,
           h('div', { style: S.cardBody }, children),
           actions ? h('div', { style: S.cardActions }, actions) : null,
@@ -2170,6 +2193,8 @@ function CollapsedItem({ title, summary, badge, children }) {
             {
               title: 'Сессии и режим синхронизации',
               hint: 'Локальная сессия остаётся только на этом устройстве: не отправляется, не принимается и не удаляется отметкой с другого компьютера.',
+              // Счётчик групп в шапке карточки: «групп: N, субагентов: M».
+              meta: h(SessionGroupsCounter, null),
             },
             h(SessionModesSection, null),
           ),
@@ -3135,6 +3160,116 @@ function CollapsedItem({ title, summary, badge, children }) {
       return { id: display, title: display, shortId, folder };
     }
 
+    // --- группы «родитель + субагенты» --------------------------------------
+    // Связи приходят от host-части для каждой сессии: groupId (корень),
+    // parentSession, children/childrenCount, childrenMissingCount, orphan,
+    // groupSize. Если host ещё не обновился (полей нет) — строим вложенность по
+    // parentSession, а счётчики выводим из childrenCount/groupSize.
+
+    /** Сводка групп для шапки карточки: «групп: N, субагентов: M». */
+    function sessionGroupSummary(sessions = [], groups = undefined) {
+      const list = Array.isArray(sessions) ? sessions : [];
+      const subagentsCount = list.filter((session) => String(session?.parentSession ?? '') !== '').length;
+      const orphanCount = list.filter((session) => session?.orphan === true).length;
+      const derived = new Set();
+      for (const session of list) {
+        if (session === null || typeof session !== 'object') continue;
+        const groupId = String(session.groupId ?? '').trim();
+        const childrenCount = Number(session.childrenCount ?? 0) || 0;
+        const groupSize = Number(session.groupSize ?? 1) || 1;
+        if (groupId !== '' && (childrenCount > 0 || groupSize > 1)) derived.add(groupId);
+      }
+      const pick = (value, fallback) => {
+        const number = Number(value);
+        return Number.isFinite(number) && number >= 0 ? Math.floor(number) : fallback;
+      };
+      const count = pick(groups?.count, derived.size);
+      const subagents = pick(groups?.subagents, subagentsCount);
+      const orphans = pick(groups?.orphans, orphanCount);
+      const line = `групп: ${count}, субагентов: ${subagents}${orphans > 0 ? `, сирот: ${orphans}` : ''}`;
+      return { groups: count, subagents, orphans, line };
+    }
+
+    /**
+     * Строки списка сессий с вложенностью: субагенты идут под родителем.
+     * Свёрнуто по умолчанию — дети попадают в список, только когда родитель в
+     * `expanded`. Сирота (родителя нет в списке) показывается верхним уровнем.
+     * @returns {Array<{session: object, depth: number, children: string[], expanded: boolean, isParent: boolean}>}
+     */
+    function sessionGroupRows(sessions = [], expanded = undefined) {
+      const list = (Array.isArray(sessions) ? sessions : []).filter((session) => session !== null && typeof session === 'object');
+      const byId = new Map();
+      for (const session of list) {
+        const id = String(session.id ?? '');
+        if (id !== '' && !byId.has(id)) byId.set(id, session);
+      }
+      const childrenOf = new Map();
+      for (const session of list) {
+        const parent = String(session.parentSession ?? '').trim();
+        if (parent === '' || !byId.has(parent) || parent === String(session.id ?? '')) continue;
+        if (!childrenOf.has(parent)) childrenOf.set(parent, []);
+        const kids = childrenOf.get(parent);
+        if (!kids.includes(session.id)) kids.push(session.id);
+      }
+      const isOpen = (id) => (expanded instanceof Set ? expanded.has(id) : Boolean(expanded?.[id]));
+      const rows = [];
+      const emitted = new Set();
+      // Скрытые дети свёрнутой группы: они остаются в списке данных, но в
+      // строки не попадают, пока родитель не раскрыт.
+      const hidden = new Set();
+      const markHidden = (id) => {
+        for (const childId of childrenOf.get(id) ?? []) {
+          if (hidden.has(childId)) continue;
+          hidden.add(childId);
+          markHidden(childId);
+        }
+      };
+      const emit = (session, depth) => {
+        if (emitted.has(session.id)) return;
+        emitted.add(session.id);
+        const children = childrenOf.get(session.id) ?? [];
+        const open = children.length > 0 && isOpen(session.id);
+        rows.push({ session, depth, children, expanded: open, isParent: children.length > 0 });
+        if (!open) {
+          for (const childId of children) {
+            hidden.add(childId);
+            markHidden(childId);
+          }
+          return;
+        }
+        for (const childId of children) {
+          const child = byId.get(childId);
+          if (child !== undefined) emit(child, depth + 1);
+        }
+      };
+      // Порядок исходного списка: группа выводится там, где стоит родитель.
+      for (const session of list) {
+        const parent = String(session.parentSession ?? '').trim();
+        if (parent !== '' && byId.has(parent) && parent !== String(session.id ?? '')) continue;
+        emit(session, 0);
+      }
+      // Остались только циклы/странные ссылки: показываем верхним уровнем,
+      // чтобы сессия не пропала из списка (скрытые дети свёрнутых групп — нет).
+      for (const session of list) {
+        if (emitted.has(session.id) || hidden.has(session.id)) continue;
+        emit(session, 0);
+      }
+      return rows;
+    }
+
+    /** Счётчик групп в шапке карточки «Сессии и режим синхронизации». */
+    function SessionGroupsCounter() {
+      const data = useSessionStates();
+      const summary = sessionGroupSummary(data?.sessions ?? [], data?.groups);
+      return h('span', {
+        className: 'dshs-groups-counter',
+        title: 'Группы «родитель + субагенты»: семьи и субагенты в них',
+        'data-groups': String(summary.groups),
+        'data-subagents': String(summary.subagents),
+        'data-orphans': String(summary.orphans),
+      }, summary.line);
+    }
+
     // --- индикатор синхронизации по макету ----------------------------------
     // Облако 26×18 со свечением и полоса 24×3 под ним; локальная сессия —
     // монитор 20×16 без полосы. Проценты — заполнение полосы (и заливки облака):
@@ -3843,6 +3978,17 @@ function CollapsedItem({ title, summary, badge, children }) {
       // Миграция «локальная навсегда»: убрать оставшиеся облачные копии
       // локальных сессий (счётчик приходит из /sessions.localOnly.migration).
       const [migrationConfirm, setMigrationConfirm] = React.useState(false);
+      // Группы: субагенты свёрнуты под родителем, раскрытие — по клику на «+N».
+      // В наборе — id родителей, чьи дети показаны.
+      const [expanded, setExpanded] = React.useState(() => new Set());
+      const toggleExpanded = (id) => {
+        setExpanded((current) => {
+          const next = new Set(current);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+      };
       const localOnlyInfo = data?.localOnly ?? {};
       const migrationCount = Number(localOnlyInfo?.migration?.count ?? 0);
       const declaredCount = Number(localOnlyInfo?.count ?? 0);
@@ -3853,6 +3999,10 @@ function CollapsedItem({ title, summary, badge, children }) {
         if (filter === 'attention') return session.mode !== 'local' && session.badge !== 'synced';
         return true;
       });
+      // Строки с вложенностью: субагенты идут под родителем, сирота — верхним
+      // уровнем (родителя нет в списке этого устройства).
+      const rows = sessionGroupRows(visible, expanded);
+      const groupSummary = sessionGroupSummary(sessions, data?.groups);
 
       const toggleSelected = (id) => {
         setSelected((current) => {
@@ -4118,18 +4268,51 @@ function CollapsedItem({ title, summary, badge, children }) {
             )
           : null,
         note !== '' ? h('span', { style: S.note }, note) : null,
-        visible.length === 0
+        rows.length === 0
           ? h('span', { style: S.hint }, sessions.length === 0 ? 'Сессии появятся здесь после первого запуска синхронизации или настройки проекта.' : 'Под фильтр ничего не попало.')
           : h(
               'div',
               { className: 'dshs-modes-list' },
-              visible.map((session) => {
+              rows.map((row) => {
+                const session = row.session;
                 const badge = badgeOf(session.badge);
                 const label = sessionLabel(session);
                 const isLocal = session.mode === 'local';
+                const childrenCount = Number(session.childrenCount ?? row.children.length ?? 0) || 0;
+                const missingCount = Number(session.childrenMissingCount ?? 0) || 0;
+                const groupSize = Number(session.groupSize ?? 1) || 1;
                 return h(
                   'div',
-                  { key: session.id, className: 'dshs-modes-row', title: label.shortId },
+                  {
+                    key: session.id,
+                    className: 'dshs-modes-row',
+                    title: `${label.shortId}${groupSize > 1 ? ` · группа: ${groupSize}` : ''}${session.orphan === true ? ' · сирота: родитель не найден на этом устройстве' : ''}`,
+                    'data-subagent': row.depth > 0 ? 'true' : undefined,
+                    'data-depth': String(row.depth),
+                    'data-orphan': session.orphan === true ? 'true' : undefined,
+                  },
+                  // «+N»: субагенты свёрнуты под родителем, клик раскрывает.
+                  row.isParent
+                    ? h(
+                        'button',
+                        {
+                          key: 'group',
+                          type: 'button',
+                          className: 'dshs-group-toggle',
+                          'data-open': row.expanded ? 'true' : 'false',
+                          'aria-expanded': row.expanded ? 'true' : 'false',
+                          title: row.expanded
+                            ? `Свернуть субагентов: ${childrenCount}`
+                            : `Развернуть субагентов: ${childrenCount}`,
+                          onClick: (event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            toggleExpanded(session.id);
+                          },
+                        },
+                        `+${childrenCount}`,
+                      )
+                    : null,
                   h('input', {
                     type: 'checkbox',
                     checked: selected.has(session.id),
@@ -4145,7 +4328,7 @@ function CollapsedItem({ title, summary, badge, children }) {
                     h(
                       'span',
                       { style: { ...S.meta, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                      `${badge.title}${label.folder === '' ? '' : ` · ${label.folder}`}`,
+                      `${badge.title}${label.folder === '' ? '' : ` · ${label.folder}`}${missingCount > 0 ? ` · в облаке ещё ${missingCount}` : ''}`,
                     ),
                     // Локальная сессия, у которой в облаке осталась копия:
                     // подсказка и отдельное действие с подтверждением.
@@ -4211,6 +4394,18 @@ function CollapsedItem({ title, summary, badge, children }) {
                         )
                       : null,
                   ),
+                  // «сирота»: субагент без родителя на этом устройстве.
+                  session.orphan === true
+                    ? h(
+                        'span',
+                        {
+                          key: 'orphan',
+                          className: 'dshs-orphan-badge',
+                          title: 'Родитель этой сессии не найден на этом устройстве: субагент показывается отдельно и защищён от удаления',
+                        },
+                        'сирота',
+                      )
+                    : null,
                   h(
                     'span',
                     {
@@ -4239,6 +4434,12 @@ function CollapsedItem({ title, summary, badge, children }) {
                 );
               }),
             ),
+        // Подсказка под списком: сколько всего групп и как раскрыть субагентов.
+        rows.length === 0
+          ? null
+          : h('span', { style: S.hint }, groupSummary.subagents > 0
+              ? `${groupSummary.line}. Субагенты свёрнуты под родителем — нажмите «+N», чтобы раскрыть.`
+              : 'Сессий с субагентами нет: группы появятся, когда субагент запустится из диалога.'),
       );
     }
 
@@ -4262,7 +4463,10 @@ function CollapsedItem({ title, summary, badge, children }) {
           if (result?.ok === true) {
             const restored = Array.isArray(result.restoredIds) ? result.restoredIds.length : 0;
             const failed = Array.isArray(result.failed) ? result.failed.length : 0;
-            setNote(`${t('deletedRestored')} ${restored}${failed > 0 ? `, не удалось: ${failed}` : ''}. ${result.warning ?? ''}`.trim());
+            // Восстановление группы: host вернул всю семью вместе с детьми.
+            const groupChildren = Number(result.restoredGroup?.children ?? 0) || 0;
+            const groupNote = groupChildren > 0 ? ` Вся группа: вместе с субагентами (${groupChildren}).` : '';
+            setNote(`${t('deletedRestored')} ${restored}${failed > 0 ? `, не удалось: ${failed}` : ''}.${groupNote} ${result.warning ?? ''}`.trim());
           } else {
             setNote(result?.message ?? 'Не удалось восстановить сессии');
           }
@@ -4314,6 +4518,12 @@ function CollapsedItem({ title, summary, badge, children }) {
           sessions.map((entry) => {
             const label = sessionLabel({ id: entry.id, title: entry.title, shortId: entry.shortId });
             const at = entry.at ? new Date(entry.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'дата неизвестна';
+            // Группа удалённых: у родителя — сколько субагентов ушло с ним, у
+            // ребёнка — к какому родителю он относится. Восстановление группы
+            // одной кнопкой возвращает всю семью (host расширяет id до группы).
+            const childrenCount = Number(entry.childrenCount ?? 0) || 0;
+            const groupSize = Number(entry.groupSize ?? 1) || 1;
+            const isGroupMember = childrenCount > 0 || String(entry.parentSession ?? '') !== '' || groupSize > 1;
             const meta = [
               `удалено ${at}`,
               byLabel(entry.by),
@@ -4323,10 +4533,18 @@ function CollapsedItem({ title, summary, badge, children }) {
                 : entry.quarantined === false
                   ? 'копии в карантине нет'
                   : quarantineLabel(entry),
-            ].join(' · ');
+              childrenCount > 0
+                ? `вместе с ${childrenCount} ${childrenCount === 1 ? 'субагентом' : 'субагентами'}`
+                : '',
+            ].filter(Boolean).join(' · ');
             return h(
               'div',
-              { key: entry.id, className: 'dshs-deleted-row', title: label.shortId },
+              {
+                key: entry.id,
+                className: 'dshs-deleted-row',
+                title: `${label.shortId}${groupSize > 1 ? ` · группа: ${groupSize}` : ''}`,
+                'data-group': isGroupMember ? 'true' : undefined,
+              },
               h('span', {
                 style: {
                   ...S.dot,
@@ -4346,16 +4564,25 @@ function CollapsedItem({ title, summary, badge, children }) {
                 { style: { ...S.badge, flex: '0 0 auto', background: 'rgba(128,128,128,0.14)' } },
                 reasonLabel(entry.reason),
               ),
+              entry.orphan === true
+                ? h('span', { key: 'orphan', className: 'dshs-orphan-badge', title: 'Родитель этой удалённой сессии не найден в карантине' }, 'сирота')
+                : childrenCount > 0
+                  ? h('span', { key: 'group', className: 'dshs-group-badge', title: 'Вместе с родителем удалены субагенты' }, `+${childrenCount}`)
+                  : null,
               h(
                 'button',
                 {
                   type: 'button',
                   style: S.buttonSmall,
                   disabled: busy !== '' || entry.canRestore === false,
-                  title: entry.expired === true ? 'Срок карантина истёк' : 'Вернуть сессию в зеркало',
+                  title: entry.expired === true
+                    ? 'Срок карантина истёк'
+                    : isGroupMember
+                      ? 'Вернуть в зеркало всю группу: родителя и субагентов'
+                      : 'Вернуть сессию в зеркало',
                   onClick: () => restoreOne(entry),
                 },
-                t('deletedRestore'),
+                isGroupMember ? `Восстановить группу${groupSize > 1 ? ` (${groupSize})` : ''}` : t('deletedRestore'),
               ),
             );
           }),
@@ -4814,6 +5041,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       'related.title': 'Session is linked to other sessions',
       'related.desc': 'Linked sessions: {count}. Descendant sessions are deleted with this one.',
       'related.note': 'Review the linked sessions before continuing.',
+      'related.children': 'Subagent sessions deleted together with this one: {count}. They can be restored from Deleted.',
       'related.show': 'Show the list ({count})',
       'related.parent': 'parent session',
       'related.child': 'child session',
@@ -4853,6 +5081,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       'related.title': 'Сессия связана с другими',
       'related.desc': 'Связанных сессий: {count}. Дочерние сессии будут удалены вместе с этой.',
       'related.note': 'Проверьте список связанных сессий, прежде чем продолжать.',
+      'related.children': 'Вместе с этой сессией будут удалены субагенты: {count}. Вернуть их можно в карточке «Удалённые».',
       'related.show': 'Показать список ({count})',
       'related.parent': 'родительская сессия',
       'related.child': 'дочерняя сессия',
@@ -4892,6 +5121,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       'related.title': 'Sitzung ist mit anderen Sitzungen verknüpft',
       'related.desc': 'Verknüpfte Sitzungen: {count}. Untergeordnete Sitzungen werden mit dieser gelöscht.',
       'related.note': 'Prüfen Sie die verknüpften Sitzungen, bevor Sie fortfahren.',
+      'related.children': 'Untergeordnete Sitzungen werden mit dieser gelöscht: {count}. Sie lassen sich unter „Gelöscht“ wiederherstellen.',
       'related.show': 'Liste anzeigen ({count})',
       'related.parent': 'übergeordnete Sitzung',
       'related.child': 'untergeordnete Sitzung',
@@ -4927,6 +5157,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       'related.title': 'La sesión está vinculada a otras sesiones',
       'related.desc': 'Sesiones vinculadas: {count}. Las sesiones descendientes se eliminarán con esta.',
       'related.note': 'Revise las sesiones vinculadas antes de continuar.',
+      'related.children': 'Las sesiones secundarias se eliminarán junto con esta: {count}. Puede restaurarlas en «Eliminadas».',
       'related.show': 'Mostrar la lista ({count})',
       'related.parent': 'sesión principal',
       'related.child': 'sesión secundaria',
@@ -4962,6 +5193,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       'related.title': 'La session est liée à d’autres sessions',
       'related.desc': 'Sessions liées : {count}. Les sessions descendantes seront supprimées avec celle-ci.',
       'related.note': 'Vérifiez les sessions liées avant de continuer.',
+      'related.children': 'Les sessions enfants seront supprimées avec celle-ci : {count}. Elles sont récupérables dans « Supprimées ».',
       'related.show': 'Afficher la liste ({count})',
       'related.parent': 'session parente',
       'related.child': 'session enfant',
@@ -4997,6 +5229,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       'related.title': 'セッションは他のセッションと関連しています',
       'related.desc': '関連するセッション: {count}。子セッションも一緒に削除されます。',
       'related.note': '続行する前に関連するセッションを確認してください。',
+      'related.children': 'このセッションと一緒に子セッションが削除されます: {count}。「削除済み」から復元できます。',
       'related.show': '一覧を表示 ({count})',
       'related.parent': '親セッション',
       'related.child': '子セッション',
@@ -5032,6 +5265,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       'related.title': 'A sessão está vinculada a outras sessões',
       'related.desc': 'Sessões vinculadas: {count}. As sessões descendentes serão excluídas junto com esta.',
       'related.note': 'Revise as sessões vinculadas antes de continuar.',
+      'related.children': 'As sessões filhas serão excluídas junto com esta: {count}. É possível restaurá-las em «Excluídas».',
       'related.show': 'Mostrar a lista ({count})',
       'related.parent': 'sessão pai',
       'related.child': 'sessão filha',
@@ -5067,6 +5301,7 @@ function CollapsedItem({ title, summary, badge, children }) {
       'related.title': '会话与其他会话相关联',
       'related.desc': '关联会话：{count}。子会话也将随之删除。',
       'related.note': '继续前请检查关联会话。',
+      'related.children': '将随此会话一起删除子会话: {count}。可在「已删除」中恢复。',
       'related.show': '显示列表（{count}）',
       'related.parent': '父会话',
       'related.child': '子会话',
@@ -5549,6 +5784,9 @@ function CollapsedItem({ title, summary, badge, children }) {
       const target = current.target
       const info = current.info
       const related = info !== null && Array.isArray(info.related) ? info.related : []
+      // Субагенты исчезнут вместе с родителем: их количество показываем в
+      // подтверждении, чтобы удаление группы не было неожиданностью.
+      const childrenCount = related.filter((row) => row?.relation === 'child').length
       const files = info !== null && Array.isArray(info.files) ? info.files : []
       const busy = current.busy === true
       const typed = current.draft.trim().toLowerCase() === CONFIRM_WORD
@@ -5570,6 +5808,9 @@ function CollapsedItem({ title, summary, badge, children }) {
         description = t('related.desc', { count: String(related.length) })
         body = [
           h('p', { key: 'note', className: `${P}-note` }, t('related.note')),
+          childrenCount > 0
+            ? h('p', { key: 'children', className: `${P}-error` }, t('related.children', { count: String(childrenCount) }))
+            : null,
           h(RelatedList, {
             key: 'related',
             rows: related,
@@ -5600,6 +5841,11 @@ function CollapsedItem({ title, summary, badge, children }) {
             h(WarningIcon, { key: 'icon', size: 18 }),
             h('p', { key: 'prompt' }, t('dialog.typeWord', { word: CONFIRM_WORD })),
           ]),
+          // «Вместе с N субагентами»: у родителя в подтверждении видно, что
+          // удаляется вся группа, а не одна сессия.
+          childrenCount > 0
+            ? h('p', { key: 'children', className: `${P}-error`, 'data-children': String(childrenCount) }, t('related.children', { count: String(childrenCount) }))
+            : null,
           h('input', {
             key: 'field',
             type: 'text',
@@ -5757,7 +6003,26 @@ function CollapsedItem({ title, summary, badge, children }) {
       }, SessionDeleteDialog))
     }
 
-      return { inject: ['slots', 'locale'], apply };
+      return {
+        inject: ['slots', 'locale'],
+        apply,
+        // Крючок для headless-тестов диалога удаления: состояние и подсчёт
+        // группы. На живое поведение не влияет.
+        __test: {
+          getState,
+          setState: (next) => patch(next ?? {}),
+          resetState: () => patch({ ...initialState }),
+          relatedChildren: (related) => (Array.isArray(related) ? related.filter((row) => row?.relation === 'child').length : 0),
+          relatedSummary: (related) => {
+            const rows = Array.isArray(related) ? related : [];
+            return {
+              total: rows.length,
+              children: rows.filter((row) => row?.relation === 'child').length,
+              parents: rows.filter((row) => row?.relation === 'parent').length,
+            };
+          },
+        },
+      };
     })(require);
 
     exports.apply = (ctx) => {
@@ -5834,6 +6099,12 @@ function CollapsedItem({ title, summary, badge, children }) {
       LocalOnlyToast,
       DELETED_REASON_LABELS,
       DELETED_BY_LABELS,
+      // Группы «родитель + субагенты»: сводка для шапки, строки с вложенностью,
+      // счётчик и диалог удаления (подтверждение с числом субагентов).
+      sessionGroupSummary,
+      sessionGroupRows,
+      SessionGroupsCounter,
+      deleteDialog: deleteClient.__test,
     };
     return module.exports;
   },

@@ -73,7 +73,7 @@ exported.apply(ctx)
 assert.ok(['dshSync', 'sessionDelete'].includes(boundNs), 'пространство имён клиента зарегистрировано')
 // 6 регистраций карточки синхронизации (main — две, по старому и новому ключу)
 // плюс 2 пункта удаления сессии и пункт меню режима сессии.
-assert.equal(registrations.length, 9, 'все слоты зарегистрированы')
+assert.equal(registrations.length, 10, 'все слоты зарегистрированы')
 const mainEntries = registrations.filter((entry) => entry.options.name === 'main')
 assert.deepEqual(mainEntries.map((entry) => entry.options.key).sort(), ['dsh-sessions', 'dsh-sync'])
 assert.ok(registrations.some((entry) => entry.options.name === 'sidebar.panellist'), 'пункт в левой панели')
@@ -81,6 +81,7 @@ assert.ok(registrations.some((entry) => entry.options.name === 'sidebar.session.
 assert.ok(registrations.some((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item'), 'пункт меню режима сессии')
 assert.ok(registrations.some((entry) => entry.options.name === 'conversation.composer.dock'), 'плашка у поля ввода')
 assert.ok(registrations.some((entry) => entry.options.name === 'plugins.detail.section'), 'секция на странице плагина')
+assert.ok(registrations.some((entry) => entry.options.name === 'conversation.session.header.actions'), 'переключатель режима в шапке сессии')
 assert.ok(!registrations.some((entry) => entry.options.name === 'conversation.header'), 'шапку беседы не трогаем: слот одиночный')
 assert.ok(effects.length > 0, 'эффект со словарями должен регистрироваться')
 
@@ -156,9 +157,10 @@ const icon = unwrap(sidebarRegistration.component({ size: 16 }))
 assert.equal(icon.type, 'span', 'иконка дополнена контейнером для уведомлений')
 assert.ok(icon.children.some((child) => child && child.type === 'svg'), 'внутри остаётся иконка')
 
-// Индикатор без данных ничего не рисует (точка появляется после ответа host).
+// H1: даже без данных у строки есть индикатор (pending), а не пустое место.
 const dotRegistration = registrations.find((entry) => entry.options.name === 'sidebar.session.row.leading')
-assert.equal(dotRegistration.component({ sessionId: 'session-x' }), null)
+const pendingDot = unwrap(dotRegistration.component({ sessionId: 'session-x' }))
+assert.ok(pendingDot !== null && pendingDot !== undefined, 'индикатор есть у каждой строки (pending)')
 
 console.log('client smoke: OK')
 console.log('  регистраций:', registrations.length)
