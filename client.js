@@ -976,8 +976,12 @@ function CollapsedItem({ title, summary, badge, children }) {
                 },
                 ...items.slice(0, 50).map((item) => h(
                   'span',
-                  { key: item.id, style: { fontSize: 11.5, overflowWrap: 'anywhere' } },
-                  `${item.title !== undefined && item.title !== '' ? `${item.title} — ` : ''}${item.id}`,
+                  {
+                    key: item.id,
+                    title: String(item.shortId ?? shortSessionId(item.id)),
+                    style: { fontSize: 11.5, overflowWrap: 'anywhere' },
+                  },
+                  item.title !== undefined && item.title !== '' ? item.title : 'Без названия',
                 )),
                 count > items.length
                   ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё ${count - items.length}`)
@@ -1212,6 +1216,10 @@ function CollapsedItem({ title, summary, badge, children }) {
         const plan = state.plan;
         const status = data?.status;
         const last = data?.lastRun;
+        // Вид последней ошибки и число неудач — из summary (контракт с host).
+        const lastError = lastErrorLine(data);
+        // Непустая очередь повторов: «в очереди: N» рядом со статусом.
+        const queued = outboxCount(data);
         const external = data?.external;
         const mode = data?.mode;
         const secondary = data?.secondary;
@@ -1261,6 +1269,9 @@ function CollapsedItem({ title, summary, badge, children }) {
               h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-error-primary, #d1242f)' } }), 'не отправлялось'),
             ),
             h(SyncProgress, { data }),
+            queued > 0
+              ? h('span', { style: S.note, 'data-outbox': String(queued) }, `в очереди: ${queued}`)
+              : null,
             data?.pending
               ? h('span', { style: S.note }, 'Есть неотправленные изменения — они уйдут при следующей отправке (не чаще раза в 5 минут) или по кнопке.')
               : null,
@@ -1296,6 +1307,9 @@ function CollapsedItem({ title, summary, badge, children }) {
                   { style: S.note },
                   `Удалено: ${last.removed} — ${last.removedReason !== undefined && last.removedReason !== '' ? last.removedReason : 'причина не указана'}.`,
                 )
+              : null,
+            lastError !== ''
+              ? h('span', { style: S.note }, lastError)
               : null,
             (last?.childrenQuarantined ?? 0) > 0
               ? h('span', { style: S.note }, `Вместе с родителями ушли в карантин субагентов: ${last.childrenQuarantined}.`)
@@ -1442,8 +1456,12 @@ function CollapsedItem({ title, summary, badge, children }) {
                             { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, maxHeight: 200, overflowY: 'auto', overscrollBehavior: 'contain' } },
                             ...(plan.deletions ?? []).slice(0, 50).map((item) => h(
                               'span',
-                              { key: item.id, style: { fontSize: 11.5, overflowWrap: 'anywhere' } },
-                              `${item.title !== undefined && item.title !== '' ? `${item.title} — ` : ''}${item.id} (${item.humanReason ?? item.reason})`,
+                              {
+                                key: item.id,
+                                title: String(item.shortId ?? shortSessionId(item.id)),
+                                style: { fontSize: 11.5, overflowWrap: 'anywhere' },
+                              },
+                              `${item.title !== undefined && item.title !== '' ? item.title : 'Без названия'} (${item.humanReason ?? item.reason})`,
                             )),
                             (plan.deletions?.length ?? 0) > 50
                               ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё ${plan.deletions.length - 50}`)
@@ -1951,15 +1969,19 @@ function CollapsedItem({ title, summary, badge, children }) {
               { style: S.hint },
               update === null
                 ? 'Проверяем версию…'
-                : update.status === 'local'
-                  ? 'Локальная установка: свежий код уже на месте, обновлять нечего.'
-                  : update.status === 'behind'
-                    ? `Доступно обновление: ${shortSha(update.installed)} → ${shortSha(update.latest)} — установится автоматически.`
-                    : update.status === 'current'
-                      ? `Актуально (${shortSha(update.installed)})`
-                      : update.detail !== undefined && update.detail !== ''
-                        ? `Проверка не удалась: ${update.detail}`
-                        : 'Состояние неизвестно',
+                // Host-часть отдаёт готовую подпись: версия + короткий коммит,
+                // а для локальной установки — «автообновление не применяется».
+                : typeof update.description === 'string' && update.description !== ''
+                  ? update.description
+                  : update.status === 'local'
+                    ? 'Локальная установка — автообновление не применяется; свежий код уже на месте.'
+                    : update.status === 'behind'
+                      ? `Доступно обновление: ${shortSha(update.installed)} → ${shortSha(update.latest)} — установится автоматически.`
+                      : update.status === 'current'
+                        ? `Актуально (${shortSha(update.installed)})`
+                        : update.detail !== undefined && update.detail !== ''
+                          ? `Проверка не удалась: ${update.detail}`
+                          : 'Состояние неизвестно',
             ),
             update?.status === 'behind'
               ? h(
@@ -2746,6 +2768,23 @@ function CollapsedItem({ title, summary, badge, children }) {
       return sessionStates.data;
     }
 
+    // Строка списка может появиться раньше, чем снимок сессий её увидит: новая
+    // сессия создаётся сразу, а /sessions кэшируется на 20 секунд. Такая строка
+    // сама просит обновить снимок — но не чаще раза в 3 секунды, чтобы первая
+    // отрисовка длинного списка не завалила host-часть запросами.
+    let sessionStatesAskedAt = 0;
+    let sessionStatesAsking = false;
+    function requestSessionStatesRefresh() {
+      if (sessionStatesAsking) return;
+      const now = Date.now();
+      if (now - sessionStatesAskedAt < 3_000) return;
+      sessionStatesAskedAt = now;
+      sessionStatesAsking = true;
+      void refreshSessionStates(true).finally(() => {
+        sessionStatesAsking = false;
+      });
+    }
+
     // --- «Удалённые»: надгробия зеркала и восстановление из карантина -------
     // Один общий запрос на секцию и на кнопку «Обновить»; кэш на 20 секунд,
     // чтобы перерисовка страницы не дёргала host-часть на каждый чих.
@@ -2782,6 +2821,9 @@ function CollapsedItem({ title, summary, badge, children }) {
       replaced: 'заменено',
       restored: 'восстановлено',
       children: 'вместе с родителем',
+      duplicate: 'копия уже в зеркале',
+      'made-local': 'переведена в локальные',
+      superseded: 'заменена новой копией',
     };
     const DELETED_BY_LABELS = {
       owner: 'пользователь',
@@ -2814,13 +2856,26 @@ function CollapsedItem({ title, summary, badge, children }) {
       return SESSION_BADGES[code] ?? (code === 'green' ? SESSION_BADGES.synced : code === 'red' ? SESSION_BADGES.never : SESSION_BADGES.pending);
     }
 
-    /** Короткая подпись сессии: название (если пришло) или id без префикса. */
+    /** Короткий id сессии для tooltip: в тексте строки он не показывается. */
+    function shortSessionId(value) {
+      const id = String(value ?? '').replace(/^session-/, '');
+      if (id === '') return '';
+      return id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+    }
+
+    /**
+     * Подпись сессии: в тексте — название, для безымянной — «Без названия».
+     * Короткий id живёт только в tooltip (title-атрибут строки).
+     * `titleSource` от host-части не меняет подпись: показываем, что пришло.
+     */
     function sessionLabel(session) {
       const id = String(session?.id ?? '').replace(/^session-/, '');
       const folder = String(session?.path ?? '').split(/[\\/]+/).filter(Boolean).pop() ?? '';
       const title = String(session?.title ?? '').replace(/\s+/g, ' ').trim();
-      const shortId = id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
-      return { id: title === '' ? shortId : title.slice(0, 80), shortId, folder };
+      const given = String(session?.shortId ?? '').replace(/\s+/g, ' ').trim();
+      const shortId = given !== '' ? given : (id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id);
+      const display = title === '' ? 'Без названия' : title.slice(0, 80);
+      return { id: display, title: display, shortId, folder };
     }
 
     // --- индикатор синхронизации по макету ----------------------------------
@@ -2875,6 +2930,47 @@ function CollapsedItem({ title, summary, badge, children }) {
       if (value < 1024) return `${Math.round(value)} Б`;
       if (value < 1024 * 1024) return `${(value / 1024).toFixed(1).replace('.', ',')} КБ`;
       return `${(value / (1024 * 1024)).toFixed(1).replace('.', ',')} МБ`;
+    }
+
+    /**
+     * Сколько операций ждёт в очереди повторов (outbox).
+     *
+     * Host отдаёт `outboxCount`, вложенный `outbox.count` или `lastRun.outbox`.
+     * Строка «в очереди: N» показывается только когда очередь непуста.
+     */
+    function outboxCount(data) {
+      const candidates = [
+        data?.outboxCount,
+        data?.outbox?.count,
+        data?.lastRun?.outbox?.count,
+        data?.lastRun?.outbox,
+      ];
+      for (const raw of candidates) {
+        const value = typeof raw === 'object' && raw !== null ? Number(raw.count) : Number(raw);
+        if (Number.isFinite(value) && value > 0) return Math.trunc(value);
+      }
+      return 0;
+    }
+
+    /**
+     * Строка последней ошибки синхронизации из summary/last-run.
+     *
+     * Контракт с host-частью: `summary.errorKind` — вид сбоя (network, auth,
+     * format, guard, reserve), `summary.failures` — сколько элементов не удалось
+     * обработать (число или массив). Если данных нет, строки тоже нет.
+     * Читаем и last-run: старые записи журнала поля summary не содержат.
+     */
+    function lastErrorLine(data) {
+      const summary = data?.summary;
+      const last = data?.lastRun;
+      const errorKind = String(summary?.errorKind ?? last?.errorKind ?? '').trim();
+      const raw = summary?.failures ?? last?.failures;
+      const failures = Array.isArray(raw) ? raw.length : Math.max(0, Math.trunc(Number(raw)) || 0);
+      if (errorKind === '' && failures === 0) return '';
+      const parts = [];
+      if (errorKind !== '') parts.push(`последняя ошибка: ${errorKind}`);
+      if (failures > 0) parts.push(`неудач: ${failures}`);
+      return parts.join(', ');
     }
 
     /**
@@ -3010,14 +3106,27 @@ function CollapsedItem({ title, summary, badge, children }) {
 
     /**
      * Индикатор сессии: облако + полоса (или монитор для локальной).
-     * Доступен с клавиатуры (tabIndex 0), подсказка в title/aria и во всплывающем
-     * блоке при наведении и фокусе. При prefers-reduced-motion анимации
-     * отключаются, но заполнение и «!»/перечёркивание остаются.
+     * Возвращает элемент всегда: строка без данных снимка получает состояние
+     * «ждёт синхронизации» (янтарное облако 55 %). Доступен с клавиатуры
+     * (tabIndex 0), подсказка в title/aria и во всплывающем блоке при наведении
+     * и фокусе. При prefers-reduced-motion анимации отключаются, но заполнение
+     * и «!»/перечёркивание остаются.
      */
     function SessionSyncIndicator({ sessionId, session: providedSession }) {
       const data = useSessionStates();
-      const session = providedSession ?? (data?.sessions ?? []).find((item) => item.id === sessionId);
-      if (session === undefined || session === null) return null;
+      const found = providedSession ?? (data?.sessions ?? []).find((item) => item.id === sessionId);
+      // Инвариант: у каждой строки списка есть иконка. Если сессии ещё нет в
+      // снимке (только что создана, либо снимок устарел), показываем «ещё не
+      // уходила в облако» — янтарное облако 55 % — и просим обновить снимок,
+      // а не оставляем строку без значка.
+      const known = found !== undefined && found !== null;
+      const session = known ? found : { id: String(sessionId ?? ''), mode: 'cloud', badge: 'never' };
+      React.useEffect(() => {
+        // Строка появилась или активировалась: обновляем снимок через общий
+        // механизм (кэш 20 с + троттлинг запросов в requestSessionStatesRefresh),
+        // чтобы у только что созданной сессии появился настоящий значок.
+        requestSessionStatesRefresh();
+      }, [sessionId, known]);
       const code = indicatorStateOf(session, data);
       const spec = INDICATOR_STATES[code] ?? INDICATOR_STATES.pending;
       const tip = indicatorTip(session, data);
@@ -3433,7 +3542,7 @@ function CollapsedItem({ title, summary, badge, children }) {
                 const isLocal = session.mode === 'local';
                 return h(
                   'div',
-                  { key: session.id, className: 'dshs-modes-row', title: session.id },
+                  { key: session.id, className: 'dshs-modes-row', title: label.shortId },
                   h('input', {
                     type: 'checkbox',
                     checked: selected.has(session.id),
@@ -3616,7 +3725,7 @@ function CollapsedItem({ title, summary, badge, children }) {
           'div',
           { className: 'dshs-deleted-list' },
           sessions.map((entry) => {
-            const label = sessionLabel({ id: entry.id, title: entry.title });
+            const label = sessionLabel({ id: entry.id, title: entry.title, shortId: entry.shortId });
             const at = entry.at ? new Date(entry.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'дата неизвестна';
             const meta = [
               `удалено ${at}`,
@@ -3630,7 +3739,7 @@ function CollapsedItem({ title, summary, badge, children }) {
             ].join(' · ');
             return h(
               'div',
-              { key: entry.id, className: 'dshs-deleted-row', title: entry.id },
+              { key: entry.id, className: 'dshs-deleted-row', title: label.shortId },
               h('span', {
                 style: {
                   ...S.dot,
@@ -5104,13 +5213,17 @@ function CollapsedItem({ title, summary, badge, children }) {
         for (const listener of tombstonesState.listeners) listener();
       },
       readTombstones: () => tombstonesState.data,
+      requestSessionStatesRefresh,
       sessionLabel,
+      shortSessionId,
       badgeOf,
       SESSION_BADGES,
       INDICATOR_STATES,
       INDICATOR_COLORS,
       indicatorStateOf,
       indicatorTip,
+      lastErrorLine,
+      outboxCount,
       formatBytesShort,
       SessionSyncIndicator,
       SyncDot,

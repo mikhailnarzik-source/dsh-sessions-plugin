@@ -8,7 +8,7 @@
  * Токены нигде не хранятся: git использует штатный credential helper.
  */
 import { existsSync } from 'node:fs'
-import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
@@ -18,7 +18,7 @@ import { PLACEHOLDER, WEBDAV_SECRET, hasSecret, readSecret, writeSecret } from '
 import { mkdtemp, open, rm } from 'node:fs/promises'
 import { readFile as readFileText } from 'node:fs/promises'
 
-import { defaultConfig, loadConfig, saveConfig } from './lib/config.mjs'
+import { defaultConfig, loadConfig, saveConfig, canonicalCwd } from './lib/config.mjs'
 import { encodeSegment, projectKey, samePath } from './lib/format.mjs'
 import { collectDiagnostics } from './lib/diagnostics.mjs'
 import { readHistory, localSkipStats, recordRun, removalDetails, subagentStats } from './lib/history.mjs'
@@ -29,7 +29,18 @@ import { sameFolder } from './lib/folder.mjs'
 import { backupProgress } from './lib/progress.mjs'
 import { apply as applyDeletePlugin } from './delete/index.js'
 import { matchProjectPath } from './lib/mirror-meta.mjs'
-import { listLocalSessions, listMirrorSessions, sessionsOfProject, splitLog } from './lib/store.mjs'
+import { listLocalSessions, listMirrorSessions, localSessionDir, remapTo, sessionsOfProject, splitLog } from './lib/store.mjs'
+import { canonicalRestoreId, findQuarantineProject, quarantineSupersededCopy, resolveTombstoneIds, restoredFromOf } from './lib/deletions.mjs'
+import { resolveSessionTitle, resolveTombstoneTitle } from './lib/titles.mjs'
+import {
+  classifyBackendFailure,
+  backendSupports,
+  enqueueOutbox,
+  flushOutbox,
+  outboxSummary,
+  unsupportedBackendMessage,
+  OUTBOX_SHUTDOWN_TIMEOUT_MS,
+} from './lib/outbox.mjs'
 import { buildSessionGroups } from './lib/session-groups.mjs'
 import { pullReplicated, pushReplicated, secondaryConfig } from './lib/replica.mjs'
 import {
@@ -42,6 +53,7 @@ import { applyUpdate, checkForUpdate, describeUpdate, updateState } from './lib/
 import {
   MODE_LOCAL,
   applyWorkspaceDefaults,
+  normalizeSessionId,
   readSessionModes,
   sessionBadge,
   sessionModeOf,
@@ -51,7 +63,7 @@ import {
 } from './lib/session-modes.mjs'
 import { clearWorkspacePending, planWorkspace, readLocalWorkspaces, readWorkspacePending } from './lib/workspace.mjs'
 import { applyPendingProfile, clearPendingBrowserSettings, discardProfilePlan, readJournal, readPendingBrowserSettings, readProfileStatus, refreshProfilePlan, writeBrowserSettings } from './lib/profile.mjs'
-import { QUARANTINE_DAYS, listTombstones, restoreTombstones } from './lib/tombstones.mjs'
+import { QUARANTINE_DAYS, listTombstones, readTombstones, restoreTombstones } from './lib/tombstones.mjs'
 import { cloudCopyPath, deleteCloudCopy, inspectCloudCopy } from './lib/cloud-copy.mjs'
 import { createRemote } from './lib/remote.mjs'
 import { hasChanges } from './lib/git.mjs'
@@ -141,6 +153,7 @@ let packageVersion
 const automation = {
   enabled: false,
   running: false,
+  flushing: false,
   lastPullAt: 0,
   lastPushAt: 0,
   lastTickAt: 0,
@@ -492,6 +505,8 @@ async function readState(ctx) {
   const backup = await readBackupProgress(config)
   const backupStatus = await readSecondaryStatus(home)
   const secondaryState = await readSecondaryState(home)
+  // H6: очередь невыполненных операций — счётчик «в очереди: N» для панели.
+  const outbox = await outboxSummary(home)
   const currentFingerprint = await computeFingerprint(ctx)
   const pending = automation.fingerprint !== '' && currentFingerprint !== '' && currentFingerprint !== automation.fingerprint
 
@@ -587,6 +602,9 @@ async function readState(ctx) {
     updatedFrom: pendingUpdate?.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
     backup,
     backupStatus,
+    // Очередь операций: count — «в очереди: N», pending — последние ошибки.
+    outbox,
+    outboxCount: outbox.count,
     suggestedSecondaryFolder,
     // Резервный канал: выбранный бэкенд, статус сверки и последней выгрузки.
     secondary: {
@@ -945,6 +963,57 @@ async function runViaChild(action, extraEnv = {}, options = {}) {
   return record
 }
 
+/**
+ * Что умеет резервный backend. `secondary-init`/`webdav` обещают единый
+ * интерфейс, но старые конфигурации могут указать backend без метода: тогда
+ * операцию не вызываем вслепую (H5), а объясняем и ставим в очередь (H6).
+ */
+const SECONDARY_BACKEND_METHODS = {
+  folder: ['list', 'sync', 'commit'],
+  git: ['sync', 'commit'],
+  webdav: ['list', 'sync', 'commit', 'remove'],
+  yandex: ['list', 'sync', 'commit'],
+}
+
+function secondaryOperationSupported(config, operation) {
+  const secondary = config?.secondary
+  if (secondary === undefined || secondary === null || secondary.enabled === false) return { ok: true }
+  const backend = typeof secondary.backend === 'string' ? secondary.backend : ''
+  const methods = SECONDARY_BACKEND_METHODS[backend]
+  if (methods === undefined) {
+    return { ok: false, message: unsupportedBackendMessage(operation, `резерв «${backend || 'не задан'}»`) }
+  }
+  if (!methods.includes(operation)) {
+    return { ok: false, message: unsupportedBackendMessage(operation, `резерв «${backend}»`) }
+  }
+  return { ok: true }
+}
+
+/** Положить неудачную операцию в очередь, не ломая основной сценарий. */
+async function queueFailedOperation(home, { type, payload, error = '', errorKind = '' }) {
+  try {
+    const result = await enqueueOutbox(home, { type, payload, error, errorKind })
+    return result.count > 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Предварительная проверка бэкенда перед вызовом методов единого интерфейса.
+ * Возвращает понятное сообщение вместо сырого TypeError (H5).
+ */
+function backendGuard(backend, operation, kind = 'хранилище') {
+  if (backendSupports(backend, operation)) return { ok: true }
+  return { ok: false, code: 'reserve/unsupported', message: unsupportedBackendMessage(operation, kind) }
+}
+
+/** Короткое имя backend для сообщений. */
+function backendLabel(backend, config) {
+  const kind = typeof backend?.kind === 'string' && backend.kind !== '' ? backend.kind : (config?.backend ?? '')
+  return kind === '' ? 'хранилище' : `хранилище «${kind}»`
+}
+
 /** Запустить синхронизацию: pull → push (или что-то одно). */
 /**
  * Подставить пароль WebDAV из хранилища секретов.
@@ -1041,24 +1110,48 @@ async function runSync(ctx, action, options = {}) {
         const attached = await attachAllProjects(ctx, config)
         if (attached > 0) {
           viaChild.message = `${viaChild.message}; привязано к рабочему пространству: ${attached}`
-          await writeLastRun({ ...viaChild })
+          // H10: запуск уже записан дочерним путём — обновляем только last-run,
+          // журнал дублями не засоряем.
+          await updateLastRun({ ...viaChild })
         }
         const queued = await applyWorkspacePending(ctx, config)
         if (queued > 0) {
           viaChild.message = `${viaChild.message}; привязано из зеркала: ${queued}`
-          await writeLastRun({ ...viaChild })
+          await updateLastRun({ ...viaChild })
         }
         const deletedIds = viaChild.pull?.deletedIds ?? []
         if (deletedIds.length > 0) {
           const detached = await detachSessions(ctx, deletedIds)
           viaChild.message = `${viaChild.message}; убрано из пространств: ${detached}`
-          await writeLastRun({ ...viaChild })
+          await updateLastRun({ ...viaChild })
         }
       } catch {
         // привязка — вспомогательный шаг, синхронизация уже прошла
       }
     }
     invalidateSessionStates()
+    if (viaChild.ok !== true && action !== 'pull') {
+      // H6: неудачная отправка не теряется — ждёт в очереди и повторится.
+      await queueFailedOperation(home, {
+        type: 'push',
+        payload: { action: action === 'push' ? 'push' : 'sync' },
+        error: typeof viaChild.message === 'string' ? viaChild.message : '',
+        errorKind: viaChild.errorKind ?? '',
+      })
+    }
+    if (viaChild.ok === true && typeof viaChild.secondaryError === 'string' && viaChild.secondaryError !== '') {
+      const failure = classifyBackendFailure(viaChild.secondaryError, { operation: 'sync' })
+      viaChild.secondaryError = failure.message
+      if (failure.unsupported) {
+        viaChild.message = `${viaChild.message}; ${failure.message}`
+        await queueFailedOperation(home, {
+          type: 'push',
+          payload: { action: 'push', secondary: true },
+          error: failure.message,
+          errorKind: 'reserve',
+        })
+      }
+    }
     return viaChild
   }
 
@@ -1107,6 +1200,17 @@ async function runSync(ctx, action, options = {}) {
       }
     }
     if (action !== 'pull') {
+      // H5: резерв не умеет операцию — не зовём метод, объясняем и в очередь.
+      const secondaryCheck = secondaryOperationSupported(config, 'sync')
+      if (secondaryCheck.ok !== true) {
+        messages.push(secondaryCheck.message)
+        await queueFailedOperation(home, {
+          type: 'push',
+          payload: { action: 'push', secondary: true },
+          error: secondaryCheck.message,
+          errorKind: 'reserve',
+        })
+      }
       const entry = Object.values(config.projects ?? {})[0]
       const located = await localSessionsFor(ctx, home, entry?.path ?? '')
       result.push = await pushReplicated({ home, config, sessions: located.sessions, confirmPrune, dshVersion })
@@ -1129,13 +1233,45 @@ async function runSync(ctx, action, options = {}) {
       }
       if (result.push.secondary !== undefined) messages.push(`резерв (${config.secondary?.backend ?? 'дубль'}): отправлено ${result.push.secondary.pushed}`)
       if (result.push.secondaryBlocked !== undefined) messages.push(result.push.secondaryBlocked.message)
-      if (result.push.secondaryError !== undefined) messages.push(`резерв недоступен: ${result.push.secondaryError}`)
+      if (result.push.secondaryError !== undefined) {
+        // H5: сырое «remote.sync is not a function» до панели не доводим.
+        const failure = classifyBackendFailure(result.push.secondaryError, { operation: 'sync' })
+        result.push.secondaryError = failure.message
+        messages.push(`резерв недоступен: ${failure.message}`)
+        if (failure.unsupported) {
+          await queueFailedOperation(home, {
+            type: 'push',
+            payload: { action: 'push', secondary: true },
+            error: failure.message,
+            errorKind: 'reserve',
+          })
+        }
+      }
       if (result.push.warning) messages.push(result.push.warning)
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    const record = { ok: false, at: new Date().toISOString(), action, mode: 'builtin', message, durationMs: Date.now() - started }
+    // H5: ошибка единого интерфейса превращается в понятное сообщение.
+    const failure = classifyBackendFailure(error, { operation: 'sync' })
+    const message = failure.unsupported ? failure.message : (error instanceof Error ? error.message : String(error))
+    const record = {
+      ok: false,
+      at: new Date().toISOString(),
+      action,
+      mode: 'builtin',
+      message,
+      ...(failure.unsupported ? { errorKind: 'reserve' } : {}),
+      durationMs: Date.now() - started,
+    }
     await writeLastRun(record)
+    if (action !== 'pull') {
+      // H6: не теряем операцию из-за офлайна — повторим из очереди.
+      await queueFailedOperation(home, {
+        type: 'push',
+        payload: { action },
+        error: message,
+        errorKind: failure.unsupported ? 'reserve' : '',
+      })
+    }
     pushNotice('error', `Синхронизация не удалась: ${message}`)
     return record
   }
@@ -1198,6 +1334,51 @@ async function runSync(ctx, action, options = {}) {
 }
 
 /**
+ * H2: подставить названия в план «Проверить» (удаления и корзины).
+ * В плане title пришёл из `session.json` зеркала, поэтому лог сильнее
+ * (`preferLog: true`): событие `session/title` — исходное название.
+ */
+export async function decoratePlanTitles(plan, { home, config } = {}) {
+  if (plan === null || typeof plan !== 'object') return plan
+  const projects = config?.projects ?? {}
+  const decorate = async (item) => {
+    if (item === null || typeof item !== 'object' || typeof item.id !== 'string' || item.id === '') return
+    const projectId = typeof item.projectId === 'string' ? item.projectId : ''
+    const projectPath = typeof projects?.[projectId]?.path === 'string' ? projects[projectId].path : ''
+    const resolved = await resolveSessionTitle({
+      id: item.id,
+      title: '',
+      preferLog: true,
+      repoDir: config?.repoDir,
+      projectId,
+      home,
+      projectPath,
+    })
+    if (resolved.titleSource === 'fallback') {
+      // Удалённая сессия лежит в карантине `_deleted`: активного лога нет.
+      const fromTombstone = await resolveTombstoneTitle({
+        sessionId: item.id,
+        title: '',
+        repoDir: config?.repoDir,
+        projectId,
+        home,
+        projectPath,
+      })
+      if (fromTombstone.titleSource !== 'fallback') Object.assign(resolved, fromTombstone)
+    }
+    item.title = resolved.title
+    item.shortId = resolved.shortId
+    item.titleSource = resolved.titleSource
+  }
+  for (const item of Array.isArray(plan.deletions) ? plan.deletions : []) await decorate(item)
+  for (const items of Object.values(plan.buckets ?? {})) {
+    if (!Array.isArray(items)) continue
+    for (const item of items) await decorate(item)
+  }
+  return plan
+}
+
+/**
  * План «Проверить»: только чтение.
  *
  * Сравнивает локальные сессии с зеркалом по id и хвостам логов и возвращает
@@ -1220,6 +1401,8 @@ async function runPlan(ctx) {
   if (viaChild !== undefined) {
     // Синхронизация уже идёт другим процессом — это не план, а отказ.
     if (viaChild.skipped === true) return { ok: false, action: 'plan', message: viaChild.message }
+    // H2: названия вместо id — в списке удалений и корзинах плана.
+    await decoratePlanTitles(viaChild, { home, config })
     return viaChild
   }
 
@@ -1229,6 +1412,7 @@ async function runPlan(ctx) {
   try {
     const { buildPlan } = await import('./lib/plan.mjs')
     const plan = await buildPlan({ home, config, dshVersion: await hostDshVersion() })
+    await decoratePlanTitles(plan, { home, config })
     return { ...plan, mode: 'host', durationMs: Date.now() - started }
   } catch (error) {
     return {
@@ -1438,6 +1622,26 @@ async function clearPendingUpdate() {
 
 async function writeLastRun(record) {
   await recordRun(dshHome(), record)
+}
+
+/**
+ * Обновить только `last-run.json`, не дописывая журнал.
+ *
+ * Нужно для «доводки» результата дочернего процесса (привязка к рабочим
+ * пространствам): запуск уже записан один раз, и повторные `recordRun` давали
+ * бы дубли в истории (H10).
+ */
+export async function updateLastRun(record) {
+  try {
+    await mkdir(join(dshHome(), 'dsh-sync'), { recursive: true })
+    await writeFile(
+      join(dshHome(), 'dsh-sync', LAST_RUN_FILE),
+      `${JSON.stringify(record, null, 2)}\n`,
+      'utf8',
+    )
+  } catch {
+    // last-run — вспомогательные данные
+  }
 }
 
 /**
@@ -1901,9 +2105,22 @@ async function sessionStates(ctx) {
       }
       const ledgerRecord = ledgerEntry(ledger, session.id)
       states[session.id] = badge
+      // H2: вместо голого id — название по цепочке (session.title → событие
+      // session/title в логе → session.json зеркала → «Без названия»). Короткий
+      // id остаётся для подсказки.
+      const resolvedTitle = await resolveSessionTitle({
+        id: session.id,
+        title: session.title,
+        path: session.path,
+        repoDir: config.repoDir,
+        projectId,
+      })
       sessions.push({
         id: session.id,
-        title: typeof session.title === 'string' ? session.title : '',
+        title: resolvedTitle.title,
+        rawTitle: resolvedTitle.rawTitle,
+        shortId: resolvedTitle.shortId,
+        titleSource: resolvedTitle.titleSource,
         projectId,
         path: projectPath,
         workspaceId: directory.sessionWorkspace[session.id] ?? '',
@@ -1948,6 +2165,8 @@ async function sessionStates(ctx) {
       localMirrorProtected: Number(lastRun?.localMirrorProtected ?? 0) || 0,
     },
     attachAvailable: attached !== undefined,
+    // H6: счётчик очереди невыполненных операций — «в очереди: N».
+    outbox: await outboxSummary(home),
   }
   sessionStatesCache = { at: Date.now(), value }
   return value
@@ -2140,6 +2359,427 @@ async function adoptMirrorProjects(ctx, config, pullResult) {
 }
 
 /** Включить фоновую синхронизацию: первый такт через 10 с, дальше раз в минуту. */
+/** Проект из надгробий по каноническому id (записи могли писаться коротко). */
+function tombstoneProjectId(tombstones, sessionId) {
+  const canonical = normalizeSessionId(sessionId)
+  for (const [storedId, entry] of Object.entries(tombstones?.sessions ?? {})) {
+    if (normalizeSessionId(storedId) !== canonical) continue
+    return typeof entry?.projectId === 'string' ? entry.projectId : ''
+  }
+  return ''
+}
+
+/**
+ * H4: привести восстановленную копию к каноническому id.
+ *
+ * - каталог, созданный под коротким id, переименовывается в `session-…`;
+ * - заголовок лога получает канонический id, иначе DSH показал бы «новую»
+ *   сессию вместо восстановленной.
+ * @returns список выполненных исправлений (для журнала)
+ */
+async function canonicalizeRestoredCopy({ home, config, item, canonical }) {
+  const fixed = []
+  const storedId = typeof item?.id === 'string' && item.id !== '' ? item.id : canonical
+  const projectId = typeof item?.projectId === 'string' ? item.projectId : ''
+  const projectPath = projectId !== '' && typeof config.projects?.[projectId]?.path === 'string'
+    ? config.projects[projectId].path
+    : ''
+  const mirrorDirs = []
+  const localDirs = []
+
+  if (projectId !== '') {
+    const from = join(config.repoDir, 'sessions', projectId, encodeSegment(storedId))
+    const to = join(config.repoDir, 'sessions', projectId, encodeSegment(canonical))
+    if (from !== to) {
+      try {
+        if (existsSync(from) && !existsSync(to)) {
+          await rename(from, to)
+          fixed.push('mirror-dir')
+        }
+      } catch {
+        // переименование — вспомогательный шаг
+      }
+    }
+    mirrorDirs.push(to)
+  }
+  if (projectPath !== '') {
+    const from = localSessionDir(home, projectPath, storedId)
+    const to = localSessionDir(home, projectPath, canonical)
+    if (from !== to) {
+      try {
+        if (existsSync(from) && !existsSync(to)) {
+          await rename(from, to)
+          fixed.push('local-dir')
+        }
+      } catch {
+        // переименование — вспомогательный шаг
+      }
+    }
+    localDirs.push(to)
+  }
+
+  const fixHeader = async (dir, cwd) => {
+    const logPath = join(dir, 'session.v4.jsonl.zstd')
+    if (!existsSync(logPath)) return
+    try {
+      const bytes = await readFile(logPath)
+      const { header } = splitLog(bytes)
+      if (header?.id === canonical) return
+      const next = remapTo(bytes, typeof header?.cwd === 'string' && header.cwd !== '' ? header.cwd : cwd, { id: canonical })
+      await writeFile(logPath, next)
+      fixed.push('header-id')
+    } catch {
+      // битый лог не трогаем: восстановление уже состоялось
+    }
+  }
+  for (const dir of mirrorDirs) await fixHeader(dir, canonicalCwd(projectId))
+  for (const dir of localDirs) await fixHeader(dir, projectPath)
+  return fixed
+}
+
+/**
+ * H4: восстановление возвращает тот же id.
+ *
+ * - запрошенный id приводится к каноническому (`session-…`), иначе копия
+ *   создалась бы под «новым» id;
+ * - живая копия в зеркале, конфликтующая с карантинной, переносится в карантин
+ *   с причиной `superseded` — ничего не теряется и не перезаписывается;
+ * - `restoredFrom` (прежняя причина удаления) попадает в метку и журнал;
+ * - метка становится `reason: 'restored'` (снимается restoreTombstones).
+ *
+ * @returns {{ status: number, body: object }} — готовый ответ маршрута
+ */
+async function restoreSessions(ctx, payload = {}) {
+  const home = dshHome()
+  const config = await loadConfig(home)
+  const all = payload.all === true
+  const requestedRaw = Array.isArray(payload.ids)
+    ? payload.ids.filter(id => typeof id === 'string' && id.trim() !== '').map(id => id.trim())
+    : typeof payload.id === 'string' && payload.id.trim() !== ''
+      ? [payload.id.trim()]
+      : []
+  if (!all && requestedRaw.length === 0) {
+    return { status: 400, body: { ok: false, code: 'request/invalid', message: 'нужен id сессии или all:true' } }
+  }
+
+  const tombstonesBefore = await readTombstones(config.repoDir)
+  const resolved = resolveTombstoneIds({ tombstones: tombstonesBefore, ids: requestedRaw, all })
+  const canonicalRequested = resolved.canonical.length > 0
+    ? resolved.canonical
+    : requestedRaw.map(canonicalRestoreId).filter(id => id !== '')
+  const storedIds = resolved.stored.length > 0 ? resolved.stored : canonicalRequested
+  const queuePayload = all ? { all: true } : { ids: canonicalRequested.length > 0 ? canonicalRequested : storedIds }
+  const queueRestore = async (message, errorKind = '') => {
+    await queueFailedOperation(home, { type: 'restore', payload: queuePayload, error: message, errorKind })
+  }
+
+  // Сначала актуализируем зеркало (только если в git-дереве нет
+  // несохранённых изменений — иначе затёрли бы, например, свежее надгробие).
+  const remote = await createRemote(config)
+  const syncGuard = backendGuard(remote, 'sync', backendLabel(remote, config))
+  if (syncGuard.ok !== true) {
+    // H5+H6: метод недоступен — понятное сообщение и операция в очереди.
+    await queueRestore(syncGuard.message, 'reserve')
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        code: syncGuard.code,
+        message: `${syncGuard.message}; восстановление сохранено в очереди`,
+        queued: true,
+      },
+    }
+  }
+  let canSync = true
+  if (config.backend === 'git' && existsSync(config.repoDir)) {
+    canSync = !(await hasChanges(config.repoDir))
+  }
+  if (canSync) {
+    try {
+      const synced = await remote.sync()
+      if (synced === false) {
+        const message = 'не удалось получить зеркало — восстановление отменено, повторите после синхронизации'
+        await queueRestore(message, 'network')
+        return { status: 409, body: { ok: false, code: 'remote/unavailable', message, queued: true } }
+      }
+    } catch (error) {
+      const failure = classifyBackendFailure(error, { operation: 'sync', kind: backendLabel(remote, config) })
+      const message = `не удалось получить зеркало — восстановление отменено: ${failure.message}`
+      await queueRestore(message, failure.unsupported ? 'reserve' : 'network')
+      return {
+        status: 409,
+        body: { ok: false, code: failure.unsupported ? 'reserve/unsupported' : 'remote/unavailable', message, queued: true },
+      }
+    }
+  }
+
+  // Защита от «новых копий»: если восстановление уже частично прошло, restore
+  // не трогает существующие копии. Конфликтующая живая копия уйдёт в карантин
+  // с причиной superseded, а удалённая вернётся на её место.
+  const superseded = []
+  for (const id of all ? canonicalRequested : (canonicalRequested.length > 0 ? canonicalRequested : storedIds)) {
+    const canonical = canonicalRestoreId(id)
+    const projectId = tombstoneProjectId(tombstonesBefore, canonical) || findQuarantineProject(config.repoDir, canonical)
+    if (projectId === '') continue
+    try {
+      const moved = await quarantineSupersededCopy({
+        repoDir: config.repoDir,
+        projectId,
+        sessionId: canonical,
+        deviceId: config.deviceId,
+      })
+      if (moved.superseded) superseded.push({ id: canonical, projectId, dir: moved.dir, reason: 'superseded' })
+    } catch {
+      // карантин проигравшей копии — вспомогательный шаг
+    }
+  }
+
+  const result = await restoreTombstones({
+    home,
+    repoDir: config.repoDir,
+    projects: config.projects ?? {},
+    ids: all ? undefined : storedIds,
+    deviceId: config.deviceId,
+    by: 'owner',
+  })
+
+  // Тот же id: канонизируем каталог и заголовок каждой восстановленной копии.
+  const canonicalRestored = []
+  const idFixed = []
+  for (const item of result.restored ?? []) {
+    const canonical = canonicalRestoreId(item.id)
+    if (!canonicalRestored.includes(canonical)) canonicalRestored.push(canonical)
+    const fixed = await canonicalizeRestoredCopy({ home, config, item, canonical })
+    if (fixed.length > 0) idFixed.push(canonical)
+  }
+  result.restoredIds = canonicalRestored
+  if (result.restored !== undefined) {
+    result.restored = result.restored.map(item => ({ ...item, id: canonicalRestoreId(item.id) }))
+  }
+
+  let committed = false
+  let warning = ''
+  const commitGuard = backendGuard(remote, 'commit', backendLabel(remote, config))
+  if (commitGuard.ok !== true) {
+    warning = `изменения сохранены в зеркале, но ${commitGuard.message}`
+  } else {
+    try {
+      const commit = await remote.commit(`dsh-sync: restore sessions (${config.deviceId})`)
+      committed = commit.committed === true
+    } catch (error) {
+      const failure = classifyBackendFailure(error, { operation: 'commit', kind: backendLabel(remote, config) })
+      warning = failure.unsupported
+        ? failure.message
+        : `изменения сохранены в зеркале, но отправить их не удалось: ${failure.message}`
+    }
+  }
+  if (warning !== '') {
+    // H6: отправку повторим из очереди, восстановление уже сделано.
+    await queueFailedOperation(home, {
+      type: 'push',
+      payload: { action: 'push' },
+      error: warning,
+      errorKind: 'reserve',
+    })
+  }
+
+  // restoredFrom: прежняя причина удаления — в журнал рядом с restoredIds.
+  const tombstonesAfter = await readTombstones(config.repoDir)
+  const restoredFrom = {}
+  for (const id of canonicalRestored) restoredFrom[id] = restoredFromOf(tombstonesAfter, id)
+
+  const restored = result.restored?.length ?? 0
+  const notes = []
+  if (result.failed.length > 0) notes.push(`не удалось: ${result.failed.length}`)
+  if (superseded.length > 0) notes.push(`конфликтующих копий в карантин (superseded): ${superseded.length}`)
+  if (idFixed.length > 0) notes.push(`id приведён к каноническому: ${idFixed.length}`)
+  const message = restored > 0
+    ? `восстановлено сессий: ${restored}${notes.length > 0 ? `, ${notes.join(', ')}` : ''}`
+    : result.failed.length > 0
+      ? `не удалось восстановить: ${result.failed.length} (${result.failed[0].message})`
+      : result.skipped.length > 0
+        ? 'восстанавливать нечего: карантин истёк или метка уже снята'
+        : 'восстанавливать нечего'
+  const record = {
+    ok: true,
+    at: new Date().toISOString(),
+    action: 'restore',
+    mode: 'host',
+    message,
+    restored,
+    restoredIds: canonicalRestored,
+    restoredFrom,
+    skippedIds: result.skipped,
+    failed: result.failed,
+    // H4: метка удаления снята (restored), проигравшие копии — superseded.
+    reasons: ['restored', ...(superseded.length > 0 ? ['superseded'] : [])],
+    by: ['owner', ...(superseded.length > 0 ? ['sync'] : [])],
+    ...(superseded.length > 0 ? { superseded: superseded.map(item => item.id), supersededDetails: superseded } : {}),
+    ...(idFixed.length > 0 ? { idFixed } : {}),
+    committed,
+    ...(warning !== '' ? { warning } : {}),
+  }
+  await recordRun(home, record)
+  invalidateSessionStates()
+  return { status: 200, body: { ok: true, ...record } }
+}
+
+/**
+ * Удаление копии локальной сессии из облака (H5: проверка интерфейса backend).
+ * @returns {{ status: number, body: object }}
+ */
+async function deleteCloudCopyAction(ctx, payload = {}) {
+  const id = typeof payload.id === 'string' ? payload.id.trim() : ''
+  const home = dshHome()
+  const config = await loadConfig(home)
+  const modes = await readSessionModes(home)
+  if (payload.confirm !== true) {
+    const inspected = await inspectCloudCopy({ home, config, sessionId: id, modes })
+    const message = inspected.ok === true
+      ? 'в облаке есть копия этой локальной сессии; подтвердите удаление — локальная сессия останется'
+      : inspected.message
+    return { status: 409, body: { ...inspected, ok: false, code: inspected.ok === true ? 'confirm-required' : inspected.code, message } }
+  }
+  // Удаление должно доехать до облака: иначе копия вернётся следующим
+  // приёмом. Сначала приводим зеркало к удалённой ветке (как и
+  // восстановление), и только потом переносим копию в карантин: иначе
+  // fetch+reset затёр бы незакоммиченные изменения. Сетевой сбой не
+  // отменяет локальное удаление — метка manual ляжет в коммит при
+  // следующей успешной отправке.
+  let remote
+  let warning = ''
+  try {
+    remote = createRemote(config)
+  } catch (error) {
+    const failure = classifyBackendFailure(error, { operation: 'sync', kind: backendLabel(undefined, config) })
+    warning = failure.message
+  }
+  if (remote !== undefined) {
+    const syncGuard = backendGuard(remote, 'sync', backendLabel(remote, config))
+    if (syncGuard.ok !== true) {
+      warning = `${syncGuard.message}; удаление уйдёт при следующей синхронизации`
+    } else {
+      try {
+        await remote.sync()
+      } catch (error) {
+        const failure = classifyBackendFailure(error, { operation: 'sync', kind: backendLabel(remote, config) })
+        const cloudWarning = `${failure.message}; удаление уйдёт при следующей синхронизации`
+        warning = warning === '' ? cloudWarning : `${warning}; ${cloudWarning}`
+      }
+    }
+  }
+  const result = await deleteCloudCopy({ home, config, sessionId: id, modes })
+  if (result.ok !== true) {
+    return { status: result.code === 'no-cloud-copy' ? 404 : 409, body: result }
+  }
+  let committed = false
+  if (remote !== undefined) {
+    const commitGuard = backendGuard(remote, 'commit', backendLabel(remote, config))
+    if (commitGuard.ok !== true) {
+      const commitWarning = `${commitGuard.message}; удаление уйдёт при следующей синхронизации`
+      warning = warning === '' ? commitWarning : `${warning}; ${commitWarning}`
+    } else {
+      try {
+        const commit = await remote.commit(`dsh-sync: delete cloud copy of local session ${id} (${config.deviceId})`)
+        committed = commit.committed === true
+      } catch (error) {
+        const failure = classifyBackendFailure(error, { operation: 'commit', kind: backendLabel(remote, config) })
+        const commitWarning = `${failure.message}; удаление уйдёт при следующей синхронизации`
+        warning = warning === '' ? commitWarning : `${warning}; ${commitWarning}`
+      }
+    }
+  }
+  if (warning !== '') {
+    // H6: удаление копии повторим из очереди.
+    await queueFailedOperation(home, {
+      type: 'delete',
+      payload: { id, cloudCopy: true },
+      error: warning,
+      errorKind: 'reserve',
+    })
+  }
+  const record = {
+    ok: true,
+    at: new Date().toISOString(),
+    action: 'cloud-copy-delete',
+    mode: 'host',
+    message: `${result.message}${warning !== '' ? `; ${warning}` : ''}`,
+    projectId: result.projectId,
+    removed: 1,
+    removedIds: [id],
+    reasons: ['manual'],
+    by: ['owner'],
+    quarantined: result.quarantined === true,
+    bytes: result.bytes,
+    committed,
+    ...(warning !== '' ? { warning } : {}),
+  }
+  await recordRun(home, record)
+  invalidateSessionStates()
+  return { status: 200, body: record }
+}
+
+/**
+ * H6: цикл разбора очереди. Обработчики повторяют операции теми же путями, что
+ * и кнопки панели; таймаут короткий, чтобы закрытие DSH не ждало сеть.
+ */
+export async function flushOutboxCycle(ctx, options = {}) {
+  const home = dshHome()
+  if (automation.flushing) {
+    return { skipped: true, remaining: (await outboxSummary(home)).count }
+  }
+  automation.flushing = true
+  try {
+    const summary = await outboxSummary(home)
+    if (summary.count === 0) return { skipped: false, flushed: 0, failed: 0, remaining: 0 }
+    const config = await loadConfig(home)
+    const handlers = {
+      push: async (operation) => {
+        // H5: резерв без метода не зовём — сообщаем и оставляем в очереди.
+        // Проверяем только операции про резерв: обычный push идёт в зеркало.
+        if (operation?.payload?.secondary === true) {
+          const secondaryCheck = secondaryOperationSupported(config, 'sync')
+          if (secondaryCheck.ok !== true) return { ok: false, message: secondaryCheck.message }
+        }
+        const record = await runSync(ctx, 'push')
+        return { ok: record?.ok === true, message: typeof record?.message === 'string' ? record.message : '' }
+      },
+      delete: async (operation) => {
+        const payload = { ...(operation.payload ?? {}), confirm: true }
+        if (payload.cloudCopy === true) {
+          const result = await deleteCloudCopyAction(ctx, { id: payload.id, confirm: true })
+          return { ok: result.body?.ok === true, message: result.body?.message ?? '' }
+        }
+        const record = await runPrune(ctx, payload)
+        return { ok: record?.ok === true, message: typeof record?.message === 'string' ? record.message : '' }
+      },
+      restore: async (operation) => {
+        const result = await restoreSessions(ctx, operation.payload ?? {})
+        return { ok: result.body?.ok === true, message: result.body?.message ?? '' }
+      },
+      mode: async (operation) => {
+        const ids = Array.isArray(operation.payload?.ids) ? operation.payload.ids : []
+        const mode = operation.payload?.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud'
+        await setSessionMode(home, ids, mode)
+        return true
+      },
+    }
+    const outcome = await flushOutbox(home, {
+      handlers,
+      opTimeoutMs: options.opTimeoutMs,
+      totalTimeoutMs: options.totalTimeoutMs,
+    })
+    if (outcome.flushed.length > 0 || outcome.failed.length > 0) {
+      invalidateSessionStates()
+    }
+    return outcome
+  } catch (error) {
+    return { skipped: false, flushed: 0, failed: 0, remaining: (await outboxSummary(home)).count, message: error instanceof Error ? error.message : String(error) }
+  } finally {
+    automation.flushing = false
+  }
+}
+
 function startAutomation(ctx) {
   automation.enabled = true
   void ensureProjectDefaults(ctx).catch(() => {})
@@ -2152,6 +2792,16 @@ function startAutomation(ctx) {
       void autoTick(ctx)
     }, 60_000)
     timer.unref?.()
+
+    // H6: очередь невыполненных операций разбираем при старте и по таймеру.
+    const outboxStart = setTimeout(() => {
+      void flushOutboxCycle(ctx, { opTimeoutMs: 20_000, totalTimeoutMs: 30_000 })
+    }, 12_000)
+    outboxStart.unref?.()
+    const outboxTimer = setInterval(() => {
+      void flushOutboxCycle(ctx, { opTimeoutMs: 60_000, totalTimeoutMs: 90_000 })
+    }, 90_000)
+    outboxTimer.unref?.()
 
     // Быстрый сторож удалений: плагин удаления сессий убирает её из рабочего
     // пространства, а список меняется сразу. Проверяем каждые 5 секунд, чтобы
@@ -2181,7 +2831,21 @@ function startAutomation(ctx) {
       clearTimeout(initial)
       clearInterval(timer)
       clearInterval(watcher)
+      clearTimeout(outboxStart)
+      clearInterval(outboxTimer)
       automation.enabled = false
+      // Последний разбор очереди при закрытии: короткий таймаут (5–10 с),
+      // выход DSH не блокируем — операция останется в файле до следующего старта.
+      void Promise.race([
+        flushOutboxCycle(ctx, {
+          opTimeoutMs: OUTBOX_SHUTDOWN_TIMEOUT_MS,
+          totalTimeoutMs: OUTBOX_SHUTDOWN_TIMEOUT_MS,
+        }),
+        new Promise((resolve) => {
+          const timer = setTimeout(resolve, OUTBOX_SHUTDOWN_TIMEOUT_MS + 500)
+          timer.unref?.()
+        }),
+      ])
     }
   }, 'dsh-sync: automation')
 }
@@ -2197,7 +2861,7 @@ function startUpdateWatch(ctx) {
         const fresh = await checkForUpdate(() => resolveGitHubToken(ctx))
         if (fresh.status === 'behind' && fresh.latest !== announcedVersion) {
           announcedVersion = fresh.latest
-          pushNotice('update', `Доступна новая версия dsh-sync (${String(fresh.latest).slice(0, 7)}). Обновить можно в карточке плагина.`)
+          pushNotice('update', `Доступна новая версия dsh-sessions (${String(fresh.latest).slice(0, 7)}). Обновить можно в карточке плагина.`)
           pushNotice('update', 'Новая версия установится автоматически после короткой паузы.')
           setTimeout(() => {
             try {
@@ -2399,6 +3063,21 @@ export function apply(ctx) {
         repoDir: config.repoDir,
         projects: config.projects ?? {},
       })
+      // H2: «Удалённые» тоже показывают название, а не только id.
+      for (const row of sessions) {
+        const resolved = await resolveTombstoneTitle({
+          sessionId: row.id,
+          title: row.title,
+          repoDir: config.repoDir,
+          projectId: row.projectId,
+          home,
+          projectPath: config.projects?.[row.projectId]?.path,
+        })
+        row.title = resolved.title
+        row.rawTitle = resolved.rawTitle
+        row.shortId = resolved.shortId
+        row.titleSource = resolved.titleSource
+      }
       return json({
         ok: true,
         quarantineDays: QUARANTINE_DAYS,
@@ -2414,91 +3093,8 @@ export function apply(ctx) {
   // копию зеркала и локальную копию из архива, затем закоммитить зеркало.
   route('restore', RESTORE_PATH, async (request) => {
     try {
-      const payload = await body(request)
-      const home = dshHome()
-      const config = await loadConfig(home)
-      const all = payload.all === true
-      const requested = Array.isArray(payload.ids)
-        ? payload.ids.filter(id => typeof id === 'string' && id.trim() !== '').map(id => id.trim())
-        : typeof payload.id === 'string' && payload.id.trim() !== ''
-          ? [payload.id.trim()]
-          : []
-      if (!all && requested.length === 0) {
-        return json({ ok: false, code: 'request/invalid', message: 'нужен id сессии или all:true' }, 400)
-      }
-
-      // Сначала актуализируем зеркало (только если в git-дереве нет
-      // несохранённых изменений — иначе затёрли бы, например, свежее надгробие).
-      const remote = await createRemote(config)
-      let canSync = true
-      if (config.backend === 'git' && existsSync(config.repoDir)) {
-        canSync = !(await hasChanges(config.repoDir))
-      }
-      if (canSync) {
-        let synced
-        try {
-          synced = await remote.sync()
-        } catch (error) {
-          return json({
-            ok: false,
-            code: 'remote/unavailable',
-            message: `не удалось получить зеркало — восстановление отменено: ${error instanceof Error ? error.message : String(error)}`,
-          }, 409)
-        }
-        if (synced === false) {
-          return json({
-            ok: false,
-            code: 'remote/unavailable',
-            message: 'не удалось получить зеркало — восстановление отменено, повторите после синхронизации',
-          }, 409)
-        }
-      }
-
-      const result = await restoreTombstones({
-        home,
-        repoDir: config.repoDir,
-        projects: config.projects ?? {},
-        ids: all ? undefined : requested,
-        deviceId: config.deviceId,
-        by: 'owner',
-      })
-
-      let committed = false
-      let warning = ''
-      try {
-        const commit = await remote.commit(`dsh-sync: restore sessions (${config.deviceId})`)
-        committed = commit.committed === true
-      } catch (error) {
-        warning = `изменения сохранены в зеркале, но отправить их не удалось: ${error instanceof Error ? error.message : String(error)}`
-      }
-
-      const restored = result.restored?.length ?? 0
-      const message = restored > 0
-        ? `восстановлено сессий: ${restored}${result.failed.length > 0 ? `, не удалось: ${result.failed.length}` : ''}`
-        : result.failed.length > 0
-          ? `не удалось восстановить: ${result.failed.length} (${result.failed[0].message})`
-          : result.skipped.length > 0
-            ? 'восстанавливать нечего: карантин истёк или метка уже снята'
-            : 'восстанавливать нечего'
-      // В журнал — та же метка, что и надгробия: reason=restored, by=owner.
-      const record = {
-        ok: true,
-        at: new Date().toISOString(),
-        action: 'restore',
-        mode: 'host',
-        message,
-        restored,
-        restoredIds: result.restoredIds,
-        skippedIds: result.skipped,
-        failed: result.failed,
-        reasons: ['restored'],
-        by: ['owner'],
-        committed,
-        ...(warning !== '' ? { warning } : {}),
-      }
-      await recordRun(home, record)
-      invalidateSessionStates()
-      return json({ ok: true, ...record })
+      const result = await restoreSessions(ctx, await body(request))
+      return json(result.body, result.status)
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
     }
@@ -2507,8 +3103,10 @@ export function apply(ctx) {
   // Режим «локальная / облачная»: одна сессия или группа (массово).
   // payload.workspaceId — умолчание рабочего пространства для новых сессий.
   route('session-mode', SESSION_MODE_PATH, async (request) => {
+    let requestPayload = {}
     try {
       const payload = await body(request)
+      requestPayload = payload
       const mode = payload.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud'
       const home = dshHome()
       const workspaceId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : ''
@@ -2538,7 +3136,17 @@ export function apply(ctx) {
       invalidateSessionStates()
       return json({ ok: true, ...result })
     } catch (error) {
-      return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+      const message = error instanceof Error ? error.message : String(error)
+      // H6: смена режима не теряется — повторим из очереди.
+      const ids = Array.isArray(requestPayload?.ids)
+        ? requestPayload.ids
+        : requestPayload?.id !== undefined ? [requestPayload.id] : []
+      await queueFailedOperation(dshHome(), {
+        type: 'mode',
+        payload: { ids, mode: requestPayload?.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud' },
+        error: message,
+      })
+      return json({ ok: false, message, queued: true }, 500)
     }
   })
 
@@ -2547,65 +3155,8 @@ export function apply(ctx) {
   // и просит подтверждение (окно-подтверждение в панели — клиентская часть).
   route('session-cloud-copy', SESSION_CLOUD_COPY_PATH, async (request) => {
     try {
-      const payload = await body(request)
-      const id = typeof payload.id === 'string' ? payload.id.trim() : ''
-      const home = dshHome()
-      const config = await loadConfig(home)
-      const modes = await readSessionModes(home)
-      if (payload.confirm !== true) {
-        const inspected = await inspectCloudCopy({ home, config, sessionId: id, modes })
-        const message = inspected.ok === true
-          ? 'в облаке есть копия этой локальной сессии; подтвердите удаление — локальная сессия останется'
-          : inspected.message
-        return json({ ...inspected, ok: false, code: inspected.ok === true ? 'confirm-required' : inspected.code, message }, 409)
-      }
-      // Удаление должно доехать до облака: иначе копия вернётся следующим
-      // приёмом. Сначала приводим зеркало к удалённой ветке (как и
-      // восстановление), и только потом переносим копию в карантин: иначе
-      // fetch+reset затёр бы незакоммиченные изменения. Сетевой сбой не
-      // отменяет локальное удаление — метка manual ляжет в коммит при
-      // следующей успешной отправке.
-      let remote
-      let warning = ''
-      try {
-        remote = createRemote(config)
-        await remote.sync()
-      } catch (error) {
-        warning = `облако пока недоступно (${error instanceof Error ? error.message : String(error)}); удаление уйдёт при следующей синхронизации`
-      }
-      const result = await deleteCloudCopy({ home, config, sessionId: id, modes })
-      if (result.ok !== true) {
-        return json(result, result.code === 'no-cloud-copy' ? 404 : 409)
-      }
-      let committed = false
-      if (remote !== undefined) {
-        try {
-          const commit = await remote.commit(`dsh-sync: delete cloud copy of local session ${id} (${config.deviceId})`)
-          committed = commit.committed === true
-        } catch (error) {
-          const commitWarning = `облако пока недоступно (${error instanceof Error ? error.message : String(error)}); удаление уйдёт при следующей синхронизации`
-          warning = warning === '' ? commitWarning : `${warning}; ${commitWarning}`
-        }
-      }
-      const record = {
-        ok: true,
-        at: new Date().toISOString(),
-        action: 'cloud-copy-delete',
-        mode: 'host',
-        message: `${result.message}${warning !== '' ? `; ${warning}` : ''}`,
-        projectId: result.projectId,
-        removed: 1,
-        removedIds: [id],
-        reasons: ['manual'],
-        by: ['owner'],
-        quarantined: result.quarantined === true,
-        bytes: result.bytes,
-        committed,
-        ...(warning !== '' ? { warning } : {}),
-      }
-      await recordRun(home, record)
-      invalidateSessionStates()
-      return json(record)
+      const result = await deleteCloudCopyAction(ctx, await body(request))
+      return json(result.body, result.status)
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
     }

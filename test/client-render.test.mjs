@@ -559,7 +559,14 @@ test('секция «Удалённые»: список со сроком кар
   const deletedText = deletedNodes.map(textOf).join('\n')
   assert.match(deletedText, /Удалённые/, 'карточка «Удалённые» на странице')
   assert.match(deletedText, /Ненужный диалог/, 'название удалённой сессии видно')
-  assert.match(deletedText, /deleted-2/, 'у сессии без названия показан идентификатор')
+  // H2: в тексте подпись «Без названия», короткий id — только в tooltip строки.
+  assert.match(deletedText, /Без названия/, 'у сессии без названия подпись «Без названия»')
+  const untitledDeleted = deletedNodes.find(
+    (node) => String(node.props?.className ?? '') === 'dshs-deleted-row' && textOf(node).includes('Без названия'),
+  )
+  assert.ok(untitledDeleted, 'строка удалённой сессии без названия найдена')
+  assert.equal(untitledDeleted.props.title, 'deleted-2', 'shortId удалённой сессии — в tooltip')
+  assert.equal(deletedText.includes('deleted-2'), false, 'shortId не подменяет название в тексте')
   assert.match(deletedText, /вручную/, 'причина ручного удаления подписана')
   assert.match(deletedText, /автоочистка/, 'причина автоочистки подписана')
   assert.match(deletedText, /пользователь/, 'автор удаления подписан')
