@@ -1,6 +1,6 @@
 {
   "name": "dsh-sessions",
-  "version": "1.0.72",
+  "version": "1.0.73",
   "description": "Сессии DeepSeek Harness: синхронизация между устройствами (git, облако, папка), профиль и рабочее пространство",
   "type": "module",
   "license": "MIT",

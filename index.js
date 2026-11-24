@@ -78,6 +78,7 @@ import {
 } from './lib/cloud-copy.mjs'
 import { createRemote } from './lib/remote.mjs'
 import { hasChanges } from './lib/git.mjs'
+import { collectOnboarding } from './lib/onboarding.mjs'
 
 export const name = 'dsh-sync'
 // sessionPersistence даёт список сессий с путями к логам: обходим каталог
@@ -117,6 +118,9 @@ const SECONDARY_INIT_PATH = '/api/dsh-sync/secondary-init'
 // Лёгкая сверка резерва: только PROPFIND корня и profile/manifest.json,
 // без скачивания логов (timeout 10–30 с). «Сверить» в карточке резерва.
 const SECONDARY_PROBE_PATH = '/api/dsh-sync/secondary-probe'
+// M4: онбординг нового устройства — только чтение, без секретов в ответе.
+// GET: карточка «Это новое устройство» забирает шаги по кнопке «Проверить».
+const ONBOARDING_PATH = '/api/dsh-sync/onboarding'
 
 // --- уведомления -----------------------------------------------------------
 // Кольцевой буфер: клиент забирает всё, что появилось после его курсора, и
@@ -440,6 +444,153 @@ async function checkEnvironment(config) {
   }
 
   return checks
+}
+
+// --- M4: онбординг нового устройства, песочница и секреты -------------------
+
+/**
+ * Наличие одного рефа credential store: только «есть/нет».
+ * Значение, маска и источник секрета наружу не отдаются ни при каком API.
+ */
+async function credentialPresence(ctx, id) {
+  try {
+    const credentials = ctx?.get?.('credentials')
+    if (credentials === undefined || credentials === null) return { configured: false }
+    if (typeof credentials.describe === 'function') {
+      const info = await credentials.describe(id)
+      return { configured: info?.configured === true }
+    }
+    if (typeof credentials.resolve === 'function') {
+      const hit = await credentials.resolve(id)
+      return { configured: typeof hit?.value === 'string' && hit.value.length > 0 }
+    }
+    return { configured: false }
+  } catch {
+    return { configured: false }
+  }
+}
+
+/**
+ * Политика песочницы из `ctx.sandboxPolicy` (если сервис есть).
+ * Нет сервиса или он не ответил — `{available:false}`: карточка покажет
+ * «состояние неизвестно» вместо выдуманного статуса.
+ */
+function sandboxFacts(ctx) {
+  try {
+    const policy = ctx?.get?.('sandboxPolicy')
+    if (policy === undefined || policy === null) return { available: false }
+    const mode = typeof policy.defaultMode === 'string' ? policy.defaultMode : ''
+    let resolved
+    if (typeof policy.resolve === 'function') {
+      try {
+        resolved = policy.resolve({})
+      } catch {
+        resolved = undefined
+      }
+    }
+    const effective = typeof resolved?.mode === 'string' && resolved.mode !== '' ? resolved.mode : mode
+    if (effective === '') return { available: false }
+    const roots = Array.isArray(resolved?.additionalWritableRoots)
+      ? resolved.additionalWritableRoots
+      : (Array.isArray(policy.additionalWritableRoots) ? policy.additionalWritableRoots : [])
+    return {
+      available: true,
+      mode: effective,
+      workspaceRoot: typeof resolved?.workspaceRoot === 'string'
+        ? resolved.workspaceRoot
+        : (typeof policy.workspaceRoot === 'string' ? policy.workspaceRoot : ''),
+      additionalWritableRoots: roots.length,
+    }
+  } catch {
+    return { available: false }
+  }
+}
+
+/** Есть ли у локальных сессий облачные копии (кандидаты миграции). */
+async function localCopyFacts(home, config) {
+  try {
+    const candidates = await localOnlyMigrationCandidates({ home, config })
+    const count = Math.max(0, Number(candidates?.count ?? 0) || 0)
+    return { checked: true, count }
+  } catch {
+    return { checked: false, count: 0 }
+  }
+}
+
+/**
+ * Факты для чистого `collectOnboarding`: версии, рефы, профиль, синхронизация,
+ * рабочее пространство и песочница. Секреты читаются только как «есть/нет».
+ */
+async function onboardingFactsOf(ctx, options = {}) {
+  const home = options.home ?? dshHome()
+  const config = options.config ?? await loadConfig(home)
+  const checks = Array.isArray(options.checks) ? options.checks : await checkEnvironment(config)
+  const node = checks.find(check => check.id === 'node')
+  const git = checks.find(check => check.id === 'git')
+  const remote = checks.find(check => check.id === 'remote')
+  const [GITHUB_TOKEN, DEEPSEEK_API_KEY, DSH_SYNC_WEBDAV_PASSWORD, DSH_VAULT_PASSPHRASE] = await Promise.all([
+    credentialPresence(ctx, 'GITHUB_TOKEN'),
+    credentialPresence(ctx, 'DEEPSEEK_API_KEY'),
+    credentialPresence(ctx, 'DSH_SYNC_WEBDAV_PASSWORD'),
+    credentialPresence(ctx, 'DSH_VAULT_PASSPHRASE'),
+  ])
+  let profileStatusValue = options.profileStatus
+  if (profileStatusValue === undefined || profileStatusValue === null) {
+    try {
+      profileStatusValue = await profileStatus(ctx)
+    } catch {
+      profileStatusValue = { profile: { available: false }, workspace: {} }
+    }
+  }
+  const localCopies = options.localCopies ?? await localCopyFacts(home, config)
+  const workspace = options.workspace ?? profileStatusValue?.workspace ?? {}
+  // «Настроено» — по выбранному бэкенду: для git это адрес репозитория, а не
+  // локальная папка зеркала по умолчанию (иначе новый компьютер сразу получал
+  // бы «репозиторий недоступен» вместо честного «ещё не настроено»).
+  const backend = config?.backend ?? 'git'
+  const remoteAddress = typeof config?.remote === 'string' ? config.remote.trim() : ''
+  const repoDirValue = typeof config?.repoDir === 'string' ? config.repoDir.trim() : ''
+  const webdavLogin = typeof config?.webdavLogin === 'string' ? config.webdavLogin.trim() : ''
+  const yandexToken = typeof config?.yandexToken === 'string' ? config.yandexToken.trim() : ''
+  const configured = backend === 'git'
+    ? remoteAddress !== ''
+    : backend === 'folder'
+      ? repoDirValue !== ''
+      : backend === 'webdav'
+        ? webdavLogin !== ''
+        : backend === 'yandex'
+          ? yandexToken !== ''
+          : remoteAddress !== '' || repoDirValue !== ''
+  return {
+    tools: {
+      node: { ok: node?.ok === true, version: node?.detail ?? '' },
+      git: { ok: git?.ok === true, version: git?.detail ?? '' },
+    },
+    dshVersion: await hostDshVersion(),
+    refs: { GITHUB_TOKEN, DEEPSEEK_API_KEY, DSH_SYNC_WEBDAV_PASSWORD, DSH_VAULT_PASSPHRASE },
+    profile: profileStatusValue?.profile ?? { available: false, conflictCount: 0 },
+    sync: {
+      backend,
+      remote: remoteAddress,
+      repoDir: repoDirValue,
+      configured,
+      reachable: remote?.ok === true,
+    },
+    localCopies,
+    workspace: {
+      enabled: config?.workspace?.enabled !== false,
+      matched: Number(workspace?.matched ?? 0) || 0,
+      localWorkspaces: Number(workspace?.localWorkspaces ?? 0) || 0,
+      hints: Array.isArray(workspace?.hints) ? workspace.hints : [],
+      pending: Number(workspace?.pending ?? 0) || 0,
+    },
+    sandbox: sandboxFacts(ctx),
+  }
+}
+
+/** Полный отчёт онбординга: его отдаёт GET /api/dsh-sync/onboarding. */
+async function onboardingReport(ctx, options = {}) {
+  return collectOnboarding(await onboardingFactsOf(ctx, options))
 }
 
 // --- группы «родитель + субагенты»: счётчики и отчёт -------------------------
@@ -778,6 +929,21 @@ async function readState(ctx) {
   } catch (error) {
     profile = { ok: false, message: error instanceof Error ? error.message : String(error) }
   }
+  // M4: сводка онбординга для чипа в шапке карточки «Сессии и режим».
+  // Полные шаги отдаёт отдельный маршрут — здесь только счётчики без секретов.
+  let onboarding = null
+  try {
+    const report = await onboardingReport(ctx, { home, config, checks, profileStatus: profile })
+    onboarding = {
+      ready: report.ready,
+      warn: report.warn,
+      fail: report.fail,
+      todo: report.todo,
+      count: report.count,
+    }
+  } catch {
+    onboarding = null
+  }
   let modes = { local: 0, cloud: 0 }
   try {
     // Новые сессии получают умолчание своего рабочего пространства и здесь:
@@ -845,6 +1011,8 @@ async function readState(ctx) {
     modes,
     profile,
     workspace,
+    // M4: чип «Это новое устройство? N шагов» и статусы в карточке онбординга.
+    onboarding,
     suggestedFolder,
     version: packageVersion,
     updatedFrom: pendingUpdate !== undefined && pendingUpdate !== null && pendingUpdate.to === packageVersion ? pendingUpdate.from : updatedFromVersion,
@@ -3768,11 +3936,11 @@ export function apply(ctx) {
 
   const failures = []
 
-  const route = (label, path, handler) => {
+  const route = (label, path, handler, methods = ['POST']) => {
     try {
       ctx.effect(() => ctx.connection.fetch.register({
         path,
-        methods: ['POST'],
+        methods,
         requestBody: 'buffered',
         fetch: handler,
       }), `dsh-sync: ${label}`)
@@ -3782,6 +3950,17 @@ export function apply(ctx) {
   }
 
   route('state', STATE_PATH, async () => json(await readState(ctx)))
+
+  // M4: онбординг нового устройства. Только чтение; GET — по кнопке «Проверить».
+  // Ответ не содержит значений секретов: только «есть/нет» и сводки.
+  route('onboarding', ONBOARDING_PATH, async () => {
+    try {
+      const report = await onboardingReport(ctx)
+      return json({ ...report, generatedAt: new Date().toISOString() })
+    } catch (error) {
+      return json({ ok: false, message: `Онбординг не собран: ${error instanceof Error ? error.message : String(error)}` }, 500)
+    }
+  }, ['GET'])
 
   // Самопроверка версии: сравнивает закреплённый коммит с `main` в репозитории
   // и по явному нажатию просит менеджер плагинов переустановить пакет.

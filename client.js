@@ -44,6 +44,8 @@ window.__ModuleLoader__.load({
     // Лёгкая сверка резерва: PROPFIND + profile/manifest.json без скачивания
     // логов. Ответ: { ok, local, cloud, onlyLocal, onlyCloud, differ, code }.
     const SECONDARY_PROBE_PATH = '/api/dsh-sync/secondary-probe';
+    // M4: онбординг нового устройства. GET — только чтение, без секретов.
+    const ONBOARDING_PATH = '/api/dsh-sync/onboarding';
     const shortSha = (value) => (value === null || value === undefined || value === '' ? '?' : String(value).slice(0, 7));
 
     // Подписи страницы «Синхронизация сессий». Только тексты интерфейса:
@@ -412,6 +414,24 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** GET-маршрут (онбординг): только чтение, без тела запроса. */
+    async function get(path) {
+      const response = await fetch(path, { method: 'GET', credentials: 'same-origin' });
+      const text = await response.text().catch(() => '');
+      if (!response.ok) {
+        const error = new Error(`${response.status} ${path}${text ? `: ${text.slice(0, 200)}` : ''}`);
+        error.status = response.status;
+        throw error;
+      }
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        const errorJson = new Error(`ответ без JSON: ${text.slice(0, 200)}`);
+        errorJson.status = response.status;
+        throw errorJson;
+      }
+    }
+
     function explain(error) {
       const message = String(error?.message ?? error);
       if (error?.status === 404) {
@@ -660,6 +680,33 @@ window.__ModuleLoader__.load({
             '.dshs-sessions-search{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
             '.dshs-sessions-search input{flex:1 1 200px;min-width:0}',
             '.dshs-sessions-more{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
+            // --- M4: карточка онбординга нового устройства ------------------
+            // Чип в шапке карточки «Сессии и режим»: 32 px, как остальные чипы.
+            '.dshs-onboarding-chip{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,0.35));background:transparent;color:inherit;font:inherit;font-size:11.5px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer;min-width:0;max-width:100%}',
+            '.dshs-onboarding-chip:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16));border-color:var(--dsw-alias-border-l4,rgba(150,150,150,0.65))}',
+            '.dshs-onboarding-chip:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:2px}',
+            '.dshs-onboarding-chip[data-ready="true"]{border-color:rgba(47,158,68,0.5);background:rgba(47,158,68,0.1);color:var(--dsw-alias-state-success-primary,#2f9e44)}',
+            '.dshs-onboarding-chip[data-count="0"]{opacity:.9}',
+            '.dshs-onboarding-steps{display:flex;flex-direction:column;gap:8px;min-width:0;max-height:420px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}',
+            '.dshs-onboarding-step{display:flex;align-items:flex-start;gap:10px;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.045)}',
+            '.dshs-onboarding-step[data-status="fail"]{border-color:rgba(209,36,47,0.42);background:rgba(209,36,47,0.075)}',
+            '.dshs-onboarding-step[data-status="warn"]{border-color:rgba(247,190,76,0.42);background:rgba(247,190,76,0.075)}',
+            '.dshs-onboarding-step[data-status="ok"]{border-color:rgba(47,158,68,0.32)}',
+            '.dshs-onboarding-step-text{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 auto}',
+            '.dshs-onboarding-step-title{font-size:12.5px;font-weight:600;line-height:1.3}',
+            '.dshs-onboarding-step-detail{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,rgba(128,128,128,0.95));text-align:justify;hyphens:auto;overflow-wrap:anywhere}',
+            '.dshs-onboarding-badge{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;border-radius:8px;font-size:11.5px;font-weight:600;line-height:1;white-space:nowrap;flex:0 0 auto}',
+            '.dshs-onboarding-block{display:flex;flex-direction:column;gap:8px;min-width:0;padding:10px 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.05)}',
+            '.dshs-onboarding-block[data-status="off"]{border-color:rgba(247,190,76,0.42);background:rgba(247,190,76,0.07)}',
+            '.dshs-onboarding-block-title{font-size:12.5px;font-weight:600;line-height:1.3}',
+            '.dshs-onboarding-list{margin:0;padding-left:18px;font-size:12px;line-height:1.5}',
+            '.dshs-onboarding-allow{color:var(--dsw-alias-state-success-primary,#2f9e44)}',
+            '.dshs-onboarding-deny{color:var(--dsw-alias-state-error-primary,#d1242f)}',
+            '.dshs-onboarding-commands{display:flex;flex-direction:column;gap:6px;min-width:0}',
+            '.dshs-onboarding-command{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
+            '.dshs-onboarding-command code{flex:1 1 220px;min-width:0;overflow-wrap:anywhere;font-size:11.5px;line-height:1.45;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(0,0,0,0.18)}',
+            '.dshs-secret-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;font-size:12px;line-height:1.5}',
+            '@media (max-width:640px){.dshs-onboarding-step{flex-wrap:wrap}.dshs-onboarding-step .dshs-onboarding-badge{order:-1}.dshs-onboarding-steps{max-height:none}.dshs-onboarding-chip{height:32px;font-size:11px;padding:0 10px}}',
           ].join('\n');
           document.head.appendChild(style);
           return () => style.remove();
@@ -681,6 +728,102 @@ window.__ModuleLoader__.load({
         } catch (error) {
           publish({ loading: false, error: `Не удалось получить состояние: ${explain(error)}` });
         }
+      };
+
+      // M4: шаги онбординга забираются отдельным GET-маршрутом по кнопке
+      // «Проверить» (в /state приходит только сводка ready/warn/fail).
+      const refreshOnboarding = async () => {
+        publish({ onboardingBusy: true, onboardingError: '' });
+        try {
+          const report = await get(ONBOARDING_PATH);
+          publish({ onboarding: report ?? null, onboardingBusy: false });
+          return report;
+        } catch (error) {
+          publish({ onboardingBusy: false, onboardingError: `Онбординг не получен: ${explain(error)}` });
+          return null;
+        }
+      };
+
+      // Действия шагов: только существующие маршруты плагина. Секреты при этом
+      // не читаются и не передаются — меняется лишь то, что и раньше было в UI.
+      const runOnboardingAction = async (routeName) => {
+        const action = String(routeName ?? '');
+        if (action === '' || action === 'refresh') return refreshOnboarding();
+        // Опасное действие — двойное подтверждение: первый клик показывает
+        // предупреждение, второй выполняет. Как в «Опасной зоне».
+        if (action === 'local-only-migration' && snapshot.onboardingConfirm !== action) {
+          publish({
+            onboardingConfirm: action,
+            onboardingBusy: false,
+            onboardingError: '',
+            onboardingNotice: 'Убрать облачные копии локальных сессий? Копии уйдут в карантин на 30 дней, сами сессии останутся локальными. Нажмите кнопку ещё раз для подтверждения.',
+          });
+          return null;
+        }
+        publish({ onboardingBusy: true, onboardingError: '', onboardingNotice: '', onboardingConfirm: '' });
+        try {
+          if (action === 'profile-apply') {
+            const result = await post(PROFILE_APPLY_PATH, { action: 'apply' });
+            publish({
+              onboardingBusy: false,
+              onboardingNotice: result?.ok === true
+                ? `Профиль применён: файлов ${result.applied ?? 0}${(result.conflicts ?? 0) > 0 ? `, конфликтов: ${result.conflicts}` : ''}.`
+                : (result?.message || 'Применение профиля не удалось.'),
+            });
+          } else if (action === 'local-only-migration') {
+            const result = await post(LOCAL_ONLY_MIGRATION_PATH, { confirm: true });
+            publish({
+              onboardingBusy: false,
+              onboardingNotice: result?.ok === true
+                ? `Облачных копий локальных сессий убрано: ${result.removed ?? 0}.`
+                : (result?.message ? `Не удалось убрать копии: ${result.message}` : 'Не удалось убрать облачные копии.'),
+            });
+            await refreshSessionStates(true);
+          } else if (action === 'sync') {
+            const result = await post(RUN_PATH, { action: 'sync' });
+            publish({
+              onboardingBusy: false,
+              onboardingNotice: result?.message || (result?.ok === true ? 'Синхронизация выполнена.' : 'Синхронизация не удалась.'),
+            });
+            await refresh();
+          } else if (action === 'settings') {
+            // Значения секретов вводятся в настройках DSH, карточка показывает
+            // только факт «есть/нет» — в браузер секреты не попадают.
+            publish({
+              onboardingBusy: false,
+              onboardingNotice: 'Секреты вводятся в настройках DSH (Settings → Plugins) или в credential store. Здесь показывается только «есть/нет», без значений.',
+            });
+            return null;
+          } else {
+            publish({ onboardingBusy: false, onboardingNotice: `Неизвестное действие: ${action}` });
+            return null;
+          }
+          await refreshOnboarding();
+          return null;
+        } catch (error) {
+          publish({ onboardingBusy: false, onboardingError: `Действие не выполнено: ${explain(error)}` });
+          return null;
+        }
+      };
+
+      /** Скопировать git-команду нового устройства (без секретов в адресе). */
+      const copyOnboardingCommand = async (command) => {
+        const text = String(command ?? '');
+        if (text === '') return;
+        try {
+          if (typeof navigator === 'undefined' || navigator?.clipboard === undefined) throw new Error('clipboard недоступен');
+          await navigator.clipboard.writeText(text);
+          publish({ onboardingNotice: 'Команда скопирована — вставьте её в терминал.' });
+        } catch {
+          publish({ onboardingNotice: `Не удалось скопировать автоматически. Команда: ${text}` });
+        }
+      };
+
+      // Действия онбординга для headless-тестов и кнопок карточки.
+      onboardingActions = {
+        refresh: refreshOnboarding,
+        run: runOnboardingAction,
+        copy: copyOnboardingCommand,
       };
 
 
@@ -1287,6 +1430,289 @@ function CollapsedItem({ title, summary, badge, children }) {
                 count > items.length
                   ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё ${count - items.length}`)
                   : null,
+              ),
+        );
+      }
+
+      // --- M4: онбординг нового устройства ---------------------------------
+      // Карточка «Это новое устройство» и чип в шапке карточки «Сессии и режим».
+      // Данные приходят только из host-маршрута /api/dsh-sync/onboarding: ни
+      // значения секретов, ни их маски в браузер не передаются.
+
+      const ONBOARDING_STATUS_LABELS = {
+        ok: 'в порядке',
+        warn: 'внимание',
+        fail: 'ошибка',
+        todo: 'не настроено',
+      };
+
+      const ONBOARDING_STATUS_TONES = {
+        ok: { background: 'rgba(47,158,68,0.14)', border: '1px solid rgba(47,158,68,0.45)', color: 'var(--dsw-alias-state-success-primary, #2f9e44)' },
+        warn: { background: 'rgba(247,190,76,0.16)', border: '1px solid rgba(247,190,76,0.5)', color: 'var(--dsw-alias-state-warn-primary, #b36b00)' },
+        fail: { background: 'rgba(209,36,47,0.14)', border: '1px solid rgba(209,36,47,0.5)', color: 'var(--dsw-alias-state-error-primary, #d1242f)' },
+        todo: { background: 'rgba(128,128,128,0.14)', border: '1px solid rgba(128,128,128,0.4)', color: 'inherit' },
+      };
+
+      /** Русская форма «1 шаг / 2 шага / 5 шагов». */
+      const stepsWord = (count) => {
+        const value = Math.abs(Number(count) || 0) % 100;
+        const last = value % 10;
+        if (value >= 11 && value <= 14) return 'шагов';
+        if (last === 1) return 'шаг';
+        if (last >= 2 && last <= 4) return 'шага';
+        return 'шагов';
+      };
+
+      function OnboardingBadge({ status }) {
+        const key = typeof status === 'string' && ONBOARDING_STATUS_LABELS[status] !== undefined ? status : 'todo';
+        return h('span', {
+          className: 'dshs-onboarding-badge',
+          'data-status': key,
+          style: ONBOARDING_STATUS_TONES[key],
+        }, ONBOARDING_STATUS_LABELS[key]);
+      }
+
+      /** Компактный чип «Это новое устройство? N шагов» в шапке карточки «Сессии». */
+      function OnboardingChip({ open, summary }) {
+        const data = summary ?? null;
+        const count = Math.max(0, Number(data?.count ?? 0) || 0);
+        const ready = data?.ready === true && count === 0;
+        const label = ready
+          ? 'Всё готово'
+          : count > 0
+            ? `Это новое устройство? ${count} ${stepsWord(count)}`
+            : 'Это новое устройство?';
+        const readyTone = ready
+          ? {
+              background: 'rgba(47,158,68,0.1)',
+              border: '1px solid rgba(47,158,68,0.5)',
+              color: 'var(--dsw-alias-state-success-primary, #2f9e44)',
+            }
+          : {};
+        return h('button', {
+          type: 'button',
+          className: 'dshs-onboarding-chip',
+          'data-ready': ready ? 'true' : 'false',
+          'data-count': String(count),
+          'aria-expanded': open === true ? 'true' : 'false',
+          title: ready ? 'Все шаги нового устройства выполнены' : 'Открыть проверку нового устройства',
+          // Кнопка — из общей системы (32 px, radius 10, 600/12.5), только
+          // компактнее по горизонтали: чип стоит в шапке карточки.
+          style: { ...S.buttonSmall, padding: '0 12px', ...readyTone },
+          onClick: () => {
+            const next = open !== true;
+            publish({ onboardingOpen: next, onboardingNotice: '', onboardingError: '' });
+            if (next) void refreshOnboarding();
+          },
+        }, ready ? '✓ ' : '', label, open === true ? ' ▴' : ' ▾');
+      }
+
+      function OnboardingActionButton({ action, busy, confirm }) {
+        if (action === null || action === undefined) return null;
+        const awaiting = action.route === 'local-only-migration' && confirm === action.route;
+        return h(
+          'button',
+          {
+            type: 'button',
+            style: S.buttonSmall,
+            disabled: busy === true,
+            'data-confirm': awaiting ? 'true' : 'false',
+            onClick: () => void runOnboardingAction(action.route),
+          },
+          awaiting ? 'Подтвердить удаление копий' : (action.label ?? 'Выполнить'),
+        );
+      }
+
+      /** Один шаг онбординга: бейдж статуса, заголовок, пояснение, действие. */
+      function OnboardingStep({ step, busy, confirm }) {
+        return h(
+          'div',
+          { className: 'dshs-onboarding-step', 'data-step': step.id, 'data-status': step.status },
+          h(OnboardingBadge, { status: step.status }),
+          h(
+            'div',
+            { className: 'dshs-onboarding-step-text' },
+            h('span', { className: 'dshs-onboarding-step-title' }, step.title),
+            step.detail ? h('span', { className: 'dshs-onboarding-step-detail' }, step.detail) : null,
+          ),
+          h(OnboardingActionButton, { action: step.action, busy, confirm }),
+        );
+      }
+
+      /** Блок «Песочница и доступы»: статус из ctx/filePolicy, unknown если API нет. */
+      function SandboxBlock({ sandbox }) {
+        const value = sandbox ?? {
+          status: 'unknown',
+          label: 'Песочница: состояние неизвестно',
+          detail: 'Версия DSH не отдаёт политику файловой песочницы.',
+          allowed: [],
+          denied: [],
+          approvals: '',
+        };
+        const allowed = Array.isArray(value.allowed) ? value.allowed : [];
+        const denied = Array.isArray(value.denied) ? value.denied : [];
+        return h(
+          'div',
+          { className: 'dshs-onboarding-block', 'data-status': value.status, 'data-sandbox': value.status },
+          h('div', { className: 'dshs-onboarding-block-title' }, value.label),
+          value.detail ? h('div', { className: 'dshs-onboarding-step-detail' }, value.detail) : null,
+          allowed.length > 0 || denied.length > 0
+            ? h(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 } },
+                allowed.length > 0
+                  ? h(
+                      'div',
+                      null,
+                      h('span', { style: S.label }, 'Разрешено'),
+                      h('ul', { className: 'dshs-onboarding-list' }, ...allowed.map((item, index) => h('li', { key: `a${index}`, className: 'dshs-onboarding-allow' }, item))),
+                    )
+                  : null,
+                denied.length > 0
+                  ? h(
+                      'div',
+                      null,
+                      h('span', { style: S.label }, 'Запрещено'),
+                      h('ul', { className: 'dshs-onboarding-list' }, ...denied.map((item, index) => h('li', { key: `d${index}`, className: 'dshs-onboarding-deny' }, item))),
+                    )
+                  : null,
+              )
+            : null,
+          value.approvals ? h('div', { className: 'dshs-onboarding-step-detail' }, value.approvals) : null,
+        );
+      }
+
+      /** Блок «Секреты»: какие рефы есть, без значений и масок. */
+      function SecretsBlock({ secrets, busy }) {
+        const list = Array.isArray(secrets) ? secrets : [];
+        return h(
+          'div',
+          { className: 'dshs-onboarding-block', 'data-secrets': String(list.length) },
+          h('div', { className: 'dshs-onboarding-block-title' }, 'Секреты'),
+          h('div', { className: 'dshs-onboarding-step-detail' }, 'Значения хранятся в credential store DSH и в браузер не передаются — здесь только «есть/нет».'),
+          ...list.map((secret) => h(
+            'div',
+            { key: secret.id, className: 'dshs-secret-row', 'data-secret': secret.id, 'data-present': secret.present === true ? 'true' : 'false' },
+            h('span', {
+              style: {
+                ...S.dot,
+                background: secret.present === true
+                  ? 'var(--dsw-alias-state-success-primary, #2f9e44)'
+                  : 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.8))',
+              },
+            }),
+            h('span', { style: { fontWeight: 600 } }, secret.title),
+            h('span', { style: { ...S.meta, overflowWrap: 'anywhere' } }, secret.ref),
+            h('span', { style: secret.present === true ? S.ok : S.note }, secret.present === true ? 'есть' : 'нет'),
+            h('span', { style: S.hint }, secret.purpose),
+          )),
+          h(
+            'button',
+            { type: 'button', style: S.buttonSmall, disabled: busy === true, onClick: () => void runOnboardingAction('refresh') },
+            busy === true ? 'Проверка…' : 'Проверить',
+          ),
+        );
+      }
+
+      /** Git-команды нового устройства: адрес уже без логина/пароля. */
+      function OnboardingCommands({ commands }) {
+        const list = Array.isArray(commands) ? commands : [];
+        if (list.length === 0) return null;
+        return h(
+          'div',
+          { className: 'dshs-onboarding-block' },
+          h('div', { className: 'dshs-onboarding-block-title' }, 'Git-команды для нового устройства'),
+          h('div', { className: 'dshs-onboarding-step-detail' }, 'Скопируйте и выполните в терминале. Токен в команды не подставляется.'),
+          h(
+            'div',
+            { className: 'dshs-onboarding-commands' },
+            ...list.map((item, index) => h(
+              'div',
+              { key: `cmd${index}`, className: 'dshs-onboarding-command' },
+              h('code', null, item.command),
+              h(
+                'button',
+                { type: 'button', style: S.buttonSmall, onClick: () => void copyOnboardingCommand(item.command) },
+                'Копировать',
+              ),
+            )),
+          ),
+        );
+      }
+
+      /** Карточка онбординга: шаги, песочница, секреты и git-команды. */
+      function OnboardingCard({ data, busy, error, notice, confirm }) {
+        const report = data ?? null;
+        const steps = Array.isArray(report?.steps) ? report.steps : [];
+        const okCount = steps.filter((step) => step.status === 'ok').length;
+        const counts = report === null
+          ? null
+          : [
+              ['fail', report.fail, 'ошибок'],
+              ['warn', report.warn, 'внимание'],
+              ['todo', report.todo, 'не настроено'],
+            ].filter(([, value]) => Number(value ?? 0) > 0);
+        return h(
+          Card,
+          {
+            title: 'Это новое устройство',
+            hint: 'Проверка нового компьютера: инструменты, версия DSH, секреты, профиль, синхронизация и рабочие пространства. Значения секретов не показываются — только «есть/нет».',
+            meta: h(
+              'span',
+              { className: 'dshs-groups-counter' },
+              report === null ? 'шаги не загружены' : `готово ${okCount} из ${steps.length}`,
+            ),
+          },
+          h(
+            'div',
+            { className: 'dshs-onboarding-top', style: S.buttons },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dshs-btn-primary',
+                style: S.primary,
+                disabled: busy === true,
+                onClick: () => void runOnboardingAction('refresh'),
+              },
+              busy === true ? 'Проверка…' : 'Проверить',
+            ),
+            h(
+              'button',
+              { type: 'button', style: S.buttonSmall, onClick: () => publish({ onboardingOpen: false }) },
+              'Свернуть',
+            ),
+            report !== null
+              ? h('span', { style: S.meta }, `версия DSH: ${report.version?.current || 'неизвестна'} (нужна ${report.version?.min ?? '0.2.3-alpha.2'}+)`)
+              : null,
+          ),
+          error ? h('div', { style: S.error }, error) : null,
+          notice ? h('div', { style: S.ok }, notice) : null,
+          report === null
+            ? h('span', { style: S.hint }, busy === true ? 'Собираем шаги нового устройства…' : 'Шаги ещё не загружены — нажмите «Проверить».')
+            : h(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 } },
+                counts !== null && counts.length > 0
+                  ? h(
+                      'div',
+                      { style: S.buttons },
+                      ...counts.map(([status, value, label]) => h(
+                        'span',
+                        { key: status, className: 'dshs-onboarding-badge', 'data-status': status, style: ONBOARDING_STATUS_TONES[status] },
+                        `${label}: ${value}`,
+                      )),
+                    )
+                  : h('span', { style: S.ok }, report.ready === true ? 'Все обязательные шаги выполнены.' : 'Шаги требуют внимания.'),
+                h(
+                  'div',
+                  { className: 'dshs-onboarding-steps', 'data-count': String(steps.length) },
+                  ...steps.map((step) => h(OnboardingStep, { key: step.id, step, busy: busy === true, confirm: confirm ?? '' })),
+                ),
+                h(SandboxBlock, { sandbox: report.sandbox }),
+                h(SecretsBlock, { secrets: report.secrets, busy: busy === true }),
+                h(OnboardingCommands, { commands: report.commands }),
+                h('span', { style: S.hint }, 'Данные собраны на этом устройстве: сеть используется только для проверки репозитория. Секреты читаются как «есть/нет» и в браузер не попадают.'),
               ),
         );
       }
@@ -2166,10 +2592,29 @@ function CollapsedItem({ title, summary, badge, children }) {
             {
               title: 'Сессии и режим',
               hint: 'Локальная сессия остаётся только на этом устройстве: не отправляется, не принимается и не удаляется отметкой с другого компьютера.',
-              meta: h(SessionGroupsCounter, null),
+              meta: h(
+                'div',
+                { className: 'dshs-sessions-card-meta', style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0, justifyContent: 'flex-end' } },
+                // M4: чип «Это новое устройство? N шагов» открывает карточку.
+                h(OnboardingChip, { open: state.onboardingOpen === true, summary: data?.onboarding }),
+                h(SessionGroupsCounter, null),
+              ),
             },
             h(SessionModesSection, null),
           ),
+
+          // --- 3b. «Это новое устройство»: онбординг нового компьютера ------
+          // Открывается чипом в шапке карточки «Сессии и режим»; шаги и блоки
+          // «Песочница и доступы»/«Секреты» приносит GET /onboarding.
+          state.onboardingOpen === true
+            ? h(OnboardingCard, {
+                data: state.onboarding,
+                busy: state.onboardingBusy === true,
+                error: state.onboardingError ?? '',
+                notice: state.onboardingNotice ?? '',
+                confirm: state.onboardingConfirm ?? '',
+              })
+            : null,
 
           // --- 4. «Резервный канал»: выбор режима, поля, сверка -----------
           h(
@@ -3302,7 +3747,10 @@ function CollapsedItem({ title, summary, badge, children }) {
     // Хранилище состояния синхронизации на уровне модуля: его читают и
     // карточка плагина, и строка в подвале боковой панели.
     const listeners = new Set();
-    let snapshot = { loading: true, data: null, error: '', busy: '', notice: '', plan: null, planError: '', planNote: '' };
+    let snapshot = { loading: true, data: null, error: '', busy: '', notice: '', plan: null, planError: '', planNote: '', onboarding: null, onboardingOpen: false, onboardingBusy: false, onboardingError: '', onboardingNotice: '', onboardingConfirm: '' };
+    // Мостик к действиям онбординга для headless-тестов: сами функции живут
+    // в замыкании apply(ctx), наружу их отдаёт этот объект.
+    let onboardingActions = null;
     // Состояние обновления для headless-тестов рендера: в живом интерфейсе
     // всегда null и заполняется ответом маршрута /api/dsh-sync/update.
     let updateOverride = null;
@@ -6466,6 +6914,39 @@ function CollapsedItem({ title, summary, badge, children }) {
         for (const listener of listeners) listener();
       },
       readHostState: () => snapshot.data,
+      // M4: отчёт онбординга и открытая карточка «Это новое устройство».
+      // В живом интерфейсе отчёт приносит GET /api/dsh-sync/onboarding.
+      setOnboarding: (value) => {
+        snapshot = { ...snapshot, onboarding: value ?? null };
+        for (const listener of listeners) listener();
+      },
+      readOnboarding: () => snapshot.onboarding,
+      setOnboardingOpen: (value) => {
+        snapshot = {
+          ...snapshot,
+          onboardingOpen: value === true,
+          onboardingBusy: false,
+          onboardingError: '',
+          onboardingNotice: '',
+          onboardingConfirm: '',
+        };
+        for (const listener of listeners) listener();
+      },
+      readOnboardingOpen: () => snapshot.onboardingOpen === true,
+      readOnboardingConfirm: () => snapshot.onboardingConfirm,
+      // Действия шагов онбординга: только существующие маршруты плагина.
+      runOnboardingAction: (route) => onboardingActions?.run?.(route),
+      refreshOnboarding: () => onboardingActions?.refresh?.(),
+      onboardingCounts: (report) => {
+        const steps = Array.isArray(report?.steps) ? report.steps : [];
+        return {
+          ready: report?.ready === true,
+          count: Number(report?.count ?? 0) || 0,
+          warn: steps.filter((step) => step.status === 'warn').length,
+          fail: steps.filter((step) => step.status === 'fail').length,
+          todo: steps.filter((step) => step.status === 'todo').length,
+        };
+      },
       // Черновик настроек для headless-тестов перестроенной страницы: бейдж
       // «есть изменения» и кнопка «Сохранить» рядом с полями.
       setDraft: (patch) => {
