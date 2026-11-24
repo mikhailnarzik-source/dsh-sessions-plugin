@@ -29,11 +29,17 @@ window.__ModuleLoader__.load({
     const UPDATE_APPLY_PATH = '/api/dsh-sync/update/apply';
     const SESSION_MODE_PATH = '/api/dsh-sync/session-mode';
     const SESSION_CLOUD_COPY_PATH = '/api/dsh-sync/session-cloud-copy';
+    // «Убрать облачные копии локальных сессий»: миграция «локальная навсегда».
+    const LOCAL_ONLY_MIGRATION_PATH = '/api/dsh-sync/local-only-migration';
     const PROFILE_PATH = '/api/dsh-sync/profile';
     const PROFILE_APPLY_PATH = '/api/dsh-sync/profile/apply';
     const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings';
     const TOMBSTONES_PATH = '/api/dsh-sync/tombstones';
     const RESTORE_PATH = '/api/dsh-sync/restore';
+    // «Найти дубли»: только чтение — группы копий и канонический id.
+    const DUPLICATES_PATH = '/api/dsh-sync/duplicates';
+    // «Убрать дубли в карантин»: подтверждённое действие (канонические не трогаем).
+    const DUPLICATES_QUARANTINE_PATH = '/api/dsh-sync/duplicates/quarantine';
     const SECONDARY_INIT_PATH = '/api/dsh-sync/secondary-init';
     const shortSha = (value) => (value === null || value === undefined || value === '' ? '?' : String(value).slice(0, 7));
 
@@ -498,6 +504,38 @@ window.__ModuleLoader__.load({
             '.dshs-ws-default-row>span{flex:1 1 160px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
             '.dshs-cloud-copy{display:flex;flex-direction:column;gap:4px;min-width:0;padding:7px 9px;border-radius:8px;border:1px dashed var(--dsw-alias-border-l3,rgba(128,128,128,0.35));background:rgba(247,190,76,0.08)}',
             '.dshs-cloud-copy-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}',
+            // Переключатель режима в шапке сессии: чип 32 px, меню и тост
+            // рисуются порталом в body (слот шапки обрезает выпадающие блоки).
+            '.dshs-mode-toggle{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:10px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,0.35));background:transparent;color:inherit;font:inherit;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer;min-width:0;max-width:100%}',
+            '.dshs-mode-toggle:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16));border-color:var(--dsw-alias-border-l4,rgba(150,150,150,0.65))}',
+            '.dshs-mode-toggle:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:2px}',
+            '.dshs-mode-toggle:disabled{opacity:.55;cursor:default}',
+            '.dshs-mode-toggle[data-mode="local"]{background:rgba(128,128,128,0.12);border-color:rgba(128,128,128,0.45)}',
+            '.dshs-mode-toggle-chev{font-size:10px;opacity:.7}',
+            '.dshs-mode-layer{position:fixed;inset:0;z-index:70;display:flex;align-items:flex-start;justify-content:flex-end;padding:64px 16px 16px;background:transparent}',
+            '.dshs-mode-menu{display:flex;flex-direction:column;gap:10px;box-sizing:border-box;width:min(340px,calc(100vw - 24px));min-width:0;max-height:min(70vh,520px);overflow-y:auto;overscroll-behavior:contain;padding:14px 16px;border-radius:14px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.28));background:var(--dsw-alias-bg-base,#22242a);color:var(--dsw-alias-label-primary,inherit);box-shadow:0 18px 50px rgba(0,0,0,0.45)}',
+            '.dshs-mode-menu-title{font-size:13.5px;font-weight:600;line-height:1.3}',
+            '.dshs-mode-menu-text{font-size:12px;line-height:1.5;text-align:justify;hyphens:auto;overflow-wrap:normal;word-break:normal;color:var(--dsw-alias-label-secondary,rgba(128,128,128,0.95))}',
+            '.dshs-mode-menu-warn{font-size:12px;line-height:1.5;padding:9px 11px;border-radius:10px;border:1px solid rgba(247,190,76,0.45);background:rgba(247,190,76,0.12)}',
+            '.dshs-mode-menu-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
+            '.dshs-mode-menu-actions button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 14px;border-radius:10px;font:inherit;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer;border:1px solid var(--dsw-alias-border-l4,rgba(128,128,128,0.35));background:transparent;color:inherit;min-width:0;max-width:100%}',
+            '.dshs-mode-menu-actions button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16))}',
+            '.dshs-mode-menu-actions button:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:2px}',
+            '.dshs-mode-menu-actions button[data-variant="primary"]{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 18%,transparent);color:var(--dsw-alias-brand-primary,#4a7dcc)}',
+            '.dshs-mode-menu-actions button:disabled{opacity:.55;cursor:default}',
+            '.dshs-mode-toast{position:fixed;right:16px;bottom:16px;z-index:85;display:flex;align-items:center;gap:10px;box-sizing:border-box;max-width:min(420px,calc(100vw - 24px));padding:10px 12px;border-radius:12px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.28));background:var(--dsw-alias-bg-base,#22242a);color:var(--dsw-alias-label-primary,inherit);box-shadow:0 12px 36px rgba(0,0,0,0.42);font-size:12.5px;line-height:1.4}',
+            '.dshs-mode-toast-text{flex:1 1 auto;min-width:0}',
+            '.dshs-mode-toast-left{font-size:11.5px;opacity:.75;white-space:nowrap}',
+            '.dshs-mode-toast button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 10px;border-radius:10px;border:1px solid var(--dsw-alias-border-l4,rgba(128,128,128,0.35));background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer;flex:0 0 auto}',
+            '.dshs-mode-toast button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16))}',
+            '.dshs-mode-toast button:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:2px}',
+            '@media (max-width:640px){.dshs-mode-layer{padding:56px 10px 10px;justify-content:center}.dshs-mode-toast{left:10px;right:10px;max-width:none}}',
+            // «Дубли»: карточка поиска, список групп и действия карантина.
+            '.dshs-duplicates-card{display:flex;flex-direction:column;gap:8px;min-width:0;padding:10px 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.05)}',
+            '.dshs-duplicates-groups{display:flex;flex-direction:column;gap:6px;min-width:0;max-height:260px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}',
+            '.dshs-duplicates-group{display:flex;flex-direction:column;gap:2px;min-width:0;padding:8px 10px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.04)}',
+            '.dshs-duplicates-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
+            '.dshs-duplicates-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
             // «Удалённые»: строки карантина и кнопка восстановления.
             '.dshs-deleted-list{display:flex;flex-direction:column;gap:4px;min-width:0;max-height:260px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}',
             '.dshs-deleted-row{display:flex;align-items:center;gap:10px;min-width:0;padding:7px 10px;border-radius:10px;border:1px solid transparent}',
@@ -1170,6 +1208,8 @@ function CollapsedItem({ title, summary, badge, children }) {
 
         // Подтверждение удалений — второй клик в карточке «Проверка».
         const [confirmDeletions, setConfirmDeletions] = React.useState(false);
+        // Подтверждение карантина дублей — второй клик, как у удалений.
+        const [confirmDuplicates, setConfirmDuplicates] = React.useState(false);
 
         /**
          * «Проверить»: сравнить локальные сессии с зеркалом по id и хвостам
@@ -1211,9 +1251,71 @@ function CollapsedItem({ title, summary, badge, children }) {
           }
         };
 
+        /**
+         * «Найти дубли»: группы копий одной сессии с разными id (локально,
+         * зеркало, карантин). Только чтение — ничего не удаляет.
+         */
+        const findDuplicates = async () => {
+          setConfirmDuplicates(false);
+          publish({ busy: 'duplicates', duplicatesError: '', duplicatesNote: '' });
+          try {
+            const result = await post(DUPLICATES_PATH, {});
+            if (result?.ok === true) {
+              publish({ busy: '', duplicates: result, duplicatesNote: result.message ?? '' });
+            } else {
+              publish({ busy: '', duplicatesError: result?.message ?? 'Не удалось найти дубли' });
+            }
+          } catch (error) {
+            publish({ busy: '', duplicatesError: `Поиск дублей не удался: ${explain(error)}` });
+          }
+        };
+
+        /** id лишних копий из отчёта — их и отправляем в карантин. */
+        const duplicateLoserIds = () => {
+          const ids = [];
+          for (const group of Array.isArray(state.duplicates?.groups) ? state.duplicates.groups : []) {
+            for (const id of group.supersededIds ?? []) {
+              if (typeof id === 'string' && id !== '' && !ids.includes(id)) ids.push(id);
+            }
+          }
+          return ids;
+        };
+
+        /**
+         * «Убрать дубли в карантин»: лишние копии уходят в `_deleted` с причиной
+         * duplicate, канонические остаются. После успеха план и «Удалённые»
+         * обновляются, чтобы списки не расходились с диском.
+         */
+        const applyDuplicateQuarantine = async () => {
+          setConfirmDuplicates(false);
+          const ids = duplicateLoserIds();
+          publish({ busy: 'duplicates-quarantine', duplicatesError: '', duplicatesNote: '' });
+          try {
+            const result = await post(DUPLICATES_QUARANTINE_PATH, { confirm: true, ...(ids.length > 0 ? { ids } : {}) });
+            if (result?.ok === true) {
+              publish({
+                busy: '',
+                notice: result.message || 'Лишние копии убраны в карантин',
+                duplicates: null,
+                duplicatesNote: result.message ?? '',
+                plan: null,
+              });
+              await refreshTombstones(true);
+              await checkPlan();
+            } else {
+              publish({ busy: '', duplicatesError: result?.message ?? 'Не удалось убрать дубли в карантин' });
+            }
+          } catch (error) {
+            publish({ busy: '', duplicatesError: `Дубли не убраны: ${explain(error)}` });
+          }
+        };
+
         const checks = data?.checks ?? [];
         const busy = state.busy !== '';
         const plan = state.plan;
+        // «Найти дубли»: отчёт последнего поиска и его подтверждение.
+        const duplicates = state.duplicates;
+        const duplicateGroups = Array.isArray(duplicates?.groups) ? duplicates.groups : [];
         const status = data?.status;
         const last = data?.lastRun;
         // Вид последней ошибки и число неудач — из summary (контракт с host).
@@ -1328,6 +1430,14 @@ function CollapsedItem({ title, summary, badge, children }) {
                   + '.',
                 )
               : null,
+            // D2: импорт-дубли — копии не создавались, причина `duplicate`.
+            (last?.duplicatesSkipped ?? 0) > 0
+              ? h(
+                  'span',
+                  { style: S.note },
+                  `Копий-дублей при импорте пропущено: ${last.duplicatesSkipped} — такая сессия уже была локально.`,
+                )
+              : null,
             // Отложенные удаления: push их не выполняет. Подробный список и
             // кнопка подтверждения — в карточке «Проверка» ниже.
             (last?.skippedDeletions?.removed ?? last?.requireConfirmation?.removed ?? 0) > 0
@@ -1393,8 +1503,24 @@ function CollapsedItem({ title, summary, badge, children }) {
               plan !== null && plan !== undefined
                 ? h('span', { style: S.meta }, `Проверено: ${new Date(plan.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`)
                 : null,
+              // D2/M1: отдельная кнопка «Найти дубли» — группы копий с разными id.
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: S.button,
+                  disabled: busy,
+                  title: 'Найти копии одной сессии с разными id: локально, в зеркале и в карантине',
+                  onClick: () => void findDuplicates(),
+                },
+                state.busy === 'duplicates' ? 'Ищу дубли…' : 'Найти дубли',
+              ),
+              duplicates !== null && duplicates !== undefined
+                ? h('span', { style: S.meta }, `Дублей: ${duplicates.duplicates ?? 0} · групп: ${duplicates.count ?? 0}`)
+                : null,
             ),
             state.planError ? h('div', { style: S.error }, state.planError) : null,
+            state.duplicatesError ? h('div', { style: S.error }, state.duplicatesError) : null,
             plan === null || plan === undefined
               ? h(
                   'span',
@@ -1425,7 +1551,115 @@ function CollapsedItem({ title, summary, badge, children }) {
                     h(PlanBucket, { label: 'Локально новее', count: plan.counts?.localAhead ?? 0, bytes: plan.sizes?.localAhead ?? 0, items: plan.buckets?.localAhead ?? [] }),
                     h(PlanBucket, { label: 'В зеркале новее', count: plan.counts?.cloudAhead ?? 0, bytes: plan.sizes?.cloudAhead ?? 0, items: plan.buckets?.cloudAhead ?? [] }),
                     h(PlanBucket, { label: 'Расхождения', count: plan.counts?.conflicts ?? 0, bytes: plan.sizes?.conflicts ?? 0, items: plan.buckets?.conflicts ?? [] }),
+                    // Седьмая корзина «Дубли»: копии одной сессии с разными id.
+                    h(PlanBucket, { label: 'Дубли', count: plan.counts?.duplicates ?? 0, bytes: plan.sizes?.duplicates ?? 0, items: plan.buckets?.duplicates ?? [] }),
                   ),
+                  // Группы дублей из плана: канонический id и лишние копии.
+                  (plan.duplicates?.groups?.length ?? 0) > 0
+                    ? h(
+                        CollapsedItem,
+                        {
+                          title: 'Группы дублей',
+                          summary: `${plan.duplicates.count ?? 0} · канонические помечены «=»`,
+                          badge: String(plan.duplicates.count ?? 0),
+                        },
+                        h(
+                          'div',
+                          { className: 'dshs-duplicates-groups' },
+                          ...(plan.duplicates.groups ?? []).slice(0, 20).map((group, index) => h(
+                            'div',
+                            { key: `pg${index}`, className: 'dshs-duplicates-group' },
+                            h(
+                              'span',
+                              { className: 'dshs-duplicates-head' },
+                              h('span', { style: { fontSize: 11.5, fontWeight: 600 } }, `Канонический: ${group.canonicalId}${(group.children ?? 0) > 0 ? ` · детей: ${group.children}` : ''}`),
+                              h('span', { style: S.meta }, group.match === 'contentHash' ? 'по содержимому' : 'по событиям и размеру'),
+                            ),
+                            ...(group.sessions ?? []).filter(session => session.canonical !== true).map(session => h(
+                              'span',
+                              { key: session.id, style: { fontSize: 11.5, opacity: 0.8, overflowWrap: 'anywhere' } },
+                              `− ${session.id}${session.side !== undefined && session.side !== '' ? ` [${session.side === 'both' ? 'локально и в зеркале' : session.side === 'mirror' ? 'в зеркале' : session.side === 'local' ? 'локально' : 'в карантине'}]` : ''}`,
+                            )),
+                          )),
+                          (plan.duplicates?.groups?.length ?? 0) > 20
+                            ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё групп: ${plan.duplicates.groups.length - 20}`)
+                            : null,
+                        ),
+                      )
+                    : null,
+                  // Результат «Найти дубли»: подробно и с подтверждением действия.
+                  duplicates !== null && duplicates !== undefined
+                    ? h(
+                        'div',
+                        { className: 'dshs-duplicates-card' },
+                        h(
+                          'span',
+                          { style: (duplicates.duplicates ?? 0) > 0 ? S.note : S.ok },
+                          duplicates.duplicates > 0
+                            ? `Найдено лишних копий: ${duplicates.duplicates} (групп: ${duplicates.count}). Каноническая копия каждой группы останется.`
+                            : (duplicates.message ?? 'Дублей нет: копий одной сессии с разными id не найдено.'),
+                        ),
+                        duplicateGroups.length > 0
+                          ? h(
+                              'div',
+                              { className: 'dshs-duplicates-groups' },
+                              ...duplicateGroups.slice(0, 20).map((group, index) => h(
+                                'div',
+                                { key: `dg${index}`, className: 'dshs-duplicates-group' },
+                                h(
+                                  'span',
+                                  { className: 'dshs-duplicates-head' },
+                                  h('span', { style: { fontSize: 11.5, fontWeight: 600 } }, `Канонический: ${group.canonicalId}${(group.children ?? 0) > 0 ? ` · детей: ${group.children}` : ''}`),
+                                  h('span', { style: S.meta }, `лишних: ${(group.supersededIds ?? []).length}`),
+                                ),
+                                ...(group.sessions ?? []).map(session => h(
+                                  'span',
+                                  { key: session.id, style: { fontSize: 11.5, opacity: session.canonical === true ? 0.95 : 0.75, overflowWrap: 'anywhere' } },
+                                  `${session.canonical === true ? '= каноническая' : '− лишняя'} ${session.id}`,
+                                )),
+                              )),
+                              duplicateGroups.length > 20
+                                ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё групп: ${duplicateGroups.length - 20}`)
+                                : null,
+                            )
+                          : null,
+                        duplicateGroups.length > 0
+                          ? (confirmDuplicates
+                            ? h(
+                                'div',
+                                { className: 'dshs-duplicates-actions' },
+                                h('span', { style: S.hint }, `Подтвердите: ${duplicates.duplicates ?? duplicateLoserIds().length} лишних копий уйдут в карантин на 30 дней. Канонические копии останутся.`),
+                                h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    style: S.danger,
+                                    disabled: busy,
+                                    onClick: () => void applyDuplicateQuarantine(),
+                                  },
+                                  state.busy === 'duplicates-quarantine' ? 'Убираю…' : `Подтвердить карантин (${duplicates.duplicates ?? duplicateLoserIds().length})`,
+                                ),
+                                h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => setConfirmDuplicates(false) }, 'Отмена'),
+                              )
+                            : h(
+                                'div',
+                                { className: 'dshs-duplicates-actions' },
+                                h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    style: S.danger,
+                                    disabled: busy,
+                                    title: 'Перенести лишние копии в карантин на 30 дней; канонические останутся',
+                                    onClick: () => setConfirmDuplicates(true),
+                                  },
+                                  `Убрать дубли в карантин (${duplicates.duplicates ?? duplicateLoserIds().length})`,
+                                ),
+                                h('span', { style: S.hint }, 'Копии не удаляются безвозвратно: их можно вернуть в карточке «Удалённые».'),
+                              ))
+                          : null,
+                      )
+                    : null,
                   (plan.localSkipped ?? 0) > 0
                     ? h('span', { style: S.note }, `Локальных сессий не участвует в обмене: ${plan.localSkipped} (режим «локальная»).`)
                     : null,
@@ -2634,6 +2868,20 @@ function CollapsedItem({ title, summary, badge, children }) {
         console.error('[dsh-sync] пункт меню сессии недоступен:', error);
       }
 
+      // Переключатель «Облачная / Локальная» в шапке открытой сессии. Слот —
+      // список действий сессии (session-scoped): в него передаётся sessionId.
+      try {
+        ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+          name: 'conversation.session.header.actions',
+          id: 'dsh-sync.mode',
+          order: 35,
+          locale: NS,
+          inject: (sessionId) => ({ sessionId: String(sessionId ?? '') }),
+        }, SessionModeToggle));
+      } catch (error) {
+        console.error('[dsh-sync] переключатель режима в шапке сессии недоступен:', error);
+      }
+
 
 
       // Плашка над полем ввода: состояние видно в основном окне.
@@ -3311,6 +3559,267 @@ function CollapsedItem({ title, summary, badge, children }) {
       ]);
     }
 
+    // --- переключатель режима в шапке открытой сессии ----------------------
+    // «Локальная» — обещание «данные живут только здесь»: облачная копия уходит
+    // в карантин, объявление пишется в зеркальный local-only.json и само не
+    // снимается. Первое переключение спрашивает подтверждение один раз; после
+    // него 10 секунд работает «Отменить». Меню и тост — порталом в body: слот
+    // шапки обрезает выпадающие блоки.
+    const LOCAL_ONLY_CONFIRM_KEY = 'dsh-sync.localOnlyConfirmed';
+
+    function localOnlyConfirmed() {
+      try {
+        return globalThis.localStorage?.getItem(LOCAL_ONLY_CONFIRM_KEY) === '1';
+      } catch {
+        return false;
+      }
+    }
+
+    function rememberLocalOnlyConfirmed() {
+      try {
+        globalThis.localStorage?.setItem(LOCAL_ONLY_CONFIRM_KEY, '1');
+      } catch {
+        // localStorage недоступен — подтверждение спросим ещё раз
+      }
+    }
+
+    function portalToBody(node) {
+      try {
+        return createPortal(node, document.body);
+      } catch {
+        return node;
+      }
+    }
+
+    /**
+     * Тост с действием «Отменить»: живёт 10 секунд (и сам закрывается).
+     * `onUndo` возвращает прежний режим, `onClose` убирает тост.
+     */
+    function LocalOnlyToast({ text, seconds = 10, onUndo, onClose }) {
+      const [left, setLeft] = React.useState(seconds);
+      React.useEffect(() => {
+        const timer = setInterval(() => setLeft((value) => (value > 0 ? value - 1 : 0)), 1000);
+        return () => clearInterval(timer);
+      }, []);
+      React.useEffect(() => {
+        if (left <= 0 && typeof onClose === 'function') onClose();
+      }, [left]);
+      return portalToBody(h('div', { className: 'dshs-mode-toast', role: 'status', 'aria-live': 'polite' }, [
+        h('span', { key: 'text', className: 'dshs-mode-toast-text' }, String(text ?? '')),
+        h('span', { key: 'left', className: 'dshs-mode-toast-left' }, `${left} с`),
+        typeof onUndo === 'function'
+          ? h('button', { key: 'undo', type: 'button', onClick: () => onUndo() }, 'Отменить')
+          : null,
+        typeof onClose === 'function'
+          ? h('button', { key: 'close', type: 'button', 'aria-label': 'Закрыть', onClick: () => onClose() }, '×')
+          : null,
+      ]));
+    }
+
+    /**
+     * Мини-меню режима: объясняет разницу и предлагает переключение.
+     * `confirm` — повторный шаг «точно убрать копию из облака» (один раз).
+     */
+    function SessionModeMenu({ mode = 'cloud', declared = false, busy = false, confirm = false, note = '', onChoose, onConfirm, onCancel, onClose }) {
+      const isLocal = mode === 'local';
+      const close = () => {
+        if (typeof onClose === 'function') onClose();
+      };
+      const action = (label, variant, handler, key) => h('button', {
+        key,
+        type: 'button',
+        role: 'menuitem',
+        'data-variant': variant,
+        disabled: busy,
+        onClick: handler,
+      }, label);
+      const actions = confirm
+        ? [
+            action(busy ? 'Убираем…' : 'Убрать копию из облака', 'primary', () => {
+              if (typeof onConfirm === 'function') onConfirm();
+            }, 'confirm'),
+            action('Отмена', 'secondary', () => {
+              if (typeof onCancel === 'function') onCancel();
+            }, 'cancel'),
+          ]
+        : isLocal
+          ? [
+              action(busy ? 'Отправляем…' : 'Сделать облачной', 'primary', () => {
+                if (typeof onChoose === 'function') onChoose('cloud');
+              }, 'to-cloud'),
+              action('Закрыть', 'secondary', close, 'close'),
+            ]
+          : [
+              action(busy ? 'Переключаем…' : 'Сделать локальной', 'primary', () => {
+                if (typeof onChoose === 'function') onChoose('local');
+              }, 'to-local'),
+              action('Закрыть', 'secondary', close, 'close'),
+            ];
+      const menu = h(
+        'div',
+        {
+          className: 'dshs-mode-layer',
+          role: 'presentation',
+          onClick: close,
+        },
+        h(
+          'div',
+          {
+            className: 'dshs-mode-menu',
+            role: 'menu',
+            'aria-label': 'Режим сессии',
+            onClick: (event) => event.stopPropagation(),
+          },
+          [
+            h('div', { key: 'title', className: 'dshs-mode-menu-title' }, isLocal ? 'Локальная сессия' : 'Облачная сессия'),
+            h('div', { key: 'text', className: 'dshs-mode-menu-text' }, isLocal
+              ? 'Сессия остаётся только на этом устройстве: не отправляется в облако и не принимается из него. Другие устройства её не увидят.'
+              : 'Сессия синхронизируется между устройствами: её можно открыть на другом компьютере или восстановить из облака.'),
+            isLocal && declared
+              ? h('div', { key: 'declared', className: 'dshs-mode-menu-warn' }, 'Объявление «локальная навсегда» записано в зеркало: другие устройства эту сессию не отправят и не примут.')
+              : null,
+            confirm
+              ? h('div', { key: 'confirm', className: 'dshs-mode-menu-warn' }, 'Облачная копия уйдёт в карантин на 30 дней, а объявление «локальная навсегда» останется. Вернуть сессию в облако можно кнопкой «Сделать облачной».')
+              : null,
+            h('div', { key: 'actions', className: 'dshs-mode-menu-actions' }, actions),
+            note !== '' ? h('div', { key: 'note', className: 'dshs-mode-menu-text' }, String(note)) : null,
+          ],
+        ),
+      );
+      return portalToBody(menu);
+    }
+
+    /**
+     * Переключатель «Облачная / Локальная» в шапке открытой сессии.
+     * Подтверждение — один раз на устройство; после переключения в локальную
+     * показывается тост «Отменить» (10 секунд) с возвратом в облако.
+     */
+    function SessionModeToggle(props) {
+      const sessionId = String(props?.sessionId ?? '');
+      const data = useSessionStates();
+      const session = (data?.sessions ?? []).find((item) => item.id === sessionId);
+      const mode = session?.mode === 'local' ? 'local' : 'cloud';
+      const isLocal = mode === 'local';
+      const declared = session?.declared === true;
+      const [open, setOpen] = React.useState(false);
+      const [confirm, setConfirm] = React.useState(false);
+      const [busy, setBusy] = React.useState(false);
+      const [note, setNote] = React.useState('');
+      const [toast, setToast] = React.useState(null);
+      React.useEffect(() => {
+        // У только что открытой сессии могло не быть снимка — просим обновить.
+        requestSessionStatesRefresh();
+      }, [sessionId]);
+
+      const apply = async (target) => {
+        setBusy(true);
+        setNote('');
+        try {
+          const result = await post(SESSION_MODE_PATH, {
+            id: sessionId,
+            mode: target,
+            ...(target === 'cloud' ? { push: true } : {}),
+          });
+          await refreshSessionStates(true);
+          setOpen(false);
+          setConfirm(false);
+          if (target === 'local') {
+            const removed = Number(result?.localOnly?.quarantined ?? 0);
+            setToast({
+              text: removed > 0
+                ? 'Сессия локальная навсегда: облачная копия убрана в карантин'
+                : 'Сессия локальная навсегда: облачной копии не было',
+              undo: true,
+            });
+          } else {
+            setToast({ text: 'Сессия снова облачная: объявление снято', undo: false });
+          }
+        } catch (error) {
+          setNote(`Не удалось переключить режим: ${explain(error)}`);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const choose = (target) => {
+        if (target === mode) {
+          setOpen(false);
+          return;
+        }
+        if (target === 'local' && !localOnlyConfirmed()) {
+          setConfirm(true);
+          setNote('');
+          return;
+        }
+        void apply(target);
+      };
+
+      const confirmLocal = () => {
+        rememberLocalOnlyConfirmed();
+        void apply('local');
+      };
+
+      const label = isLocal ? 'Локальная' : 'Облачная';
+      const title = isLocal
+        ? (declared ? 'Режим сессии: локальная навсегда' : 'Режим сессии: локальная')
+        : 'Режим сессии: облачная';
+      return h('span', { style: { display: 'inline-flex', alignItems: 'center', minWidth: 0 } }, [
+        h('button', {
+          key: 'toggle',
+          type: 'button',
+          className: 'dshs-mode-toggle',
+          'data-mode': mode,
+          'aria-haspopup': 'menu',
+          'aria-expanded': open ? 'true' : 'false',
+          title,
+          disabled: busy || sessionId === '',
+          onClick: () => {
+            setOpen((value) => !value);
+            setConfirm(false);
+            setNote('');
+          },
+        }, [
+          h('span', { key: 'icon', style: { display: 'inline-flex', color: 'inherit' } }, isLocal ? h(LocalModeIcon, { size: 13 }) : h(CloudModeIcon, { size: 13 })),
+          h('span', { key: 'label' }, label),
+          h('span', { key: 'chev', className: 'dshs-mode-toggle-chev', 'aria-hidden': 'true' }, '▾'),
+        ]),
+        open
+          ? h(SessionModeMenu, {
+              key: 'menu',
+              mode,
+              declared,
+              busy,
+              confirm,
+              note,
+              onChoose: choose,
+              onConfirm: confirmLocal,
+              onCancel: () => {
+                setConfirm(false);
+                setNote('');
+              },
+              onClose: () => {
+                setOpen(false);
+                setConfirm(false);
+              },
+            })
+          : null,
+        toast !== null
+          ? h(LocalOnlyToast, {
+              key: 'toast',
+              text: toast.text,
+              seconds: 10,
+              onUndo: toast.undo === true
+                ? () => {
+                    setToast(null);
+                    void apply('cloud');
+                  }
+                : undefined,
+              onClose: () => setToast(null),
+            })
+          : null,
+      ]);
+    }
+
     /** Секция панели: список сессий, режимы, фильтр и массовое переключение. */
     function SessionModesSection() {
       const data = useSessionStates();
@@ -3322,6 +3831,12 @@ function CollapsedItem({ title, summary, badge, children }) {
       const [workspaceBusy, setWorkspaceBusy] = React.useState('');
       const [cloudConfirm, setCloudConfirm] = React.useState('');
       const [note, setNote] = React.useState('');
+      // Миграция «локальная навсегда»: убрать оставшиеся облачные копии
+      // локальных сессий (счётчик приходит из /sessions.localOnly.migration).
+      const [migrationConfirm, setMigrationConfirm] = React.useState(false);
+      const localOnlyInfo = data?.localOnly ?? {};
+      const migrationCount = Number(localOnlyInfo?.migration?.count ?? 0);
+      const declaredCount = Number(localOnlyInfo?.count ?? 0);
 
       const visible = sessions.filter((session) => {
         if (filter === 'cloud') return session.mode !== 'local';
@@ -3400,6 +3915,27 @@ function CollapsedItem({ title, summary, badge, children }) {
           await refreshSessionStates(true);
         } catch (error) {
           setNote(`Не удалось удалить копию: ${explain(error)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      // Миграция «локальная навсегда»: убрать оставшиеся облачные копии
+      // локальных сессий. Подтверждение — второй клик, как и у прочих удалений.
+      const runMigration = async () => {
+        setBusy('migration');
+        setNote('');
+        try {
+          const result = await post(LOCAL_ONLY_MIGRATION_PATH, { confirm: true });
+          if (result?.ok === true) {
+            setNote(`Облачных копий локальных сессий убрано: ${result.removed ?? 0}. Сессии остались локальными.${result.warning ? ` ${result.warning}` : ''}`);
+            setMigrationConfirm(false);
+          } else {
+            setNote(result?.message ?? 'Не удалось убрать облачные копии.');
+          }
+          await refreshSessionStates(true);
+        } catch (error) {
+          setNote(`Не удалось убрать облачные копии: ${explain(error)}`);
         } finally {
           setBusy('');
         }
@@ -3498,6 +4034,48 @@ function CollapsedItem({ title, summary, badge, children }) {
                 },
                 `Привязать непривязанные (${data?.unattached ?? 0})`,
               ),
+        ),
+        // «Убрать облачные копии локальных сессий»: миграция «локальная
+        // навсегда». Кнопка активна, когда в зеркале ещё лежат копии локальных
+        // сессий; подтверждение — второй клик в этом же блоке.
+        h(
+          'div',
+          { className: 'dshs-cloud-copy' },
+          h('span', { style: S.label }, 'Локальные навсегда'),
+          h('span', { style: S.hint }, declaredCount > 0
+            ? `Объявлено локальными навсегда: ${declaredCount}. Объявление записано в зеркало и переживает перезапуск, pull и reset.`
+            : 'Сессия, переключённая в локальную, остаётся только на этом устройстве — навсегда, пока её не вернут в облако.'),
+          h(
+            'div',
+            { className: 'dshs-cloud-copy-actions' },
+            migrationConfirm
+              ? [
+                  h('button', {
+                    key: 'confirm',
+                    type: 'button',
+                    style: S.danger,
+                    disabled: busy !== '',
+                    onClick: () => void runMigration(),
+                  }, `Да, убрать копии (${migrationCount})`),
+                  h('button', {
+                    key: 'cancel',
+                    type: 'button',
+                    style: S.buttonSmall,
+                    disabled: busy !== '',
+                    onClick: () => setMigrationConfirm(false),
+                  }, 'Отмена'),
+                ]
+              : h('button', {
+                  key: 'ask',
+                  type: 'button',
+                  style: S.buttonSmall,
+                  disabled: busy !== '' || migrationCount === 0,
+                  onClick: () => setMigrationConfirm(true),
+                }, `Убрать облачные копии локальных сессий (${migrationCount})`),
+            h('span', { style: S.meta }, migrationCount > 0
+              ? 'эти сессии уже локальные, но копия в облаке ещё есть: уберём её в карантин 30 дней'
+              : 'копий локальных сессий в облаке нет'),
+          ),
         ),
         workspaces.length > 0
           ? h(
@@ -5207,6 +5785,13 @@ function CollapsedItem({ title, summary, badge, children }) {
         for (const listener of listeners) listener();
       },
       readPlan: () => snapshot.plan,
+      // Отчёт «Найти дубли» для тестов карточки: в живом интерфейсе его
+      // приносит маршрут /api/dsh-sync/duplicates по кнопке.
+      setDuplicates: (value) => {
+        snapshot = { ...snapshot, duplicates: value ?? null };
+        for (const listener of listeners) listener();
+      },
+      readDuplicates: () => snapshot.duplicates,
       setTombstones: (value) => {
         tombstonesState.data = value ?? null;
         tombstonesState.at = Date.now();
@@ -5227,6 +5812,11 @@ function CollapsedItem({ title, summary, badge, children }) {
       formatBytesShort,
       SessionSyncIndicator,
       SyncDot,
+      // Переключатель режима в шапке сессии: для headless-тестов рендера
+      // (меню, подтверждение и тост «Отменить» без настоящего React).
+      SessionModeToggle,
+      SessionModeMenu,
+      LocalOnlyToast,
       DELETED_REASON_LABELS,
       DELETED_BY_LABELS,
     };

@@ -98,9 +98,9 @@ function runCli(args, env = {}) {
   })
 }
 
-// --- план: шесть корзин -----------------------------------------------------
+// --- план: семь корзин (дубли — M1) ----------------------------------------
 
-test('план: шесть корзин, размеры и удаления — и ничего не изменено', async () => {
+test('план: семь корзин, размеры и удаления — и ничего не изменено', async () => {
   const env = await makeEnvironment()
   try {
     const project = 'alpha'
@@ -149,10 +149,12 @@ test('план: шесть корзин, размеры и удаления — 
       localAhead: 1,
       cloudAhead: 1,
       conflicts: 1,
-    }, 'ровно по одной сессии в каждой корзине')
+      duplicates: 0,
+    }, 'ровно по одной сессии в каждой корзине; дублей нет')
     for (const bucket of PLAN_BUCKETS) {
       assert.equal(plan.buckets[bucket].length, plan.counts[bucket], `список корзины ${bucket} полный`)
-      assert.ok(plan.sizes[bucket] > 0, `размер корзины ${bucket} посчитан`)
+      // «Дубли» — справочная корзина: при нуле она пустая и без размера.
+      if (plan.counts[bucket] > 0) assert.ok(plan.sizes[bucket] > 0, `размер корзины ${bucket} посчитан`)
     }
     assert.deepEqual(plan.buckets.onlyLocal.map(item => item.id), [onlyLocal])
     assert.deepEqual(plan.buckets.onlyCloud.map(item => item.id), [onlyCloud])
@@ -194,6 +196,7 @@ test('план пустого зеркала: всё локальное, уда�
       localAhead: 0,
       cloudAhead: 0,
       conflicts: 0,
+      duplicates: 0,
     })
     assert.equal(plan.deletionCount, 0)
     assert.deepEqual(plan.deletionIds, [])

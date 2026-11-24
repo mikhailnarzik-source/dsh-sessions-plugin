@@ -30,8 +30,9 @@ import { backupProgress } from './lib/progress.mjs'
 import { apply as applyDeletePlugin } from './delete/index.js'
 import { matchProjectPath } from './lib/mirror-meta.mjs'
 import { listLocalSessions, listMirrorSessions, localSessionDir, remapTo, sessionsOfProject, splitLog } from './lib/store.mjs'
-import { canonicalRestoreId, findQuarantineProject, quarantineSupersededCopy, resolveTombstoneIds, restoredFromOf } from './lib/deletions.mjs'
+import { canonicalRestoreId, chooseCanonical, findQuarantineProject, quarantineSupersededCopy, rankCandidates, resolveTombstoneIds, restoredFromOf } from './lib/deletions.mjs'
 import { resolveSessionTitle, resolveTombstoneTitle } from './lib/titles.mjs'
+import { collectDuplicateGroups, quarantineDuplicates, quarantineSessionCopies } from './lib/sync.mjs'
 import {
   classifyBackendFailure,
   backendSupports,
@@ -63,8 +64,17 @@ import {
 } from './lib/session-modes.mjs'
 import { clearWorkspacePending, planWorkspace, readLocalWorkspaces, readWorkspacePending } from './lib/workspace.mjs'
 import { applyPendingProfile, clearPendingBrowserSettings, discardProfilePlan, readJournal, readPendingBrowserSettings, readProfileStatus, refreshProfilePlan, writeBrowserSettings } from './lib/profile.mjs'
-import { QUARANTINE_DAYS, listTombstones, readTombstones, restoreTombstones } from './lib/tombstones.mjs'
-import { cloudCopyPath, deleteCloudCopy, inspectCloudCopy } from './lib/cloud-copy.mjs'
+import { QUARANTINE_DAYS, listTombstones, readTombstones, restoreTombstones, writeTombstones } from './lib/tombstones.mjs'
+import {
+  cloudCopyPath,
+  deleteCloudCopy,
+  enforceLocalOnly,
+  inspectCloudCopy,
+  localOnlyMigrationCandidates,
+  localOnlyState,
+  makeSessionCloud,
+  makeSessionLocal,
+} from './lib/cloud-copy.mjs'
 import { createRemote } from './lib/remote.mjs'
 import { hasChanges } from './lib/git.mjs'
 
@@ -89,12 +99,18 @@ const YANDEX_CHECK_PATH = '/api/dsh-sync/yandex-check'
 const SESSION_MODE_PATH = '/api/dsh-sync/session-mode'
 // Удаление только облачной копии локальной сессии (локальная остаётся).
 const SESSION_CLOUD_COPY_PATH = '/api/dsh-sync/session-cloud-copy'
+// «Убрать облачные копии локальных сессий»: миграция режима «локальная навсегда».
+const LOCAL_ONLY_MIGRATION_PATH = '/api/dsh-sync/local-only-migration'
 const PROFILE_PATH = '/api/dsh-sync/profile'
 // «Сначала показать, потом применить»: отдельный маршрут применения плана.
 const PROFILE_APPLY_PATH = '/api/dsh-sync/profile/apply'
 const BROWSER_SETTINGS_PATH = '/api/dsh-sync/browser-settings'
 const TOMBSTONES_PATH = '/api/dsh-sync/tombstones'
 const RESTORE_PATH = '/api/dsh-sync/restore'
+// «Найти дубли»: только чтение — группы копий одной сессии и канонические id.
+const DUPLICATES_PATH = '/api/dsh-sync/duplicates'
+// «Убрать дубли в карантин»: подтверждённое действие, канонические не трогаются.
+const DUPLICATES_QUARANTINE_PATH = '/api/dsh-sync/duplicates/quarantine'
 // Сверка резервного канала: сравнить локальное с облаком и разрешить выгрузку.
 const SECONDARY_INIT_PATH = '/api/dsh-sync/secondary-init'
 
@@ -1101,6 +1117,10 @@ async function runSync(ctx, action, options = {}) {
 
   // Основной путь — отдельный процесс: в host-процессе DSH файловый обход и
   // разбор логов могут вести себя иначе, чем в обычном Node.
+  // До запуска публикуем объявления «локальная навсегда»: дочерний процесс
+  // прочитает их из зеркала, а режимы уже стоят локальными — push/pull такие
+  // сессии пропускают.
+  await prepareLocalOnlyState(home, config)
   const viaChild = await runViaChild(action, githubToken === '' ? {} : { GITHUB_TOKEN: githubToken }, { confirmPrune })
   if (viaChild !== undefined) {
     // Приём выполняет дочерний процесс, а привязать новые сессии к рабочему
@@ -1152,6 +1172,21 @@ async function runSync(ctx, action, options = {}) {
         })
       }
     }
+    if (viaChild.ok === true) {
+      // Объявления «локальная навсегда»: чужое устройство могло вернуть копию
+      // в зеркало — убираем её в карантин и коммитим. Ошибка не отменяет sync.
+      // Журнал не дублируем: запуск уже записан дочерним процессом (H10).
+      const localOnly = await reconcileLocalOnlyState(ctx, home, config)
+      if (localOnly.ok === true) {
+        viaChild.localOnly = localOnlySummary(localOnly)
+        if (localOnly.removed > 0) {
+          viaChild.message = `${viaChild.message}; облачных копий локальных сессий убрано: ${localOnly.removed}`
+        }
+        if (typeof localOnly.warning === 'string' && localOnly.warning !== '') {
+          viaChild.message = `${viaChild.message}; ${localOnly.warning}`
+        }
+      }
+    }
     return viaChild
   }
 
@@ -1184,6 +1219,8 @@ async function runSync(ctx, action, options = {}) {
       const queued = await applyWorkspacePending(ctx, config)
       if (queued > 0) messages.push(`привязано из зеркала: ${queued}`)
       if ((result.pull.localSkipped ?? 0) > 0) messages.push(`локальных сессий пропущено: ${result.pull.localSkipped}`)
+      // D2: копия уже была локально — второй не создавали, причина `duplicate`.
+      if ((result.pull.duplicatesSkipped ?? 0) > 0) messages.push(`пропущено копий-дублей при импорте: ${result.pull.duplicatesSkipped}`)
       if (result.pull.profile !== undefined && result.pull.profile.skipped !== true) {
         messages.push(`профиль: применено ${result.pull.profile.applied ?? 0}, конфликтов ${result.pull.profile.conflicts ?? 0}`)
         if (result.pull.profile.pendingPlan === true) {
@@ -1289,6 +1326,19 @@ async function runSync(ctx, action, options = {}) {
   const groups = subagentStats(result)
   // Сводка «локальная» для журнала и панели: skippedLocal + защита копий.
   const skipped = localSkipStats(result)
+  // D2: импорт-дубли — сколько копий не создали и какие id пропущены.
+  const duplicatesSkipped = Number(result.pull?.duplicatesSkipped ?? 0) || 0
+  const duplicateIds = Array.isArray(result.pull?.duplicateIds) ? result.pull.duplicateIds.slice(0, 100) : []
+  // «Локальная навсегда»: после обмена объявления могли вернуть копию в
+  // зеркало — убираем её в карантин и коммитим (идемпотентно).
+  const localOnlyResult = await reconcileLocalOnlyState(ctx, home, config)
+  const localOnly = localOnlyResult.ok === true ? localOnlySummary(localOnlyResult) : localOnlySummary({})
+  if (localOnlyResult.ok === true && localOnlyResult.removed > 0) {
+    messages.push(`облачных копий локальных сессий убрано: ${localOnlyResult.removed}`)
+  }
+  if (typeof localOnlyResult.warning === 'string' && localOnlyResult.warning !== '') {
+    messages.push(`объявления локальности: ${localOnlyResult.warning}`)
+  }
 
   const record = {
     ok: true,
@@ -1297,12 +1347,15 @@ async function runSync(ctx, action, options = {}) {
     mode: 'host',
     ...groups,
     ...skipped,
+    duplicatesSkipped,
+    duplicateIds,
+    localOnly,
     message: `дочерний Node не найден, работал host-процесс. ${messages.join('; ')}`,
     durationMs: Date.now() - started,
     removed,
     removedIds: removedIds.slice(0, 100),
     removedReason,
-    reasons: removal.reasons,
+    reasons: duplicatesSkipped > 0 ? [...new Set([...removal.reasons, 'duplicate'])] : removal.reasons,
     by: removal.by,
     removedDetails: removal.removedDetails,
     expired: removal.expired,
@@ -1322,7 +1375,7 @@ async function runSync(ctx, action, options = {}) {
       ? null
       : { pushed: result.push.secondary.pushed, committed: result.push.secondary.committed === true },
     pull: result.pull
-      ? { imported: result.pull.imported, updated: result.pull.updated, conflicts: result.pull.conflicts, attachments: result.pull.attachments?.restored ?? 0, skippedLocal: skipped.pullSkippedLocal }
+      ? { imported: result.pull.imported, updated: result.pull.updated, conflicts: result.pull.conflicts, attachments: result.pull.attachments?.restored ?? 0, skippedLocal: skipped.pullSkippedLocal, duplicatesSkipped }
       : null,
     push: result.push
       ? { pushed: result.push.pushed, committed: result.push.committed, attachments: result.push.attachments?.added ?? 0, skippedLocal: skipped.pushSkippedLocal, localMirrorProtected: skipped.localMirrorProtected }
@@ -2054,6 +2107,10 @@ async function sessionStates(ctx) {
   // Новые сессии получают умолчание своего рабочего пространства до того, как
   // индикатор решит, облачная она или локальная.
   const modes = (await applyWorkspaceDefaults(home, { workspaceIdBySession: directory.sessionWorkspace })).modes
+  // Объявления «локальная навсегда» (зеркало + домашний реестр): панель
+  // показывает бейдж «локальная навсегда» и предлагает миграцию остатка копий.
+  const localOnly = await localOnlyState({ home, config }).catch(() => ({ ids: [] }))
+  const declaredIds = new Set((Array.isArray(localOnly.ids) ? localOnly.ids : []).map(id => normalizeSessionId(id)))
   const lastRun = await readLastRunInfo(home)
   const offline = lastRun !== null && lastRun.ok === false
   const conflictIds = new Set(Array.isArray(lastRun?.conflictIds) ? lastRun.conflictIds : [])
@@ -2134,6 +2191,9 @@ async function sessionStates(ctx) {
           ? new Date(ledgerRecord.at).toISOString()
           : null,
         cloudCopy,
+        // Объявление «локальная навсегда»: сессия не уходит и не принимается
+        // ни на одном устройстве, пока объявление не снимут «Сделать облачной».
+        declared: declaredIds.has(normalizeSessionId(session.id)),
         ...(cloudCopyBytes !== undefined ? { cloudCopyBytes } : {}),
       })
     }
@@ -2141,11 +2201,24 @@ async function sessionStates(ctx) {
 
   const localCount = sessions.filter(session => session.mode === MODE_LOCAL).length
   const unattached = sessions.filter(session => session.badge === 'unattached').length
+  // Миграция: локальные сессии, у которых в зеркале осталась копия. Для них
+  // панель показывает «Убрать облачные копии локальных сессий».
+  const migrationIds = sessions
+    .filter(session => session.mode === MODE_LOCAL && session.cloudCopy === true)
+    .map(session => session.id)
+  const undeclaredLocal = sessions.filter(session => session.mode === MODE_LOCAL && session.declared !== true)
   const value = {
     ok: true,
     states,
     sessions,
     modes: { local: localCount, cloud: sessions.length - localCount },
+    localOnly: {
+      count: declaredIds.size,
+      declaredIds: [...declaredIds].slice(0, 100),
+      // Локальные сессии без объявления: ещё не «навсегда», но уже не в облаке.
+      undeclared: undeclaredLocal.length,
+      migration: { count: migrationIds.length, ids: migrationIds.slice(0, 100) },
+    },
     workspaces: directory.workspaces.map(workspace => ({
       id: workspace.id,
       title: workspace.title,
@@ -2437,6 +2510,143 @@ async function canonicalizeRestoredCopy({ home, config, item, canonical }) {
   return fixed
 }
 
+// --- M1: «Найти дубли» и карантин лишних копий -----------------------------
+
+/**
+ * «Найти дубли»: группы копий одной сессии среди локального стора, зеркала и
+ * карантина. Только чтение: ничего не меняет, сеть и журнал не трогает.
+ *
+ * @returns {Promise<object>} отчёт с группами, каноническими id и счётчиками
+ */
+async function runDuplicatesScan(ctx, payload = {}) {
+  const home = dshHome()
+  const config = await applySecret(ctx, await loadConfig(home))
+  if (Object.keys(config.projects ?? {}).length === 0) {
+    return { ok: false, action: 'duplicates', message: 'Сначала укажите проект в настройках плагина.' }
+  }
+  const project = typeof payload.project === 'string' && payload.project.trim() !== '' ? payload.project.trim() : undefined
+  return collectDuplicateGroups({ home, config, project })
+}
+
+/**
+ * «Убрать дубли в карантин»: лишние копии групп уходят в `_deleted` с причиной
+ * `duplicate`, канонические не трогаются. Требует `confirm:true` (второй клик).
+ *
+ * Если зеркало недоступно, локальное действие всё равно выполняется: файлы
+ * переносятся и метки пишутся, а повторная отправка уходит в очередь (H6).
+ *
+ * @returns {{ status: number, body: object }}
+ */
+async function runDuplicatesQuarantine(ctx, payload = {}) {
+  const home = dshHome()
+  const config = await applySecret(ctx, await loadConfig(home))
+  if (Object.keys(config.projects ?? {}).length === 0) {
+    return { status: 400, body: { ok: false, action: 'duplicates', message: 'Сначала укажите проект в настройках плагина.' } }
+  }
+  if (payload.confirm !== true) {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        action: 'duplicates',
+        code: 'confirm-required',
+        message: 'убрать дубли в карантин можно только с подтверждением (confirm:true): каноническая копия останется',
+      },
+    }
+  }
+  const ids = Array.isArray(payload.ids)
+    ? payload.ids.filter(id => typeof id === 'string' && id.trim() !== '').map(id => id.trim())
+    : undefined
+  const project = typeof payload.project === 'string' && payload.project.trim() !== '' ? payload.project.trim() : undefined
+  // Свежее зеркало — чтобы не утащить в карантин копию, которой уже нет.
+  let warning = ''
+  let remote
+  try {
+    remote = await createRemote(config)
+  } catch (error) {
+    warning = classifyBackendFailure(error, { operation: 'sync' }).message
+  }
+  if (remote !== undefined) {
+    const syncGuard = backendGuard(remote, 'sync', backendLabel(remote, config))
+    if (syncGuard.ok !== true) {
+      warning = `${syncGuard.message}; действие выполнено локально, отправка уйдёт при следующей синхронизации`
+    } else {
+      try {
+        await remote.sync()
+      } catch (error) {
+        const failure = classifyBackendFailure(error, { operation: 'sync' })
+        warning = `${failure.message}; действие выполнено локально, отправка уйдёт при следующей синхронизации`
+      }
+    }
+  }
+  let summary
+  try {
+    summary = await quarantineDuplicates({ home, config, project, ids, confirm: true })
+  } catch (error) {
+    const failure = classifyBackendFailure(error, { operation: 'sync' })
+    if (failure.unsupported) {
+      await queueFailedOperation(home, {
+        type: 'push',
+        payload: { action: 'push' },
+        error: failure.message,
+        errorKind: 'reserve',
+      })
+      return { status: 409, body: { ok: false, code: failure.code, message: `${failure.message}; действие сохранено в очереди`, queued: true } }
+    }
+    throw error
+  }
+  let committed = false
+  if (summary.quarantined > 0 && remote !== undefined) {
+    const commitGuard = backendGuard(remote, 'commit', backendLabel(remote, config))
+    if (commitGuard.ok !== true) {
+      warning = warning === '' ? commitGuard.message : `${warning}; ${commitGuard.message}`
+    } else {
+      try {
+        const commit = await remote.commit(`dsh-sync: quarantine ${summary.quarantined} duplicate copy(ies) (${config.deviceId})`)
+        committed = commit.committed === true
+      } catch (error) {
+        const failure = classifyBackendFailure(error, { operation: 'commit' })
+        warning = warning === '' ? failure.message : `${warning}; ${failure.message}`
+      }
+    }
+  }
+  if (warning !== '') {
+    // H6: отправку повторим из очереди — карантин уже состоялся.
+    await queueFailedOperation(home, {
+      type: 'push',
+      payload: { action: 'push' },
+      error: warning,
+      errorKind: 'reserve',
+    })
+  }
+  const message = summary.quarantined > 0
+    ? `в карантин убрано лишних копий: ${summary.quarantined}; канонических оставлено: ${summary.kept}${warning !== '' ? `; ${warning}` : ''}`
+    : summary.message
+  const record = {
+    ok: true,
+    at: new Date().toISOString(),
+    action: 'duplicates',
+    mode: 'host',
+    message,
+    quarantined: summary.quarantined,
+    quarantinedIds: (summary.quarantinedIds ?? []).slice(0, 100),
+    kept: summary.kept,
+    keptIds: (summary.keptIds ?? []).slice(0, 100),
+    skipped: summary.skipped ?? [],
+    bytes: summary.bytes ?? 0,
+    reasons: summary.quarantined > 0 ? ['duplicate'] : [],
+    by: summary.quarantined > 0 ? ['sync'] : [],
+    committed,
+    ...(warning !== '' ? { warning } : {}),
+  }
+  await writeLastRun(record)
+  invalidateSessionStates()
+  if (summary.quarantined > 0) {
+    pushNotice('sync', `Дубли в карантине: ${summary.quarantined}. Лишние копии можно вернуть в карточке «Удалённые».`)
+  }
+  return { status: 200, body: record }
+}
+
 /**
  * H4: восстановление возвращает тот же id.
  *
@@ -2513,6 +2723,33 @@ async function restoreSessions(ctx, payload = {}) {
     }
   }
 
+  // D4: канонический id восстановления — по рейтингу среди копий одной сессии
+  // (`rankCandidates` + `chooseCanonical`), а не просто по префиксу `session-`.
+  // Если в группе дублей есть запрошенная копия, в отчёт попадут канонический id
+  // (у него могут быть дети) и проигравшие копии.
+  const restoreRank = []
+  try {
+    const requestedKeys = new Set([...canonicalRequested, ...storedIds].map(id => canonicalRestoreId(id)))
+    const report = await collectDuplicateGroups({ home, config })
+    for (const group of report.groups ?? []) {
+      const members = (group.sessions ?? []).map(item => item.id)
+      const hit = members.filter(id => requestedKeys.has(id))
+      if (hit.length === 0) continue
+      restoreRank.push({
+        requested: hit,
+        canonicalId: group.canonicalId,
+        winnerId: group.winnerId ?? group.canonicalId,
+        children: group.children ?? 0,
+        match: group.match,
+        projectId: group.projectId,
+        // В карантин уходят только живые копии; уже карантинные не трогаем.
+        superseded: (group.liveSupersededIds ?? group.supersededIds ?? []).filter(id => id !== group.canonicalId),
+      })
+    }
+  } catch {
+    // подбор канонического id — вспомогательный шаг, восстановление продолжается
+  }
+
   // Защита от «новых копий»: если восстановление уже частично прошло, restore
   // не трогает существующие копии. Конфликтующая живая копия уйдёт в карантин
   // с причиной superseded, а удалённая вернётся на её место.
@@ -2555,6 +2792,42 @@ async function restoreSessions(ctx, payload = {}) {
   result.restoredIds = canonicalRestored
   if (result.restored !== undefined) {
     result.restored = result.restored.map(item => ({ ...item, id: canonicalRestoreId(item.id) }))
+  }
+
+  // Проигравшие копии групп дублей: живая копия уезжает в карантин с причиной
+  // `superseded` (каноническая остаётся), чтобы восстановление не оставило
+  // рядом с восстановленной сессией её же копию под другим id.
+  if (restoreRank.length > 0) {
+    const restoredSet = new Set(canonicalRestored)
+    const tombstonesForLosers = await readTombstones(config.repoDir)
+    let losersMoved = 0
+    for (const rank of restoreRank) {
+      if (!restoredSet.has(rank.canonicalId)) continue
+      const losers = (rank.superseded ?? []).filter(id => !restoredSet.has(id))
+      if (losers.length === 0) continue
+      const projectId = rank.projectId
+      const projectPath = typeof config.projects?.[projectId]?.path === 'string' ? config.projects[projectId].path : ''
+      try {
+        const moved = await quarantineSessionCopies({
+          home,
+          config,
+          projectId,
+          projectPath,
+          ids: losers,
+          reason: 'superseded',
+          by: 'sync',
+          tombstones: tombstonesForLosers,
+        })
+        losersMoved += moved.moved
+        for (const id of moved.movedIds) {
+          superseded.push({ id, projectId, reason: 'superseded', canonicalId: rank.canonicalId })
+        }
+      } catch {
+        // карантин проигравшей копии — вспомогательный шаг, восстановление уже сделано
+      }
+    }
+    // Метки проигравших копий — в тот же tombstones.json, что и restored.
+    if (losersMoved > 0) await writeTombstones(config.repoDir, tombstonesForLosers)
   }
 
   let committed = false
@@ -2609,6 +2882,19 @@ async function restoreSessions(ctx, payload = {}) {
     restored,
     restoredIds: canonicalRestored,
     restoredFrom,
+    // D4: рейтинг копий и канонический id с детьми — в журнале восстановления.
+    ...(restoreRank.length > 0
+      ? {
+          restoreRank: restoreRank.map(item => ({
+            requested: item.requested,
+            canonicalId: item.canonicalId,
+            winnerId: item.winnerId,
+            children: item.children,
+            match: item.match,
+          })),
+          canonicalIds: [...new Set(restoreRank.map(item => item.canonicalId))],
+        }
+      : {}),
     skippedIds: result.skipped,
     failed: result.failed,
     // H4: метка удаления снята (restored), проигравшие копии — superseded.
@@ -2649,7 +2935,7 @@ async function deleteCloudCopyAction(ctx, payload = {}) {
   let remote
   let warning = ''
   try {
-    remote = createRemote(config)
+    remote = await createRemote(config)
   } catch (error) {
     const failure = classifyBackendFailure(error, { operation: 'sync', kind: backendLabel(undefined, config) })
     warning = failure.message
@@ -2720,6 +3006,243 @@ async function deleteCloudCopyAction(ctx, payload = {}) {
 }
 
 /**
+ * Бест-эффорт коммит зеркала для действий режима: локальное действие уже
+ * сделано, сеть не должна его отменять. Ошибка возвращается строкой и уходит
+ * в очередь, а не превращается в исключение.
+ */
+async function commitMirrorChanges(config, message) {
+  let remote
+  try {
+    remote = await createRemote(config)
+  } catch (error) {
+    return { committed: false, warning: classifyBackendFailure(error, { operation: 'commit', kind: backendLabel(undefined, config) }).message }
+  }
+  const guard = backendGuard(remote, 'commit', backendLabel(remote, config))
+  if (guard.ok !== true) return { committed: false, warning: guard.message }
+  try {
+    const result = await remote.commit(message)
+    return { committed: result?.committed === true, warning: '' }
+  } catch (error) {
+    return { committed: false, warning: classifyBackendFailure(error, { operation: 'commit', kind: backendLabel(remote, config) }).message }
+  }
+}
+
+/** Запись действия режима в журнал (одна точка, чтобы не дублировать запуск). */
+async function recordModeAction(home, record) {
+  return recordRun(home, record)
+}
+
+/** Сводка «локальная навсегда» для журнала и панели. */
+function localOnlySummary(result) {
+  return {
+    declarations: Number(result?.declarations ?? 0) || 0,
+    declaredIds: Array.isArray(result?.declaredIds) ? result.declaredIds.slice(0, 100) : [],
+    removed: Number(result?.removed ?? 0) || 0,
+    removedIds: Array.isArray(result?.removedIds) ? result.removedIds.slice(0, 100) : [],
+    modesChanged: Number(result?.modesChanged ?? 0) || 0,
+    tombstoneAdded: Number(result?.tombstoneAdded ?? 0) || 0,
+  }
+}
+
+/**
+ * Перед синхронизацией: опубликовать объявления в зеркале и поставить
+ * локальный режим объявленным сессиям. После этого push/pull уже пропускают их
+ * (движок читает `session-modes.json` и метку `made-local`).
+ */
+async function prepareLocalOnlyState(home, config) {
+  try {
+    return await enforceLocalOnly({ home, config })
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * После синхронизации: если чужое устройство вернуло копию объявленной сессии
+ * в зеркало — снова в карантин, метка made-local и коммит. Идемпотентно:
+ * без объявлений ничего не пишет.
+ */
+async function reconcileLocalOnlyState(ctx, home, config) {
+  const result = await prepareLocalOnlyState(home, config)
+  if (result.ok !== true) return result
+  if (result.changed === true) {
+    const commit = await commitMirrorChanges(config, `dsh-sync: local-only sessions (${config.deviceId})`)
+    result.committed = commit.committed
+    if (commit.warning !== '') {
+      result.warning = commit.warning
+      await queueFailedOperation(home, {
+        type: 'push',
+        payload: { action: 'push', localOnly: true },
+        error: commit.warning,
+      })
+    }
+  }
+  return result
+}
+
+/**
+ * Режим «локальная / облачная» вместе с объявлением «локальная навсегда».
+ *
+ * Облачная → локальная: режим, объявление в зеркале, карантин копии с
+ * причиной made-local и метка той же причины. Локальная → облачная: снять
+ * объявление и метку, вернуть режим cloud (отправка — отдельным push).
+ */
+async function switchSessionMode(ctx, payload = {}) {
+  const home = dshHome()
+  const mode = payload.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud'
+  const workspaceId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : ''
+  if (workspaceId !== '') {
+    // Умолчание пространства: существующим сессиям фиксируется прежний
+    // режим, чтобы смена умолчания не переключала их задним числом.
+    const directory = await workspaceDirectory(ctx, home)
+    const workspace = directory.workspaces.find(item => item.id === workspaceId)
+    const sessionIds = workspace?.sessionIds ?? Object.keys(directory.sessionWorkspace)
+      .filter(sessionId => directory.sessionWorkspace[sessionId] === workspaceId)
+    const result = await setWorkspaceDefaultMode(home, workspaceId, mode, { sessionIds })
+    invalidateSessionStates()
+    return { ok: true, scope: 'workspace', ...result }
+  }
+  const ids = Array.isArray(payload.ids) ? payload.ids : payload.id !== undefined ? [payload.id] : []
+  // Режим группы: вместе с родителем переключаются его субагенты, иначе
+  // ребёнок уехал бы в зеркало без родителя. Связи берём из заголовков
+  // сессий (host-часть отдаёт `parent` без чтения логов).
+  const located = await localSessionsFor(ctx, home, '')
+  const groups = buildSessionGroups(located.sessions.map((session) => ({
+    id: session.id,
+    header: typeof session.parent === 'string' && session.parent !== ''
+      ? { id: session.id, parentSession: session.parent }
+      : undefined,
+  })))
+  const result = await setSessionMode(home, ids, mode, { groups })
+  const config = await loadConfig(home)
+  const affected = Array.isArray(result.ids) ? result.ids : []
+  let declared = 0
+  let undeclared = 0
+  let quarantined = 0
+  const removedIds = []
+  for (const id of affected) {
+    if (mode === MODE_LOCAL) {
+      const local = await makeSessionLocal({ home, config, sessionId: id, options: { declaredBy: config.deviceId } })
+      if (local.declared === true) declared += 1
+      if (local.quarantined === true) {
+        quarantined += 1
+        removedIds.push(normalizeSessionId(id))
+      }
+    } else {
+      const cloud = await makeSessionCloud({ home, config, sessionId: id })
+      if (cloud.undeclared === true || cloud.tombstoneDropped === true) undeclared += 1
+    }
+  }
+  let committed = false
+  let warning = ''
+  if (affected.length > 0) {
+    const commit = await commitMirrorChanges(config, `dsh-sync: session mode ${mode} (${config.deviceId})`)
+    committed = commit.committed
+    warning = commit.warning
+    if (warning !== '') {
+      await queueFailedOperation(home, {
+        type: 'mode',
+        payload: { ids: affected, mode, declare: mode === MODE_LOCAL },
+        error: warning,
+      })
+    }
+  }
+  // «Сделать облачной» отправляет сессию сразу, не дожидаясь автопушка.
+  if (mode !== MODE_LOCAL && payload.push === true && affected.length > 0) {
+    try {
+      const record = await runSync(ctx, 'push')
+      if (typeof record?.message === 'string') warning = warning === '' ? record.message : `${warning}; ${record.message}`
+    } catch (error) {
+      const pushWarning = error instanceof Error ? error.message : String(error)
+      warning = warning === '' ? pushWarning : `${warning}; ${pushWarning}`
+    }
+  }
+  invalidateSessionStates()
+  const body = {
+    ok: true,
+    ...result,
+    localOnly: {
+      mode,
+      declared,
+      undeclared,
+      quarantined,
+      removedIds,
+      declarations: (await localOnlyState({ home, config })).ids.length,
+    },
+    committed,
+    ...(warning !== '' ? { warning } : {}),
+  }
+  if (mode === MODE_LOCAL) {
+    body.message = quarantined > 0
+      ? `сессии локальные навсегда: облачных копий убрано ${quarantined}`
+      : 'сессии локальные навсегда: облачных копий не было'
+  } else {
+    body.message = undeclared > 0
+      ? 'сессии снова облачные: объявление локальности снято'
+      : 'сессии облачные'
+  }
+  return body
+}
+
+/**
+ * «Убрать облачные копии локальных сессий»: миграция старых локальных сессий,
+ * у которых в зеркале осталась копия. Без confirm:true — только показывает
+ * найденное (409), с подтверждением — карантин made-local и коммит.
+ */
+async function runLocalOnlyMigration(ctx, payload = {}) {
+  const home = dshHome()
+  const config = await loadConfig(home)
+  const inspected = await localOnlyMigrationCandidates({ home, config })
+  if (payload.confirm !== true) {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        code: 'confirm-required',
+        count: inspected.count,
+        sessions: inspected.sessions,
+        message: inspected.count === 0
+          ? 'облачных копий локальных сессий нет — убирать нечего'
+          : `в облаке остались копии локальных сессий: ${inspected.count}; подтвердите удаление копий — сами сессии останутся`,
+      },
+    }
+  }
+  const removedIds = []
+  const projects = new Set()
+  for (const candidate of inspected.sessions) {
+    const result = await makeSessionLocal({ home, config, sessionId: candidate.id, options: { declaredBy: config.deviceId } })
+    if (result.quarantined === true) {
+      removedIds.push(candidate.id)
+      if (candidate.projectId !== undefined) projects.add(candidate.projectId)
+    }
+  }
+  // Коммит и повторная проверка остатка — так же, как после переключения режима.
+  const reconcile = await reconcileLocalOnlyState(ctx, home, config)
+  const message = removedIds.length > 0
+    ? `облачных копий убрано: ${removedIds.length}; сессии остались локальными`
+    : 'убирать нечего: облачных копий локальных сессий нет'
+  const record = {
+    ok: true,
+    at: new Date().toISOString(),
+    action: 'local-only-migration',
+    mode: 'host',
+    message: `${message}${reconcile.warning !== undefined ? `; ${reconcile.warning}` : ''}`,
+    removed: removedIds.length,
+    removedIds,
+    projects: [...projects],
+    reasons: ['made-local'],
+    by: ['owner'],
+    quarantined: removedIds.length,
+    declarations: Number(reconcile.declarations ?? 0) || 0,
+    committed: reconcile.committed === true,
+    ...(reconcile.warning !== undefined ? { warning: reconcile.warning } : {}),
+  }
+  await recordModeAction(home, record)
+  invalidateSessionStates()
+  return { status: 200, body: record }
+}
+
+/**
  * H6: цикл разбора очереди. Обработчики повторяют операции теми же путями, что
  * и кнопки панели; таймаут короткий, чтобы закрытие DSH не ждало сеть.
  */
@@ -2758,10 +3281,10 @@ export async function flushOutboxCycle(ctx, options = {}) {
         return { ok: result.body?.ok === true, message: result.body?.message ?? '' }
       },
       mode: async (operation) => {
-        const ids = Array.isArray(operation.payload?.ids) ? operation.payload.ids : []
-        const mode = operation.payload?.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud'
-        await setSessionMode(home, ids, mode)
-        return true
+        // Повтор смены режима идёт тем же путём, что и кнопка: объявление,
+        // карантин копии и коммит. Идемпотентно — дублей не создаёт.
+        const body = await switchSessionMode(ctx, operation.payload ?? {})
+        return { ok: body?.ok === true, message: typeof body?.message === 'string' ? body.message : '' }
       },
     }
     const outcome = await flushOutbox(home, {
@@ -3089,6 +3612,27 @@ export function apply(ctx) {
     }
   })
 
+  // «Найти дубли»: группы копий одной сессии (локально + зеркало + карантин).
+  // Только чтение — как и «Проверить», ничего не меняет и в журнал не пишет.
+  route('duplicates', DUPLICATES_PATH, async (request) => {
+    try {
+      const payload = await body(request)
+      return json(await runDuplicatesScan(ctx, payload))
+    } catch (error) {
+      return json({ ok: false, action: 'duplicates', message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  // «Убрать дубли в карантин»: без confirm:true маршрут отвечает 409.
+  route('duplicates-quarantine', DUPLICATES_QUARANTINE_PATH, async (request) => {
+    try {
+      const result = await runDuplicatesQuarantine(ctx, await body(request))
+      return json(result.body, result.status)
+    } catch (error) {
+      return json({ ok: false, action: 'duplicates', message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
   // Восстановление: снять надгробие (пометить restored), вернуть карантинную
   // копию зеркала и локальную копию из архива, затем закоммитить зеркало.
   route('restore', RESTORE_PATH, async (request) => {
@@ -3102,39 +3646,14 @@ export function apply(ctx) {
 
   // Режим «локальная / облачная»: одна сессия или группа (массово).
   // payload.workspaceId — умолчание рабочего пространства для новых сессий.
+  // «Локальная» = локальная навсегда: объявление в зеркале, карантин копии,
+  // метка made-local. «Облачная» снимает объявление и возвращает режим cloud.
   route('session-mode', SESSION_MODE_PATH, async (request) => {
     let requestPayload = {}
     try {
       const payload = await body(request)
       requestPayload = payload
-      const mode = payload.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud'
-      const home = dshHome()
-      const workspaceId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : ''
-      if (workspaceId !== '') {
-        // Умолчание пространства: существующим сессиям фиксируется прежний
-        // режим, чтобы смена умолчания не переключала их задним числом.
-        const directory = await workspaceDirectory(ctx, home)
-        const workspace = directory.workspaces.find(item => item.id === workspaceId)
-        const sessionIds = workspace?.sessionIds ?? Object.keys(directory.sessionWorkspace)
-          .filter(sessionId => directory.sessionWorkspace[sessionId] === workspaceId)
-        const result = await setWorkspaceDefaultMode(home, workspaceId, mode, { sessionIds })
-        invalidateSessionStates()
-        return json({ ok: true, scope: 'workspace', ...result })
-      }
-      const ids = Array.isArray(payload.ids) ? payload.ids : payload.id !== undefined ? [payload.id] : []
-      // Режим группы: вместе с родителем переключаются его субагенты, иначе
-      // ребёнок уехал бы в зеркало без родителя. Связи берём из заголовков
-      // сессий (host-часть отдаёт `parent` без чтения логов).
-      const located = await localSessionsFor(ctx, home, '')
-      const groups = buildSessionGroups(located.sessions.map((session) => ({
-        id: session.id,
-        header: typeof session.parent === 'string' && session.parent !== ''
-          ? { id: session.id, parentSession: session.parent }
-          : undefined,
-      })))
-      const result = await setSessionMode(home, ids, mode, { groups })
-      invalidateSessionStates()
-      return json({ ok: true, ...result })
+      return json(await switchSessionMode(ctx, payload))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // H6: смена режима не теряется — повторим из очереди.
@@ -3143,10 +3662,25 @@ export function apply(ctx) {
         : requestPayload?.id !== undefined ? [requestPayload.id] : []
       await queueFailedOperation(dshHome(), {
         type: 'mode',
-        payload: { ids, mode: requestPayload?.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud' },
+        payload: {
+          ids,
+          mode: requestPayload?.mode === MODE_LOCAL ? MODE_LOCAL : 'cloud',
+          declare: requestPayload?.mode === MODE_LOCAL,
+        },
         error: message,
       })
       return json({ ok: false, message, queued: true }, 500)
+    }
+  })
+
+  // «Убрать облачные копии локальных сессий»: миграция режима «локальная
+  // навсегда». Без confirm:true — 409 и список найденного, с confirm — карантин.
+  route('local-only-migration', LOCAL_ONLY_MIGRATION_PATH, async (request) => {
+    try {
+      const result = await runLocalOnlyMigration(ctx, await body(request))
+      return json(result.body, result.status)
+    } catch (error) {
+      return json({ ok: false, action: 'local-only-migration', message: error instanceof Error ? error.message : String(error) }, 500)
     }
   })
 
@@ -3355,6 +3889,11 @@ export function apply(ctx) {
         if (skippedLocal > 0) {
           lines.push(`  локальных сессий пропущено: ${skippedLocal}${(state.lastRun.localMirrorProtected ?? 0) > 0 ? ` (копий в зеркале защищено: ${state.lastRun.localMirrorProtected})` : ''}`)
         }
+        // D2: импорт-дубли — копии не создавались, причина `duplicate`.
+        const duplicatesSkipped = Number(state.lastRun.duplicatesSkipped ?? 0) || 0
+        if (duplicatesSkipped > 0) {
+          lines.push(`  копий-дублей при импорте пропущено: ${duplicatesSkipped}`)
+        }
         // Отложенные удаления: push их не выполняет, нужно отдельное
         // подтверждённое действие «Применить удаления».
         const pendingDeletions = Number(state.lastRun.skippedDeletions?.removed ?? 0) || 0
@@ -3363,7 +3902,7 @@ export function apply(ctx) {
         }
         const plan = state.lastRun.plan
         if (plan?.counts !== undefined) {
-          lines.push(`  план: только локально ${plan.counts.onlyLocal ?? 0}, только в зеркале ${plan.counts.onlyCloud ?? 0}, локально новее ${plan.counts.localAhead ?? 0}, в зеркале новее ${plan.counts.cloudAhead ?? 0}, конфликтов ${plan.counts.conflicts ?? 0}, удалений ${plan.deletions ?? 0}`)
+          lines.push(`  план: только локально ${plan.counts.onlyLocal ?? 0}, только в зеркале ${plan.counts.onlyCloud ?? 0}, локально новее ${plan.counts.localAhead ?? 0}, в зеркале новее ${plan.counts.cloudAhead ?? 0}, конфликтов ${plan.counts.conflicts ?? 0}, дублей ${plan.counts.duplicates ?? 0}, удалений ${plan.deletions ?? 0}`)
         }
       }
       if (state.automation) {

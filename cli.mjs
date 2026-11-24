@@ -16,7 +16,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { loadConfig, normalizeProjectId, resolveDshHome, saveConfig } from './lib/config.mjs'
 import { listLocalSessions, listMirrorSessions, sessionsOfProject } from './lib/store.mjs'
-import { pull, push, applyDeletions } from './lib/sync.mjs'
+import { pull, push, applyDeletions, collectDuplicateGroups } from './lib/sync.mjs'
 import { buildPlan } from './lib/plan.mjs'
 import { ensureRepo, git, setRemote } from './lib/git.mjs'
 import { collectDiagnostics } from './lib/diagnostics.mjs'
@@ -405,7 +405,7 @@ async function cmdRestore(sub, rest, opts) {
   }
 }
 
-/** Подписи шести корзин плана — те же, что в интерфейсе. */
+/** Подписи семи корзин плана — те же, что в интерфейсе. */
 const PLAN_BUCKET_LABELS = {
   onlyLocal: 'только локально',
   onlyCloud: 'только в зеркале',
@@ -413,13 +413,13 @@ const PLAN_BUCKET_LABELS = {
   localAhead: 'локально новее',
   cloudAhead: 'в зеркале новее',
   conflicts: 'расхождения',
+  duplicates: 'дубли (лишние копии, останется каноническая)',
 }
 
 /**
  * `dsh-sync plan` — проверка без изменений: корзины и список удалений.
  * Сравнение идёт с локальной копией зеркала (сеть не используется).
- */
-async function cmdPlan(opts) {
+ */async function cmdPlan(opts) {
   const dshHome = home(opts)
   const config = await loadConfig(dshHome)
   if (Object.keys(config.projects).length === 0) throw new Error('проекты не настроены: dsh-sync project add <id> --path <путь>')
@@ -495,6 +495,38 @@ async function cmdPrune(sub, rest, opts) {
   }
 }
 
+/**
+ * `dsh-sync duplicates` — только чтение: группы копий одной сессии с разными id
+ * (локальный стор + зеркало + карантин) и канонический id каждой группы.
+ * Ничего не удаляет и не меняет — убрать лишние копии можно из панели.
+ */
+async function cmdDuplicates(opts) {
+  const dshHome = home(opts)
+  const config = await loadConfig(dshHome)
+  if (Object.keys(config.projects).length === 0) throw new Error('проекты не настроены: dsh-sync project add <id> --path <путь>')
+  const report = await collectDuplicateGroups({ home: dshHome, config, project: opts.project })
+  console.log('проверка дублей: ничего не изменено — это список, а не действие')
+  if ((report.count ?? 0) === 0) {
+    console.log(report.message)
+    return
+  }
+  const size = Number(report.bytes ?? 0) || 0
+  console.log(`групп: ${report.count}, лишних копий: ${report.duplicates ?? 0}${size > 0 ? ` (${(size / 1024).toFixed(1)} КБ)` : ''}`)
+  for (const group of (report.groups ?? []).slice(0, 20)) {
+    const children = Number(group.children ?? 0) || 0
+    console.log(`\nгруппа (${group.match}${group.projectId !== undefined ? `, ${group.projectId}` : ''}): канонический ${group.canonicalId}${children > 0 ? `, детей: ${children}` : ''}`)
+    for (const session of group.sessions ?? []) {
+      const mark = session.canonical === true ? '=' : '-'
+      const events = Number(session.events ?? 0) || 0
+      console.log(`  ${mark} ${session.id} [${session.side ?? '?'}] событий: ${events}, ${(Number(session.sizeBytes ?? 0) || 0)} Б`)
+    }
+  }
+  const shown = Math.min(report.groups?.length ?? 0, 20)
+  if ((report.count ?? 0) > shown) console.log(`\n… ещё групп: ${report.count - shown}`)
+  console.log('\nубрать лишние копии в карантин: панель «Синхронизация сессий» → «Найти дубли» → «Убрать дубли в карантин»')
+  for (const warning of report.warnings ?? []) console.log(`внимание: ${warning}`)
+}
+
 async function main() {
   const { command, sub, rest, opts } = parseArgs(process.argv.slice(2))
   const dshHome = home(opts)
@@ -504,6 +536,7 @@ async function main() {
   if (command === 'deleted') return cmdDeleted(opts)
   if (command === 'restore') return cmdRestore(sub, rest, opts)
   if (command === 'plan') return cmdPlan(opts)
+  if (command === 'duplicates') return cmdDuplicates(opts)
   if (command === 'prune') return cmdPrune(sub, rest, opts)
 
   if (command === 'push' || command === 'pull') {
@@ -565,7 +598,8 @@ async function main() {
   console.log('  dsh-sync prune-attachments [--dry-run]')
   console.log('  dsh-sync push [--project <id>] [--dry-run] — без удалений; --dry-run показывает план')
   console.log('  dsh-sync pull [--project <id>] [--dry-run]')
-  console.log('  dsh-sync plan [--project <id>] — проверить без изменений (шесть корзин и удаления)')
+  console.log('  dsh-sync plan [--project <id>] — проверить без изменений (семь корзин и удаления)')
+  console.log('  dsh-sync duplicates [--project <id>] — найти дубли без изменений (канонический id и лишние копии)')
   console.log('  dsh-sync prune --confirm [--project <id>] — применить удаления из плана в карантин')
   console.log('  dsh-sync deleted — список удалённых сессий в карантине')
   console.log('  dsh-sync restore <id> | --all — вернуть сессию из карантина')
