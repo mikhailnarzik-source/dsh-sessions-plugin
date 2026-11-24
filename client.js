@@ -41,6 +41,9 @@ window.__ModuleLoader__.load({
     // «Убрать дубли в карантин»: подтверждённое действие (канонические не трогаем).
     const DUPLICATES_QUARANTINE_PATH = '/api/dsh-sync/duplicates/quarantine';
     const SECONDARY_INIT_PATH = '/api/dsh-sync/secondary-init';
+    // Лёгкая сверка резерва: PROPFIND + profile/manifest.json без скачивания
+    // логов. Ответ: { ok, local, cloud, onlyLocal, onlyCloud, differ, code }.
+    const SECONDARY_PROBE_PATH = '/api/dsh-sync/secondary-probe';
     const shortSha = (value) => (value === null || value === undefined || value === '' ? '?' : String(value).slice(0, 7));
 
     // Подписи страницы «Синхронизация сессий». Только тексты интерфейса:
@@ -417,6 +420,80 @@ window.__ModuleLoader__.load({
       return message;
     }
 
+    /* --- статус и ошибки резервного канала ----------------------------- */
+
+    // Тестовые крючки: подмена черновика без настоящего React. В живом
+    // интерфейсе не используются — `__test.setDraft`/`resetDraft`.
+    let draftOverride = null;
+    let touchedOverride = false;
+
+    /**
+     * Статус резервного канала для бейджа карточки. Ровно пять состояний из
+     * аудита: не включён / не сохранён / не сверен / сверен / ошибка.
+     */
+    function reserveStatusOf({ secondary, activeBackend, dirty, probe } = {}) {
+      const backend = activeBackend ?? secondary?.backend ?? 'none';
+      if (backend === 'none') {
+        return { key: 'off', label: 'не включён', tone: 'muted', hint: 'Резерв выключен: сессии хранятся только в основном хранилище.' };
+      }
+      if (dirty === true) {
+        return { key: 'dirty', label: 'не сохранён', tone: 'warn', hint: 'Настройки резерва ещё не сохранены — сначала «Сохранить», потом «Сверить».' };
+      }
+      const status = secondary?.status;
+      const statusFailed = status !== undefined && status !== null && status.ok === false && !/needs-compare/.test(String(status.code ?? ''));
+      if ((probe !== null && probe !== undefined && probe.ok === false) || statusFailed) {
+        const source = probe !== null && probe !== undefined && probe.ok === false ? probe : status;
+        return { key: 'error', label: 'ошибка', tone: 'error', hint: reserveErrorText(source) };
+      }
+      if (secondary?.initialized === true) {
+        return { key: 'synced', label: 'сверен', tone: 'ok', hint: 'Состав облака сверен: отправка в резерв разрешена.' };
+      }
+      return { key: 'not-synced', label: 'не сверен', tone: 'warn', hint: 'Сначала сверка: отправка в резерв заблокирована, пока состав облака не проверен.' };
+    }
+
+    /**
+     * Человеческий текст ошибки сверки: 401/403, таймаут, TLS и
+     * неподдерживаемый канал — с действием, а не «HTTP 403».
+     */
+    function reserveErrorText(result) {
+      const code = String(result?.code ?? '');
+      const message = String(result?.message ?? '');
+      const both = `${code} ${message}`;
+      if (/secondary\/not-configured/.test(code)) {
+        return 'Резерв не включён: выберите режим в карточке «Резервный канал» и нажмите «Сохранить».';
+      }
+      if (/reserve\/unsupported/.test(code) || result?.skipped === true) {
+        return 'Этот канал не умеет лёгкую сверку (только PROPFIND и манифест). Нажмите «Синхронизировать резерв» — она выполнит полную сверку с загрузкой.';
+      }
+      if (/reserve\/unauthorized|\b401\b|\b403\b|не принял логин|пароль приложения/i.test(both)) {
+        return 'Логин или пароль приложения не принят (401/403). Проверьте логин Яндекс.Диска и пароль приложения «Файлы», затем сохраните настройки и повторите «Сверить».';
+      }
+      if (/reserve\/timeout|Timeout|уложилась|истекло/i.test(both)) {
+        return 'Облако не ответило за отведённое время (10–30 с). Проверьте интернет и повторите «Сверить»; для крупного облака используйте «Синхронизировать резерв».';
+      }
+      if (/TLS|SSL|certificate|schannel|EPROTO|сертификат/i.test(both)) {
+        return 'Соединение TLS не установлено: проверьте системные сертификаты и время на компьютере, затем повторите «Сверить».';
+      }
+      return message || 'Сверка резерва не удалась: проверьте настройки канала и повторите.';
+    }
+
+    /** Есть ли несохранённые изменения в карточке «Хранилище». */
+    function storageDirtyOf(draft, saved) {
+      const current = draft ?? {};
+      const stored = saved ?? {};
+      const same = (left, right) => String(left ?? '') === String(right ?? '');
+      return !(
+        same(current.backend ?? 'git', stored.backend ?? 'git')
+        && same(current.branch ?? 'main', stored.branch ?? 'main')
+        && same(current.remote, stored.remote)
+        && same(current.repoDir, stored.repoDir)
+        && same(current.projectPath, stored.projectPath)
+        && same(current.projectId, stored.projectId)
+        && (current.attachments === true) === (stored.attachments === true)
+      );
+    }
+
+
     function apply(ctx) {
       const t = ctx.locale.bind(NS);
       ctx.effect(() => ctx.locale.register(NS, { en, ru }), 'dsh-sync: card dictionaries');
@@ -557,6 +634,32 @@ window.__ModuleLoader__.load({
             // переносится, если места мало.
             '.dshs-sync-card h2{min-width:0;overflow-wrap:anywhere}',
             '@media (max-width:640px){.dshs-groups-counter{white-space:normal;font-size:11px}.dshs-sync-card h2{flex:1 1 auto}}',
+            // --- перестроенная страница: 4 карточки + 2 аккордеона --------
+            // Аккордеон второстепенных секций: заголовок-кнопка и тело.
+            '.dshs-accordion{display:flex;flex-direction:column;min-width:0;border-radius:14px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,0.045));overflow:hidden}',
+            '.dshs-accordion-head{width:100%;box-sizing:border-box;justify-content:flex-start;gap:10px;text-align:left}',
+            '.dshs-accordion-head:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16)) !important}',
+            '.dshs-accordion-body{display:flex;flex-direction:column;gap:16px;min-width:0;padding:14px 16px 16px}',
+            '.dshs-accordion-danger{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d1242f) 45%,transparent)}',
+            '.dshs-accordion-danger .dshs-accordion-head{color:var(--dsw-alias-state-error-primary,#d1242f)}',
+            '.dshs-accordion-danger .dshs-accordion-body{border-top:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#d1242f) 28%,transparent);padding-top:14px}',
+            '@media (max-width:640px){.dshs-accordion-body{padding:12px 12px 14px}.dshs-accordion-summary{display:none}}',
+            // Свёрнутый блок результата проверки (корзины, группы дублей).
+            '.dshs-collapsible{display:flex;flex-direction:column;gap:8px;min-width:0;padding:8px 10px;border-radius:10px;border:1px solid rgba(128,128,128,0.22);background:rgba(128,128,128,0.04)}',
+            '.dshs-collapsible-head{width:100%;box-sizing:border-box;justify-content:flex-start;gap:8px;text-align:left}',
+            '.dshs-collapsible-head:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16)) !important}',
+            '.dshs-collapsible-body{display:flex;flex-direction:column;gap:10px;min-width:0}',
+            // «Сохранить» рядом с полями и бейдж «есть изменения».
+            '.dshs-save-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}',
+            '.dshs-save-badge{box-sizing:border-box;display:inline-flex;align-items:center;height:24px;padding:0 9px;border-radius:8px;font-size:11.5px;font-weight:600;line-height:1;white-space:nowrap}',
+            // Статус резерва и результат лёгкой сверки.
+            '.dshs-reserve-status{box-sizing:border-box;display:inline-flex;align-items:center;height:24px;padding:0 9px;border-radius:8px;font-size:11.5px;font-weight:600;line-height:1;white-space:nowrap}',
+            '.dshs-reserve-probe{display:flex;flex-direction:column;gap:4px;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid rgba(128,128,128,0.24);background:rgba(128,128,128,0.06)}',
+            '.dshs-danger-block{display:flex;flex-direction:column;gap:8px;min-width:0;padding:10px 12px;border-radius:10px;border:1px solid rgba(209,36,47,0.28);background:rgba(209,36,47,0.06)}',
+            // Поиск по списку сессий: поле и «Показать ещё».
+            '.dshs-sessions-search{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
+            '.dshs-sessions-search input{flex:1 1 200px;min-width:0}',
+            '.dshs-sessions-more{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
           ].join('\n');
           document.head.appendChild(style);
           return () => style.remove();
@@ -1008,6 +1111,143 @@ function CollapsedItem({ title, summary, badge, children }) {
       )
     }
 
+      /* --- компоненты перестроенной страницы ---------------------------- */
+
+      /** Бейдж «есть изменения» на карточке: поля ещё не сохранены. */
+      function SaveBadge({ dirty }) {
+        if (dirty !== true) return null;
+        return h(
+          'span',
+          {
+            className: 'dshs-save-badge',
+            'data-dirty': 'true',
+            style: { ...S.badge, background: 'rgba(232,89,12,0.16)', color: 'var(--dsw-alias-state-warn-primary, #e8590c)' },
+          },
+          'есть изменения',
+        );
+      }
+
+      /** Строка «Сохранить» рядом с полями карточки. */
+      function SaveRow({ dirty, busy, busyText, onSave, note }) {
+        return h(
+          'div',
+          { className: 'dshs-save-row', style: { ...S.cardActions, marginTop: 2 } },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dshs-btn-primary',
+              style: S.primary,
+              disabled: dirty !== true || busy,
+              onClick: () => {
+                if (typeof onSave === 'function') void onSave();
+              },
+            },
+            busy ? (busyText ?? 'Сохранение…') : 'Сохранить',
+          ),
+          h(SaveBadge, { dirty }),
+          note ? h('span', { style: S.meta }, note) : null,
+        );
+      }
+
+      /** Бейдж статуса резервного канала. */
+      function ReserveStatusBadge({ state }) {
+        if (state === null || state === undefined) return null;
+        const background = state.tone === 'ok'
+          ? 'rgba(40,150,80,0.16)'
+          : state.tone === 'error'
+            ? 'rgba(209,36,47,0.16)'
+            : state.tone === 'warn'
+              ? 'rgba(232,89,12,0.16)'
+              : 'rgba(128,128,128,0.14)';
+        return h(
+          'span',
+          {
+            className: 'dshs-reserve-status',
+            'data-state': state.key,
+            title: state.hint ?? '',
+            style: { ...S.badge, background },
+          },
+          state.label,
+        );
+      }
+
+      /**
+       * Аккордеон второстепенных секций: свёрнут по умолчанию, содержимое
+       * остаётся в дереве (скрытым), чтобы состояние полей не терялось.
+       */
+      function SectionAccordion({ title, summary, badge, danger, children }) {
+        const [open, setOpen] = React.useState(false);
+        return h(
+          'section',
+          {
+            className: `dshs-accordion${danger === true ? ' dshs-accordion-danger' : ''}`,
+            'data-open': open ? 'true' : 'false',
+            'data-danger': danger === true ? 'true' : undefined,
+          },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dshs-accordion-head',
+              'aria-expanded': open ? 'true' : 'false',
+              style: { ...S.button, gap: 10, padding: '0 12px', justifyContent: 'flex-start' },
+              onClick: () => setOpen((value) => !value),
+            },
+            h('span', { className: 'dshs-accordion-chevron', 'aria-hidden': 'true', style: { fontSize: 10, opacity: 0.75, flex: '0 0 auto' } }, open ? '▾' : '▸'),
+            danger === true
+              ? h('span', { className: 'dshs-accordion-danger-dot', 'aria-hidden': 'true', style: { width: 8, height: 8, borderRadius: 4, background: 'var(--dsw-alias-state-error-primary, #d1242f)', flex: '0 0 auto' } })
+              : null,
+            h('h2', { className: 'dshs-accordion-title', style: { ...S.cardTitle, margin: 0, fontSize: 14 } }, title),
+            badge !== undefined && badge !== null && badge !== ''
+              ? h('span', { style: { ...S.badge, background: 'rgba(128,128,128,0.16)' } }, String(badge))
+              : null,
+            summary
+              ? h('span', { className: 'dshs-accordion-summary', style: { ...S.meta, marginLeft: 'auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 } }, summary)
+              : null,
+          ),
+          h(
+            'div',
+            { className: 'dshs-accordion-body', style: { display: open ? 'flex' : 'none', flexDirection: 'column', gap: 16, minWidth: 0 } },
+            children,
+          ),
+        );
+      }
+
+      /**
+       * Свёрнутый блок результата: заголовок с кнопкой и содержимое. Как и
+       * аккордеон, содержимое остаётся в дереве (скрытым), чтобы перерисовка
+       * не сбрасывала прокрутку и выделение.
+       */
+      function Collapsible({ title, summary, badge, defaultOpen, children, className }) {
+        const [open, setOpen] = React.useState(defaultOpen === true);
+        return h(
+          'div',
+          { className: `dshs-collapsible${className === undefined ? '' : ` ${className}`}`, 'data-open': open ? 'true' : 'false' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dshs-collapsible-head',
+              'aria-expanded': open ? 'true' : 'false',
+              style: { ...S.button, gap: 8, padding: '0 12px', justifyContent: 'flex-start' },
+              onClick: () => setOpen((value) => !value),
+            },
+            h('span', { className: 'dshs-collapsible-chevron', 'aria-hidden': 'true', style: { fontSize: 10, opacity: 0.7, flex: '0 0 auto' } }, open ? '▾' : '▸'),
+            h('span', { className: 'dshs-collapsible-title', style: { fontWeight: 600 } }, title),
+            badge !== undefined && badge !== null && badge !== ''
+              ? h('span', { style: { ...S.badge, background: 'rgba(106,139,208,0.22)' } }, String(badge))
+              : null,
+            summary ? h('span', { style: { ...S.meta, marginLeft: 'auto' } }, summary) : null,
+          ),
+          h(
+            'div',
+            { className: 'dshs-collapsible-body', style: { display: open ? 'flex' : 'none', flexDirection: 'column', gap: 10, minWidth: 0 } },
+            children,
+          ),
+        );
+      }
+
       /**
        * Корзина плана: свёрнутая строка со счётчиком, объёмом и списком id.
        * Списки длинные, поэтому прокручиваются внутри строки.
@@ -1058,8 +1298,10 @@ function CollapsedItem({ title, summary, badge, children }) {
         const [update, setUpdate] = React.useState(updateOverride);
         const [updateNote, setUpdateNote] = React.useState('');
         const [probe, setProbe] = React.useState(null);
-        const [draft, setDraft] = React.useState({ backend: 'git', remote: '', repoDir: '', yandexToken: '', yandexPath: 'dsh-sync', webdavLogin: '', webdavPassword: '', webdavPath: 'dsh-sync', secondaryBackend: 'none', secondaryRemote: '', secondaryLogin: '', secondaryPassword: '', secondaryPath: 'dsh-sync', secondaryFolder: '', projectPath: '', projectId: '', attachments: false, autoUpdate: false, useExternal: true });
-        const [touched, setTouched] = React.useState(false);
+        // Результат лёгкой сверки резерва («Сверить» → secondary-probe).
+        const [secondaryProbe, setSecondaryProbe] = React.useState(null);
+        const [draft, setDraft] = React.useState(() => ({ backend: 'git', branch: 'main', remote: '', repoDir: '', yandexToken: '', yandexPath: 'dsh-sync', webdavLogin: '', webdavPassword: '', webdavPath: 'dsh-sync', secondaryBackend: 'none', secondaryRemote: '', secondaryLogin: '', secondaryPassword: '', secondaryPath: 'dsh-sync', secondaryFolder: '', projectPath: '', projectId: '', attachments: false, autoUpdate: false, useExternal: true, ...(draftOverride ?? {}) }));
+        const [touched, setTouched] = React.useState(touchedOverride);
 
         React.useEffect(() => {
           let alive = true;
@@ -1101,6 +1343,7 @@ function CollapsedItem({ title, summary, badge, children }) {
           if (data?.config === undefined || touched) return;
           setDraft({
             backend: data.config.backend === 'folder' ? 'folder' : 'git',
+            branch: data.config.branch ?? 'main',
             remote: data.config.remote ?? '',
             repoDir: data.config.repoDir ?? '',
             projectPath: data.config.projectPath ?? '',
@@ -1120,7 +1363,7 @@ function CollapsedItem({ title, summary, badge, children }) {
             secondaryFolder: data.config.secondary?.folderDir ?? data.secondary?.folderDir ?? '',
             useExternal: data.config.useExternal !== false,
           });
-        }, [data?.config?.remote, data?.config?.projectPath, data?.config?.projectId, data?.config?.attachments, data?.config?.useExternal, touched]);
+        }, [data?.config?.remote, data?.config?.branch, data?.config?.projectPath, data?.config?.projectId, data?.config?.attachments, data?.config?.useExternal, touched]);
 
         if (view === 'summary') {
           const status = data?.status;
@@ -1214,14 +1457,22 @@ function CollapsedItem({ title, summary, badge, children }) {
          * Сверка резервного канала: сравнить локальные сессии с облаком,
          * принять из него данные и разрешить первую выгрузку.
          */
-        const compareSecondary = async () => {
-          publish({ busy: 'secondary-init', notice: '', error: '' });
+        /**
+         * «Сверить» резерва — лёгкая сверка: PROPFIND корня и
+         * profile/manifest.json, без скачивания логов. Ничего не принимает и
+         * не отправляет: показывает только расхождения.
+         */
+        const compareSecondaryLight = async () => {
+          setSecondaryProbe(null);
+          publish({ busy: 'secondary-probe', notice: '', error: '' });
           try {
-            const result = await post(SECONDARY_INIT_PATH, {});
+            const result = await post(SECONDARY_PROBE_PATH, {});
+            setSecondaryProbe(result);
             if (result?.ok === true) {
-              publish({ busy: '', notice: result.message || 'Сверка резерва выполнена' });
+              publish({ busy: '', notice: result.message || 'Лёгкая сверка выполнена: логи не скачивались.' });
             } else {
-              publish({ busy: '', error: result?.message ?? 'Не удалось сверить резерв' });
+              const hint = typeof result?.hint === 'string' && result.hint !== '' ? result.hint : reserveErrorText(result);
+              publish({ busy: '', error: hint });
             }
             await refresh();
           } catch (error) {
@@ -1229,7 +1480,36 @@ function CollapsedItem({ title, summary, badge, children }) {
           }
         };
 
-        // Подтверждение удалений — второй клик в карточке «Проверка».
+        /**
+         * «Синхронизировать резерв» — полная сверка с загрузкой: принимает
+         * данные из облака и разрешает первую выгрузку. Отдельная кнопка,
+         * чтобы лёгкая сверка не тянула блобы.
+         */
+        const syncSecondaryFull = async () => {
+          publish({ busy: 'secondary-init', notice: '', error: '' });
+          try {
+            const result = await post(SECONDARY_INIT_PATH, {});
+            if (result?.ok === true) {
+              publish({ busy: '', notice: result.message || 'Резерв синхронизирован' });
+            } else {
+              const hint = typeof result?.hint === 'string' && result.hint !== '' ? result.hint : reserveErrorText(result);
+              publish({ busy: '', error: hint || (result?.message ?? 'Синхронизация резерва не удалась') });
+            }
+            await refresh();
+          } catch (error) {
+            publish({ busy: '', error: `Синхронизация резерва не удалась: ${explain(error)}` });
+          }
+        };
+
+        // Пока идёт полная синхронизация резерва, состояние обновляем чаще:
+        // так видно рост прогресса выгрузки, а не только итог.
+        React.useEffect(() => {
+          if (state.busy !== 'secondary-init') return undefined;
+          const timer = setInterval(() => { void refresh(); }, 2000);
+          return () => clearInterval(timer);
+        }, [state.busy]);
+
+        // Подтверждение удалений — второй клик в карточке «План и синхронизация».
         const [confirmDeletions, setConfirmDeletions] = React.useState(false);
         // Подтверждение карантина дублей — второй клик, как у удалений.
         const [confirmDuplicates, setConfirmDuplicates] = React.useState(false);
@@ -1365,6 +1645,31 @@ function CollapsedItem({ title, summary, badge, children }) {
             && (activeSecondaryLogin !== (savedSecondary.webdavLogin ?? '') || activeSecondaryPath !== (savedSecondary.webdavPath ?? 'dsh-sync')))
           || (activeSecondaryBackend === 'git' && activeSecondaryRemote !== (savedSecondary.remote ?? ''));
 
+        // «Хранилище»: черновик отличается от сохранённых настроек.
+        const savedConfig = data?.config ?? {};
+        const storageDirty = touched && storageDirtyOf(draft, savedConfig);
+        // Статус резерва для бейджа: не включён / не сохранён / не сверен /
+        // сверен / ошибка.
+        const reserveState = reserveStatusOf({
+          secondary,
+          activeBackend: activeSecondaryBackend,
+          dirty: secondaryDirty,
+          probe: secondaryProbe,
+        });
+
+        /**
+         * «Сохранить» внутри карточки: тот же маршрут, что у глобальной кнопки,
+         * но после успеха снимает бейдж «есть изменения».
+         */
+        const saveCard = async () => {
+          if (data === null) {
+            publish({ error: 'Настройки ещё загружаются — подождите пару секунд.' });
+            return;
+          }
+          const ok = await save(draft);
+          if (ok) setTouched(false);
+        };
+
         return h(
           'div',
           { className: 'dshs-card dshs-sync-sections', style: S.sections },
@@ -1374,409 +1679,14 @@ function CollapsedItem({ title, summary, badge, children }) {
           state.notice ? h('div', { style: S.ok }, state.notice) : null,
           state.error ? h('div', { style: S.error }, state.error) : null,
 
-          // --- синхронизация: состояние, прогресс и запуск ------------------
-          h(
-            Card,
-            { title: t('sectionSync'), hint: 'Состояние зеркала, прогресс копирования и ручной запуск.' },
-            status
-              ? h(
-                  'span',
-                  { style: S.hint },
-                  `Сессий локально: ${status.local}, в зеркале: ${status.mirror}. Только локально: ${status.onlyLocal}, только в зеркале: ${status.onlyMirror}.`
-                  + ((status.subagents ?? 0) > 0 ? ` Субагентов: ${status.subagents}, доступны ${status.subagentsAvailable ?? 0}.` : ''),
-                )
-              : h('span', { style: S.hint }, state.loading ? 'Читаем состояние…' : 'Состояние пока неизвестно — обновите страницу.'),
-            h(
-              'div',
-              { style: { display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, color: 'var(--dsw-alias-label-secondary, inherit)' } },
-              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-success-primary, #2f9e44)' } }), 'синхронизировано'),
-              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-warn-primary, #e8590c)' } }), 'есть изменения'),
-              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-error-primary, #d1242f)' } }), 'не отправлялось'),
-            ),
-            h(SyncProgress, { data }),
-            queued > 0
-              ? h('span', { style: S.note, 'data-outbox': String(queued) }, `в очереди: ${queued}`)
-              : null,
-            data?.pending
-              ? h('span', { style: S.note }, 'Есть неотправленные изменения — они уйдут при следующей отправке (не чаще раза в 5 минут) или по кнопке.')
-              : null,
-            status && status.local === 0 && status.mirror > 0
-              ? h(
-                  'span',
-                  { style: S.note },
-                  'На этом устройстве пока нет локальных сессий — они появятся после первой отправки или скачивания из зеркала.',
-                )
-              : null,
-            h(
-              'div',
-              { style: S.buttons },
-              h(
-                'button',
-                { type: 'button', className: 'dshs-btn-primary', style: S.primary, disabled: busy, onClick: () => void run('sync') },
-                state.busy === 'sync' ? 'Синхронизация…' : 'Синхронизировать',
-              ),
-              h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void run('pull') }, 'Только принять'),
-              h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void run('push') }, 'Только отправить'),
-              h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void refresh() }, 'Обновить'),
-            ),
-            last
-              ? h(
-                  'span',
-                  { style: last.ok ? S.ok : S.error },
-                  `${new Date(last.at).toLocaleString('ru-RU')} — ${last.ok ? 'успешно' : 'ошибка'}: ${last.message}`,
-                )
-              : h('span', { style: S.hint }, 'Ещё не запускалось.'),
-            (last?.removed ?? 0) > 0
-              ? h(
-                  'span',
-                  { style: S.note },
-                  `Удалено: ${last.removed} — ${last.removedReason !== undefined && last.removedReason !== '' ? last.removedReason : 'причина не указана'}.`,
-                )
-              : null,
-            lastError !== ''
-              ? h('span', { style: S.note }, lastError)
-              : null,
-            (last?.childrenQuarantined ?? 0) > 0
-              ? h('span', { style: S.note }, `Вместе с родителями ушли в карантин субагентов: ${last.childrenQuarantined}.`)
-              : null,
-            (Array.isArray(last?.childrenMissing) ? last.childrenMissing.length : 0) > 0
-              ? h('span', { style: S.note }, `Субагентов нет локально: ${last.childrenMissing.length} — их копии в зеркале защищены от удаления.`)
-              : null,
-            // Режим «локальная»: сколько сессий удержал от обмена и сколько
-            // копий в зеркале защищено от prune (history: skippedLocal).
-            (last?.skippedLocal ?? 0) > 0
-              ? h(
-                  'span',
-                  { style: S.note },
-                  `Локальных сессий пропущено: ${last.skippedLocal}`
-                  + ((last?.localMirrorProtected ?? 0) > 0 ? ` (копий в зеркале защищено: ${last.localMirrorProtected})` : '')
-                  + '.',
-                )
-              : null,
-            // D2: импорт-дубли — копии не создавались, причина `duplicate`.
-            (last?.duplicatesSkipped ?? 0) > 0
-              ? h(
-                  'span',
-                  { style: S.note },
-                  `Копий-дублей при импорте пропущено: ${last.duplicatesSkipped} — такая сессия уже была локально.`,
-                )
-              : null,
-            // Отложенные удаления: push их не выполняет. Подробный список и
-            // кнопка подтверждения — в карточке «Проверка» ниже.
-            (last?.skippedDeletions?.removed ?? last?.requireConfirmation?.removed ?? 0) > 0
-              ? h(
-                  'span',
-                  { style: S.note },
-                  `Удалений ждёт подтверждения: ${last?.skippedDeletions?.removed ?? last.requireConfirmation.removed} — ничего не удалено. Нажмите «Проверить» и «Применить удаления» в карточке «Проверка».`,
-                )
-              : null,
-            (data?.history?.length ?? 0) > 0
-              ? h(
-                  'div',
-                  { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
-                  h('span', { style: S.label }, 'Последние запуски'),
-                  ...data.history.slice(-3).reverse().map((entry, index) =>
-                    h(
-                      'span',
-                      { key: `h${index}`, style: entry.ok ? S.meta : S.error },
-                      `${new Date(entry.at).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} — ${entry.ok ? 'ok' : 'ошибка'}: ${entry.message}${(entry.skippedLocal ?? 0) > 0 ? ` · локальных пропущено: ${entry.skippedLocal}` : ''}`,
-                    ),
-                  ),
-                )
-              : null,
-            h('span', { style: S.hint }, 'После приёма новых сессий перезапустите DSH — список обновляется при старте.'),
-            data?.automation
-              ? h(
-                  'span',
-                  { style: data.automation.lastError ? S.error : S.hint },
-                  data.automation.enabled === false
-                    ? 'Автосинхронизация выключена.'
-                    : `Автосинхронизация: приём раз в ${data.automation.settings?.pullIntervalMinutes ?? 15} мин, отправка при изменениях (не чаще ${data.automation.settings?.pushMinIntervalMinutes ?? 5} мин)`
-                      + (data.automation.lastPushAt
-                        ? `; последняя отправка ${new Date(data.automation.lastPushAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
-                        : '')
-                      + (data.automation.lastError ? `; ошибка: ${data.automation.lastError}` : ''),
-                )
-              : null,
-          ),
-
-          // --- проверка: план обмена, только чтение -------------------------
-          // «Проверить» ничего не меняет, а показывает шесть корзин и список
-          // удалений. Удаления выполняются только подтверждённой кнопкой.
+          // --- 1. «Хранилище»: бэкенд, адрес/папка, ветка, проект ---------
+          // Поля и «Сохранить» рядом: не нужно искать общую кнопку внизу.
           h(
             Card,
             {
-              title: t('sectionPlan'),
-              hint: 'Сравнение локальных сессий с зеркалом по идентификаторам и хвостам логов. Проверка только читает: ничего не изменяется.',
-            },
-            h(
-              'div',
-              { style: S.buttons },
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dshs-btn-primary',
-                  style: S.primary,
-                  disabled: busy,
-                  onClick: () => void checkPlan(),
-                },
-                state.busy === 'plan' ? 'Проверяю…' : (plan === null || plan === undefined ? 'Проверить' : 'Проверить снова'),
-              ),
-              plan !== null && plan !== undefined
-                ? h('span', { style: S.meta }, `Проверено: ${new Date(plan.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`)
-                : null,
-              // D2/M1: отдельная кнопка «Найти дубли» — группы копий с разными id.
-              h(
-                'button',
-                {
-                  type: 'button',
-                  style: S.button,
-                  disabled: busy,
-                  title: 'Найти копии одной сессии с разными id: локально, в зеркале и в карантине',
-                  onClick: () => void findDuplicates(),
-                },
-                state.busy === 'duplicates' ? 'Ищу дубли…' : 'Найти дубли',
-              ),
-              duplicates !== null && duplicates !== undefined
-                ? h('span', { style: S.meta }, `Дублей: ${duplicates.duplicates ?? 0} · групп: ${duplicates.count ?? 0}`)
-                : null,
-            ),
-            state.planError ? h('div', { style: S.error }, state.planError) : null,
-            state.duplicatesError ? h('div', { style: S.error }, state.duplicatesError) : null,
-            plan === null || plan === undefined
-              ? h(
-                  'span',
-                  { style: S.hint },
-                  'Нажмите «Проверить»: покажем, что уедет в зеркало, что приедет и что было бы удалено. Удаления выполняются только кнопкой «Применить удаления».',
-                )
-              : h(
-                  'div',
-                  { style: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 } },
-                  h(
-                    'span',
-                    { style: S.ok },
-                    state.planNote || 'Проверка выполнена: ничего не изменено.',
-                  ),
-                  plan.warnings?.length > 0
-                    ? h(
-                        'div',
-                        { style: S.error },
-                        ...plan.warnings.map((warning, index) => h('div', { key: `w${index}` }, `Внимание: ${warning}`)),
-                      )
-                    : null,
-                  h(
-                    'div',
-                    { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
-                    h(PlanBucket, { label: 'Только локально', count: plan.counts?.onlyLocal ?? 0, bytes: plan.sizes?.onlyLocal ?? 0, items: plan.buckets?.onlyLocal ?? [] }),
-                    h(PlanBucket, { label: 'Только в зеркале', count: plan.counts?.onlyCloud ?? 0, bytes: plan.sizes?.onlyCloud ?? 0, items: plan.buckets?.onlyCloud ?? [] }),
-                    h(PlanBucket, { label: 'Совпадают', count: plan.counts?.same ?? 0, bytes: plan.sizes?.same ?? 0, items: plan.buckets?.same ?? [] }),
-                    h(PlanBucket, { label: 'Локально новее', count: plan.counts?.localAhead ?? 0, bytes: plan.sizes?.localAhead ?? 0, items: plan.buckets?.localAhead ?? [] }),
-                    h(PlanBucket, { label: 'В зеркале новее', count: plan.counts?.cloudAhead ?? 0, bytes: plan.sizes?.cloudAhead ?? 0, items: plan.buckets?.cloudAhead ?? [] }),
-                    h(PlanBucket, { label: 'Расхождения', count: plan.counts?.conflicts ?? 0, bytes: plan.sizes?.conflicts ?? 0, items: plan.buckets?.conflicts ?? [] }),
-                    // Седьмая корзина «Дубли»: копии одной сессии с разными id.
-                    h(PlanBucket, { label: 'Дубли', count: plan.counts?.duplicates ?? 0, bytes: plan.sizes?.duplicates ?? 0, items: plan.buckets?.duplicates ?? [] }),
-                  ),
-                  // Группы дублей из плана: канонический id и лишние копии.
-                  (plan.duplicates?.groups?.length ?? 0) > 0
-                    ? h(
-                        CollapsedItem,
-                        {
-                          title: 'Группы дублей',
-                          summary: `${plan.duplicates.count ?? 0} · канонические помечены «=»`,
-                          badge: String(plan.duplicates.count ?? 0),
-                        },
-                        h(
-                          'div',
-                          { className: 'dshs-duplicates-groups' },
-                          ...(plan.duplicates.groups ?? []).slice(0, 20).map((group, index) => h(
-                            'div',
-                            { key: `pg${index}`, className: 'dshs-duplicates-group' },
-                            h(
-                              'span',
-                              { className: 'dshs-duplicates-head' },
-                              h('span', { style: { fontSize: 11.5, fontWeight: 600 } }, `Канонический: ${group.canonicalId}${(group.children ?? 0) > 0 ? ` · детей: ${group.children}` : ''}`),
-                              h('span', { style: S.meta }, group.match === 'contentHash' ? 'по содержимому' : 'по событиям и размеру'),
-                            ),
-                            ...(group.sessions ?? []).filter(session => session.canonical !== true).map(session => h(
-                              'span',
-                              { key: session.id, style: { fontSize: 11.5, opacity: 0.8, overflowWrap: 'anywhere' } },
-                              `− ${session.id}${session.side !== undefined && session.side !== '' ? ` [${session.side === 'both' ? 'локально и в зеркале' : session.side === 'mirror' ? 'в зеркале' : session.side === 'local' ? 'локально' : 'в карантине'}]` : ''}`,
-                            )),
-                          )),
-                          (plan.duplicates?.groups?.length ?? 0) > 20
-                            ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё групп: ${plan.duplicates.groups.length - 20}`)
-                            : null,
-                        ),
-                      )
-                    : null,
-                  // Результат «Найти дубли»: подробно и с подтверждением действия.
-                  duplicates !== null && duplicates !== undefined
-                    ? h(
-                        'div',
-                        { className: 'dshs-duplicates-card' },
-                        h(
-                          'span',
-                          { style: (duplicates.duplicates ?? 0) > 0 ? S.note : S.ok },
-                          duplicates.duplicates > 0
-                            ? `Найдено лишних копий: ${duplicates.duplicates} (групп: ${duplicates.count}). Каноническая копия каждой группы останется.`
-                            : (duplicates.message ?? 'Дублей нет: копий одной сессии с разными id не найдено.'),
-                        ),
-                        duplicateGroups.length > 0
-                          ? h(
-                              'div',
-                              { className: 'dshs-duplicates-groups' },
-                              ...duplicateGroups.slice(0, 20).map((group, index) => h(
-                                'div',
-                                { key: `dg${index}`, className: 'dshs-duplicates-group' },
-                                h(
-                                  'span',
-                                  { className: 'dshs-duplicates-head' },
-                                  h('span', { style: { fontSize: 11.5, fontWeight: 600 } }, `Канонический: ${group.canonicalId}${(group.children ?? 0) > 0 ? ` · детей: ${group.children}` : ''}`),
-                                  h('span', { style: S.meta }, `лишних: ${(group.supersededIds ?? []).length}`),
-                                ),
-                                ...(group.sessions ?? []).map(session => h(
-                                  'span',
-                                  { key: session.id, style: { fontSize: 11.5, opacity: session.canonical === true ? 0.95 : 0.75, overflowWrap: 'anywhere' } },
-                                  `${session.canonical === true ? '= каноническая' : '− лишняя'} ${session.id}`,
-                                )),
-                              )),
-                              duplicateGroups.length > 20
-                                ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё групп: ${duplicateGroups.length - 20}`)
-                                : null,
-                            )
-                          : null,
-                        duplicateGroups.length > 0
-                          ? (confirmDuplicates
-                            ? h(
-                                'div',
-                                { className: 'dshs-duplicates-actions' },
-                                h('span', { style: S.hint }, `Подтвердите: ${duplicates.duplicates ?? duplicateLoserIds().length} лишних копий уйдут в карантин на 30 дней. Канонические копии останутся.`),
-                                h(
-                                  'button',
-                                  {
-                                    type: 'button',
-                                    style: S.danger,
-                                    disabled: busy,
-                                    onClick: () => void applyDuplicateQuarantine(),
-                                  },
-                                  state.busy === 'duplicates-quarantine' ? 'Убираю…' : `Подтвердить карантин (${duplicates.duplicates ?? duplicateLoserIds().length})`,
-                                ),
-                                h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => setConfirmDuplicates(false) }, 'Отмена'),
-                              )
-                            : h(
-                                'div',
-                                { className: 'dshs-duplicates-actions' },
-                                h(
-                                  'button',
-                                  {
-                                    type: 'button',
-                                    style: S.danger,
-                                    disabled: busy,
-                                    title: 'Перенести лишние копии в карантин на 30 дней; канонические останутся',
-                                    onClick: () => setConfirmDuplicates(true),
-                                  },
-                                  `Убрать дубли в карантин (${duplicates.duplicates ?? duplicateLoserIds().length})`,
-                                ),
-                                h('span', { style: S.hint }, 'Копии не удаляются безвозвратно: их можно вернуть в карточке «Удалённые».'),
-                              ))
-                          : null,
-                      )
-                    : null,
-                  (plan.localSkipped ?? 0) > 0
-                    ? h('span', { style: S.note }, `Локальных сессий не участвует в обмене: ${plan.localSkipped} (режим «локальная»).`)
-                    : null,
-                  (plan.deletionCount ?? 0) > 0
-                    ? h(
-                        'div',
-                        { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
-                        h(
-                          'span',
-                          { style: S.error },
-                          `Было бы удалено из зеркала: ${plan.deletionCount}. Это только список — нажмите «Применить удаления», чтобы перенести их в карантин на 30 дней.`,
-                        ),
-                        (plan.requireConfirmation?.subagents ?? 0) > 0
-                          ? h('span', { style: S.note }, `Вместе с родителем уйдут субагенты: ${plan.requireConfirmation.subagents} — их тоже можно будет восстановить.`)
-                          : null,
-                        plan.requireConfirmation?.overCount === true
-                          ? h('span', { style: S.note }, `Больше ${plan.requireConfirmation.maxCount ?? 5} сессий: убедитесь, что это не сбой доступа к диску.`)
-                          : null,
-                        h(
-                          CollapsedItem,
-                          {
-                            title: 'Удаления',
-                            summary: `${plan.deletionCount} · в карантин на 30 дней`,
-                            badge: String(plan.deletionCount),
-                          },
-                          h(
-                            'div',
-                            { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, maxHeight: 200, overflowY: 'auto', overscrollBehavior: 'contain' } },
-                            ...(plan.deletions ?? []).slice(0, 50).map((item) => h(
-                              'span',
-                              {
-                                key: item.id,
-                                title: String(item.shortId ?? shortSessionId(item.id)),
-                                style: { fontSize: 11.5, overflowWrap: 'anywhere' },
-                              },
-                              `${item.title !== undefined && item.title !== '' ? item.title : 'Без названия'} (${item.humanReason ?? item.reason})`,
-                            )),
-                            (plan.deletions?.length ?? 0) > 50
-                              ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё ${plan.deletions.length - 50}`)
-                              : null,
-                          ),
-                        ),
-                        confirmDeletions
-                          ? h(
-                              'div',
-                              { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
-                              h('span', { style: S.hint }, `Подтвердите: ${plan.deletionCount} сессий уйдут из зеркала в карантин на 30 дней. Локальные сессии не изменятся.`),
-                              h(
-                                'div',
-                                { style: S.buttons },
-                                h(
-                                  'button',
-                                  {
-                                    type: 'button',
-                                    style: S.danger,
-                                    disabled: busy,
-                                    onClick: () => void applyPlanDeletions(),
-                                  },
-                                  state.busy === 'prune' ? 'Применяю…' : `Подтвердить удаление (${plan.deletionCount})`,
-                                ),
-                                h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => setConfirmDeletions(false) }, 'Отмена'),
-                              ),
-                            )
-                          : h(
-                              'div',
-                              { style: S.buttons },
-                              h(
-                                'button',
-                                {
-                                  type: 'button',
-                                  style: S.danger,
-                                  disabled: busy,
-                                  title: 'Перенести эти сессии из зеркала в карантин на 30 дней',
-                                  onClick: () => setConfirmDeletions(true),
-                                },
-                                `Применить удаления (${plan.deletionCount})`,
-                              ),
-                            ),
-                      )
-                    : h('span', { style: { fontSize: 12, opacity: 0.75 } }, 'Удалений нет: удалять из зеркала нечего.'),
-                ),
-            h(
-              'span',
-              { style: S.hint },
-              'Проверка сравнивает с копией зеркала на этом компьютере: сеть не используется, журнал запусков не меняется.',
-            ),
-          ),
-
-          // --- подключение: где зеркало и какой проект синхронизировать -----
-          h(
-            Card,
-            {
-              title: t('sectionConnection'),
-              hint: 'Хранилище с копией сессий и проект, который синхронизируется с этого компьютера.',
+              title: 'Хранилище',
+              hint: 'Хранилище с копией сессий и проект, который синхронизируется с этого компьютера. «Сохранить» применяет поля этой карточки.',
+              meta: h(SaveBadge, { dirty: storageDirty }),
             },
             h(
               'label',
@@ -1939,15 +1849,19 @@ function CollapsedItem({ title, summary, badge, children }) {
                 onChange: (event) => set({ projectId: event.target.value }),
               }),
             ),
-          ),
-
-          // --- дополнительно: вложения и автообновление ----------------------
-          h(
-            Card,
-            {
-              title: t('sectionExtra'),
-              hint: 'Вложения и автообновление плагина.',
-            },
+            draft.backend === 'git'
+              ? h(
+                  'label',
+                  { style: S.field },
+                  h('span', { style: S.label }, 'Ветка репозитория'),
+                  h('input', {
+                    style: { ...S.input, colorScheme: themeScheme() },
+                    value: draft.branch,
+                    placeholder: 'main',
+                    onChange: (event) => set({ branch: event.target.value }),
+                  }),
+                )
+              : null,
             h(
               'label',
               { style: S.checkboxRow },
@@ -1964,19 +1878,310 @@ function CollapsedItem({ title, summary, badge, children }) {
               h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-success-primary, #2f9e44)' } }),
               h('span', null, 'Автообновление плагина включено: проверка раз в 6 часов, установка новой версии — автоматически.'),
             ),
+            h(SaveRow, {
+              dirty: storageDirty,
+              busy: busy,
+              busyText: 'Сохранение…',
+              onSave: saveCard,
+              note: storageDirty ? 'Поля изменены — нажмите «Сохранить».' : 'Все изменения сохранены.',
+            }),
           ),
 
-          // --- резервный канал: второй бэкенд и безопасный первый вход -------
+          // --- 2. «План и синхронизация»: состояние, запуск и «Проверить» --
+          h(
+            Card,
+            {
+              title: 'План и синхронизация',
+              hint: 'Состояние зеркала, прогресс копирования и ручной запуск. «Проверить» только сравнивает — ничего не изменяется.',
+            },
+            status
+              ? h(
+                  'span',
+                  { style: S.hint },
+                  `Сессий локально: ${status.local}, в зеркале: ${status.mirror}. Только локально: ${status.onlyLocal}, только в зеркале: ${status.onlyMirror}.`
+                  + ((status.subagents ?? 0) > 0 ? ` Субагентов: ${status.subagents}, доступны ${status.subagentsAvailable ?? 0}.` : ''),
+                )
+              : h('span', { style: S.hint }, state.loading ? 'Читаем состояние…' : 'Состояние пока неизвестно — обновите страницу.'),
+            h(
+              'div',
+              { style: { display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, color: 'var(--dsw-alias-label-secondary, inherit)' } },
+              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-success-primary, #2f9e44)' } }), 'синхронизировано'),
+              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-warn-primary, #e8590c)' } }), 'есть изменения'),
+              h('span', { style: S.row }, h('span', { style: { ...S.dot, background: 'var(--dsw-alias-state-error-primary, #d1242f)' } }), 'не отправлялось'),
+            ),
+            h(SyncProgress, { data }),
+            queued > 0
+              ? h('span', { style: S.note, 'data-outbox': String(queued) }, `в очереди: ${queued}`)
+              : null,
+            data?.pending
+              ? h('span', { style: S.note }, 'Есть неотправленные изменения — они уйдут при следующей отправке (не чаще раза в 5 минут) или по кнопке.')
+              : null,
+            status && status.local === 0 && status.mirror > 0
+              ? h(
+                  'span',
+                  { style: S.note },
+                  'На этом устройстве пока нет локальных сессий — они появятся после первой отправки или скачивания из зеркала.',
+                )
+              : null,
+            h(
+              'div',
+              { style: S.buttons },
+              h(
+                'button',
+                { type: 'button', className: 'dshs-btn-primary', style: S.primary, disabled: busy, onClick: () => void run('sync') },
+                state.busy === 'sync' ? 'Синхронизация…' : 'Синхронизировать',
+              ),
+              h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void run('pull') }, 'Только принять'),
+              h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void run('push') }, 'Только отправить'),
+              h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => void refresh() }, 'Обновить'),
+            ),
+            last
+              ? h(
+                  'span',
+                  { style: last.ok ? S.ok : S.error },
+                  `${new Date(last.at).toLocaleString('ru-RU')} — ${last.ok ? 'успешно' : 'ошибка'}: ${last.message}`,
+                )
+              : h('span', { style: S.hint }, 'Ещё не запускалось.'),
+            (last?.removed ?? 0) > 0
+              ? h(
+                  'span',
+                  { style: S.note },
+                  `Удалено: ${last.removed} — ${last.removedReason !== undefined && last.removedReason !== '' ? last.removedReason : 'причина не указана'}.`,
+                )
+              : null,
+            lastError !== ''
+              ? h('span', { style: S.note }, lastError)
+              : null,
+            (last?.childrenQuarantined ?? 0) > 0
+              ? h('span', { style: S.note }, `Вместе с родителями ушли в карантин субагентов: ${last.childrenQuarantined}.`)
+              : null,
+            (Array.isArray(last?.childrenMissing) ? last.childrenMissing.length : 0) > 0
+              ? h('span', { style: S.note }, `Субагентов нет локально: ${last.childrenMissing.length} — их копии в зеркале защищены от удаления.`)
+              : null,
+            (last?.skippedLocal ?? 0) > 0
+              ? h(
+                  'span',
+                  { style: S.note },
+                  `Локальных сессий пропущено: ${last.skippedLocal}`
+                  + ((last?.localMirrorProtected ?? 0) > 0 ? ` (копий в зеркале защищено: ${last.localMirrorProtected})` : '')
+                  + '.',
+                )
+              : null,
+            (last?.duplicatesSkipped ?? 0) > 0
+              ? h(
+                  'span',
+                  { style: S.note },
+                  `Копий-дублей при импорте пропущено: ${last.duplicatesSkipped} — такая сессия уже была локально.`,
+                )
+              : null,
+            (last?.skippedDeletions?.removed ?? last?.requireConfirmation?.removed ?? 0) > 0
+              ? h(
+                  'span',
+                  { style: S.note },
+                  `Удалений ждёт подтверждения: ${last?.skippedDeletions?.removed ?? last.requireConfirmation.removed} — ничего не удалено. Нажмите «Проверить» и «Применить удаления» в карточке «Проверка».`,
+                )
+              : null,
+            (data?.history?.length ?? 0) > 0
+              ? h(
+                  'div',
+                  { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+                  h('span', { style: S.label }, 'Последние запуски'),
+                  ...data.history.slice(-3).reverse().map((entry, index) =>
+                    h(
+                      'span',
+                      { key: `h${index}`, style: entry.ok ? S.meta : S.error },
+                      `${new Date(entry.at).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} — ${entry.ok ? 'ok' : 'ошибка'}: ${entry.message}${(entry.skippedLocal ?? 0) > 0 ? ` · локальных пропущено: ${entry.skippedLocal}` : ''}`,
+                    ),
+                  ),
+                )
+              : null,
+            h('span', { style: S.hint }, 'После приёма новых сессий перезапустите DSH — список обновляется при старте.'),
+            data?.automation
+              ? h(
+                  'span',
+                  { style: data.automation.lastError ? S.error : S.hint },
+                  data.automation.enabled === false
+                    ? 'Автосинхронизация выключена.'
+                    : `Автосинхронизация: приём раз в ${data.automation.settings?.pullIntervalMinutes ?? 15} мин, отправка при изменениях (не чаще ${data.automation.settings?.pushMinIntervalMinutes ?? 5} мин)`
+                      + (data.automation.lastPushAt
+                        ? `; последняя отправка ${new Date(data.automation.lastPushAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
+                        : '')
+                      + (data.automation.lastError ? `; ошибка: ${data.automation.lastError}` : ''),
+                )
+              : null,
+            h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 } },
+              h(
+                'div',
+                { style: S.buttons },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dshs-btn-primary',
+                    style: S.primary,
+                    disabled: busy,
+                    onClick: () => void checkPlan(),
+                  },
+                  state.busy === 'plan' ? 'Проверяю…' : (plan === null || plan === undefined ? 'Проверить' : 'Проверить снова'),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    style: S.button,
+                    disabled: busy,
+                    title: 'Найти копии одной сессии с разными id: локально, в зеркале и в карантине',
+                    onClick: () => void findDuplicates(),
+                  },
+                  state.busy === 'duplicates' ? 'Ищу дубли…' : 'Найти дубли',
+                ),
+                plan !== null && plan !== undefined
+                  ? h('span', { style: S.meta }, `Проверено: ${new Date(plan.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`)
+                  : null,
+                duplicates !== null && duplicates !== undefined
+                  ? h('span', { style: S.meta }, `Дублей: ${duplicates.duplicates ?? 0} · групп: ${duplicates.count ?? 0}`)
+                  : null,
+              ),
+              state.planError ? h('div', { style: S.error }, state.planError) : null,
+              state.duplicatesError ? h('div', { style: S.error }, state.duplicatesError) : null,
+              plan === null || plan === undefined
+                ? h(
+                    'span',
+                    { style: S.hint },
+                    'Сравнение локальных сессий с зеркалом по идентификаторам и хвостам логов. Нажмите «Проверить»: покажем, что уедет в зеркало, что приедет и что было бы удалено. Проверка только читает — ничего не изменяется. Удаления выполняются только кнопкой «Применить удаления» в «Опасной зоне».',
+                  )
+                : h(
+                    Collapsible,
+                    {
+                      key: `plan-${plan.at ?? ''}`,
+                      title: 'Результат проверки',
+                      summary: 'ничего не изменено',
+                      badge: (plan.deletionCount ?? 0) > 0 ? String(plan.deletionCount) : undefined,
+                      defaultOpen: true,
+                      className: 'dshs-plan-result',
+                    },
+                    h(
+                      'div',
+                      { style: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 } },
+                      h('span', { style: S.ok }, state.planNote || 'Проверка выполнена: ничего не изменено.'),
+                      ...(plan.warnings?.length > 0
+                        ? [h('div', { key: 'warnings', style: S.error }, ...plan.warnings.map((warning, index) => h('div', { key: `w${index}` }, `Внимание: ${warning}`)))]
+                        : []),
+                      h(
+                        'div',
+                        { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
+                        h(PlanBucket, { label: 'Только локально', count: plan.counts?.onlyLocal ?? 0, bytes: plan.sizes?.onlyLocal ?? 0, items: plan.buckets?.onlyLocal ?? [] }),
+                        h(PlanBucket, { label: 'Только в зеркале', count: plan.counts?.onlyCloud ?? 0, bytes: plan.sizes?.onlyCloud ?? 0, items: plan.buckets?.onlyCloud ?? [] }),
+                        h(PlanBucket, { label: 'Совпадают', count: plan.counts?.same ?? 0, bytes: plan.sizes?.same ?? 0, items: plan.buckets?.same ?? [] }),
+                        h(PlanBucket, { label: 'Локально новее', count: plan.counts?.localAhead ?? 0, bytes: plan.sizes?.localAhead ?? 0, items: plan.buckets?.localAhead ?? [] }),
+                        h(PlanBucket, { label: 'В зеркале новее', count: plan.counts?.cloudAhead ?? 0, bytes: plan.sizes?.cloudAhead ?? 0, items: plan.buckets?.cloudAhead ?? [] }),
+                        h(PlanBucket, { label: 'Расхождения', count: plan.counts?.conflicts ?? 0, bytes: plan.sizes?.conflicts ?? 0, items: plan.buckets?.conflicts ?? [] }),
+                        h(PlanBucket, { label: 'Дубли', count: plan.counts?.duplicates ?? 0, bytes: plan.sizes?.duplicates ?? 0, items: plan.buckets?.duplicates ?? [] }),
+                      ),
+                      (plan.duplicates?.groups?.length ?? 0) > 0
+                        ? h(
+                            Collapsible,
+                            {
+                              title: 'Группы дублей',
+                              summary: 'канонические помечены «=»',
+                              badge: String(plan.duplicates.count ?? 0),
+                              defaultOpen: false,
+                            },
+                            h(
+                              'div',
+                              { className: 'dshs-duplicates-groups' },
+                              ...(plan.duplicates.groups ?? []).slice(0, 20).map((group, index) => h(
+                                'div',
+                                { key: `pg${index}`, className: 'dshs-duplicates-group' },
+                                h(
+                                  'span',
+                                  { className: 'dshs-duplicates-head' },
+                                  h('span', { style: { fontSize: 11.5, fontWeight: 600 } }, `Канонический: ${group.canonicalId}${(group.children ?? 0) > 0 ? ` · детей: ${group.children}` : ''}`),
+                                  h('span', { style: S.meta }, group.match === 'contentHash' ? 'по содержимому' : 'по событиям и размеру'),
+                                ),
+                                ...(group.sessions ?? []).filter(session => session.canonical !== true).map(session => h(
+                                  'span',
+                                  { key: session.id, style: { fontSize: 11.5, opacity: 0.8, overflowWrap: 'anywhere' } },
+                                  `− ${session.id}${session.side !== undefined && session.side !== '' ? ` [${session.side === 'both' ? 'локально и в зеркале' : session.side === 'mirror' ? 'в зеркале' : session.side === 'local' ? 'локально' : 'в карантине'}]` : ''}`,
+                                )),
+                              )),
+                              (plan.duplicates?.groups?.length ?? 0) > 20
+                                ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё групп: ${plan.duplicates.groups.length - 20}`)
+                                : null,
+                            ),
+                          )
+                        : null,
+                      duplicates !== null && duplicates !== undefined
+                        ? h(
+                            'div',
+                            { className: 'dshs-duplicates-card' },
+                            h(
+                              'span',
+                              { style: (duplicates.duplicates ?? 0) > 0 ? S.note : S.ok },
+                              duplicates.duplicates > 0
+                                ? `Найдено лишних копий: ${duplicates.duplicates} (групп: ${duplicates.count}). Каноническая копия каждой группы останется.`
+                                : (duplicates.message ?? 'Дублей нет: копий одной сессии с разными id не найдено.'),
+                            ),
+                            duplicateGroups.length > 0
+                              ? h(
+                                  'div',
+                                  { className: 'dshs-duplicates-groups' },
+                                  ...duplicateGroups.slice(0, 20).map((group, index) => h(
+                                    'div',
+                                    { key: `dg${index}`, className: 'dshs-duplicates-group' },
+                                    h(
+                                      'span',
+                                      { className: 'dshs-duplicates-head' },
+                                      h('span', { style: { fontSize: 11.5, fontWeight: 600 } }, `Канонический: ${group.canonicalId}${(group.children ?? 0) > 0 ? ` · детей: ${group.children}` : ''}`),
+                                      h('span', { style: S.meta }, `лишних: ${(group.supersededIds ?? []).length}`),
+                                    ),
+                                    ...(group.sessions ?? []).map(session => h(
+                                      'span',
+                                      { key: session.id, style: { fontSize: 11.5, opacity: session.canonical === true ? 0.95 : 0.75, overflowWrap: 'anywhere' } },
+                                      `${session.canonical === true ? '= каноническая' : '− лишняя'} ${session.id}`,
+                                    )),
+                                  )),
+                                  duplicateGroups.length > 20
+                                    ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё групп: ${duplicateGroups.length - 20}`)
+                                    : null,
+                                )
+                              : null,
+                            h('span', { style: S.hint }, 'Убрать лишние копии в карантин можно в «Опасной зоне»: каноническая копия каждой группы останется.'),
+                          )
+                        : null,
+                      (plan.localSkipped ?? 0) > 0
+                        ? h('span', { style: S.note }, `Локальных сессий не участвует в обмене: ${plan.localSkipped} (режим «локальная»).`)
+                        : null,
+                    ),
+                  ),
+              h('span', { style: S.hint }, 'Проверка сравнивает с копией зеркала на этом компьютере: сеть не используется, журнал запусков не меняется.'),
+            ),
+          ),
+
+          // --- 3. «Сессии и режим»: группы, поиск, локальные/облачные -----
+          h(
+            Card,
+            {
+              title: 'Сессии и режим',
+              hint: 'Локальная сессия остаётся только на этом устройстве: не отправляется, не принимается и не удаляется отметкой с другого компьютера.',
+              meta: h(SessionGroupsCounter, null),
+            },
+            h(SessionModesSection, null),
+          ),
+
+          // --- 4. «Резервный канал»: выбор режима, поля, сверка -----------
           h(
             Card,
             {
               title: 'Резервный канал',
               hint: 'Второе место для копии сессий. Папка облачного клиента (OneDrive, Яндекс.Диск, Syncthing) — рекомендуемый вариант: без сети, паролей и токенов.',
+              meta: h(ReserveStatusBadge, { state: reserveState }),
             },
-            // Переключатель резерва: папка облака, WebDAV, git или «не дублировать».
             h(
               'div',
-              { style: S.buttons },
+              { className: 'dshs-reserve-modes', style: S.buttons },
               ...[
                 { value: 'folder', label: 'Папка облака (рекомендуется)' },
                 { value: 'webdav', label: 'WebDAV' },
@@ -1986,8 +2191,8 @@ function CollapsedItem({ title, summary, badge, children }) {
                 const active = activeSecondaryBackend === option.value;
                 const choose = () => {
                   const patch = { secondaryBackend: option.value };
-                  // Подставляем путь рядом с уже найденной папкой облака, чтобы
-                  // резерв включался «из коробки», без ручного поиска каталога.
+                  // Путь рядом с уже найденной папкой облака: резерв включится
+                  // «из коробки», без ручного поиска каталога.
                   if (option.value === 'folder' && activeSecondaryFolder === '') {
                     patch.secondaryFolder = data?.suggestedSecondaryFolder ?? data?.secondary?.folderDir ?? '';
                   }
@@ -2008,6 +2213,9 @@ function CollapsedItem({ title, summary, badge, children }) {
                 );
               }),
             ),
+            activeSecondaryBackend === 'none'
+              ? h('span', { style: S.hint }, 'Резерв выключен: сессии дублируются только в основное хранилище. Основная синхронизация работает как обычно.')
+              : null,
             activeSecondaryBackend === 'folder'
               ? h(
                   'div',
@@ -2033,45 +2241,45 @@ function CollapsedItem({ title, summary, badge, children }) {
                     : null,
                 )
               : activeSecondaryBackend === 'webdav'
-              ? h(
-                  'div',
-                  { style: S.field },
-                  h('span', { style: S.label }, 'Логин Яндекса для резерва'),
-                  h('input', {
-                    style: { ...S.input, colorScheme: themeScheme() },
-                    value: activeSecondaryLogin,
-                    placeholder: 'логин Яндекса',
-                    onChange: (event) => set({ secondaryLogin: event.target.value }),
-                  }),
-                  h('span', { style: S.label }, 'Пароль приложения'),
-                  h('input', {
-                    style: { ...S.input, colorScheme: themeScheme() },
-                    type: 'password',
-                    value: draft.secondaryPassword,
-                    placeholder: data?.secondaryPasswordStored === true ? 'пароль сохранён в хранилище' : 'пароль приложения',
-                    onChange: (event) => set({ secondaryPassword: event.target.value }),
-                  }),
-                  h('span', { style: S.label }, 'Папка на Диске'),
-                  h('input', {
-                    style: { ...S.input, colorScheme: themeScheme() },
-                    value: activeSecondaryPath,
-                    placeholder: 'dsh-sync-backup',
-                    onChange: (event) => set({ secondaryPath: event.target.value }),
-                  }),
-                )
-              : activeSecondaryBackend === 'git'
-              ? h(
-                  'label',
-                  { style: S.field },
-                  h('span', { style: S.label }, 'Адрес репозитория резерва'),
-                  h('input', {
-                    style: { ...S.input, colorScheme: themeScheme() },
-                    value: activeSecondaryRemote,
-                    placeholder: 'https://github.com/user/dsh-sessions-backup.git',
-                    onChange: (event) => set({ secondaryRemote: event.target.value }),
-                  }),
-                )
-              : null,
+                ? h(
+                    'div',
+                    { style: S.field },
+                    h('span', { style: S.label }, 'Логин Яндекса для резерва'),
+                    h('input', {
+                      style: { ...S.input, colorScheme: themeScheme() },
+                      value: activeSecondaryLogin,
+                      placeholder: 'логин Яндекса',
+                      onChange: (event) => set({ secondaryLogin: event.target.value }),
+                    }),
+                    h('span', { style: S.label }, 'Пароль приложения'),
+                    h('input', {
+                      style: { ...S.input, colorScheme: themeScheme() },
+                      type: 'password',
+                      value: draft.secondaryPassword,
+                      placeholder: data?.secondaryPasswordStored === true ? 'пароль сохранён в хранилище' : 'пароль приложения',
+                      onChange: (event) => set({ secondaryPassword: event.target.value }),
+                    }),
+                    h('span', { style: S.label }, 'Папка на Диске'),
+                    h('input', {
+                      style: { ...S.input, colorScheme: themeScheme() },
+                      value: activeSecondaryPath,
+                      placeholder: 'dsh-sync-backup',
+                      onChange: (event) => set({ secondaryPath: event.target.value }),
+                    }),
+                  )
+                : activeSecondaryBackend === 'git'
+                  ? h(
+                      'label',
+                      { style: S.field },
+                      h('span', { style: S.label }, 'Адрес репозитория резерва'),
+                      h('input', {
+                        style: { ...S.input, colorScheme: themeScheme() },
+                        value: activeSecondaryRemote,
+                        placeholder: 'https://github.com/user/dsh-sessions-backup.git',
+                        onChange: (event) => set({ secondaryRemote: event.target.value }),
+                      }),
+                    )
+                  : null,
             // Статус сверки и последней выгрузки.
             secondary?.enabled === true
               ? h(
@@ -2100,11 +2308,43 @@ function CollapsedItem({ title, summary, badge, children }) {
                   secondary.backend === 'folder' && secondary.folderDir
                     ? h('span', { style: S.meta }, `папка облака: ${secondary.folderDir}`)
                     : null,
+                  secondary?.status?.ok === false && secondary.status.message
+                    ? h('span', { style: S.error }, reserveErrorText(secondary.status))
+                    : null,
                 )
               : h('span', { style: S.hint }, 'Резерв выключен: сессии дублируются только в основное хранилище.'),
             secondaryDirty && secondary?.enabled === true
               ? h('span', { style: S.note }, 'Настройки резерва ещё не сохранены — сначала «Сохранить», потом «Сверить».')
               : null,
+            reserveState.hint !== '' && reserveState.key === 'error'
+              ? h('span', { style: S.error }, reserveState.hint)
+              : null,
+            // Результат лёгкой сверки: сравнивались только состав и манифест.
+            secondaryProbe !== null && secondaryProbe !== undefined
+              ? h(
+                  'div',
+                  { className: 'dshs-reserve-probe' },
+                  h(
+                    'span',
+                    { style: secondaryProbe.ok === true ? S.ok : S.error },
+                    secondaryProbe.ok === true
+                      ? `Лёгкая сверка выполнена за ${Math.max(1, Math.round(Number(secondaryProbe.durationMs ?? 0) / 1000))} с: локально ${secondaryProbe.local?.count ?? 0}, в облаке ${secondaryProbe.cloud?.count ?? 0}, только локально ${secondaryProbe.onlyLocal ?? 0}, только в облаке ${secondaryProbe.onlyCloud ?? 0}, расходятся ${secondaryProbe.differ ?? 0}.`
+                      : (secondaryProbe.hint || reserveErrorText(secondaryProbe)),
+                  ),
+                  secondaryProbe.ok === true
+                    ? h('span', { style: S.meta }, 'Логи не скачивались: сравнивались только состав облака и манифест профиля.')
+                    : (secondaryProbe.code ? h('span', { style: S.meta }, `код: ${secondaryProbe.code}`) : null),
+                )
+              : null,
+            // «Сохранить» рядом с полями резерва.
+            h(SaveRow, {
+              dirty: secondaryDirty,
+              busy: busy,
+              busyText: 'Сохранение…',
+              onSave: saveCard,
+              note: secondaryDirty ? 'Поля изменены — нажмите «Сохранить».' : 'Настройки резерва сохранены.',
+            }),
+            // Две разные сверки: лёгкая «Сверить» и полная «Синхронизировать резерв».
             h(
               'div',
               { style: S.buttons },
@@ -2115,21 +2355,39 @@ function CollapsedItem({ title, summary, badge, children }) {
                   className: 'dshs-btn-primary',
                   style: S.primary,
                   disabled: busy || secondary?.enabled !== true || secondaryDirty,
-                  title: secondaryDirty ? 'Сначала сохраните настройки резерва' : 'Сравнить локальные сессии с облаком и принять данные из него',
-                  onClick: () => void compareSecondary(),
+                  title: secondaryDirty ? 'Сначала сохраните настройки резерва' : 'Сравнить локальные сессии с облаком без скачивания логов (PROPFIND и profile/manifest.json, 10–30 с)',
+                  onClick: () => void compareSecondaryLight(),
                 },
-                state.busy === 'secondary-init' ? 'Сверка…' : 'Сверить',
+                state.busy === 'secondary-probe' ? 'Сверка…' : 'Сверить',
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: S.button,
+                  disabled: busy || secondary?.enabled !== true || secondaryDirty,
+                  title: 'Полная сверка: принять данные из облака и разрешить выгрузку',
+                  onClick: () => void syncSecondaryFull(),
+                },
+                state.busy === 'secondary-init' ? 'Синхронизация…' : 'Синхронизировать резерв',
               ),
             ),
+            state.busy === 'secondary-init' ? h(SyncProgress, { data }) : null,
             h(
               'span',
               { style: S.hint },
-              'Сверка сравнивает локальные сессии с облаком и сначала принимает данные из облака; только после этого разрешена отправка в резерв. Сессии и настройки дублируются в оба места, вложения — только в основное; если основное недоступно, приём идёт из резервного.',
+              '«Сверить» сравнивает только состав: PROPFIND корня и profile/manifest.json, без скачивания логов, 10–30 с. «Синхронизировать резерв» — полная сверка с загрузкой: сначала принимает данные из облака, потом разрешает выгрузку. Сессии и настройки дублируются в оба места, вложения — только в основное.',
             ),
           ),
 
-          // --- внешний плагин: предупреждение о двух движках -----------------
-          external?.found
+          // --- аккордеон 1: «Дополнительно» (свёрнут по умолчанию) ---------
+          h(
+            SectionAccordion,
+            {
+              title: 'Дополнительно',
+              summary: 'Проверка окружения, профиль, обновления и служебные действия',
+            },
+            external?.found
             ? h(
                 Card,
                 { title: t('sectionExternal') },
@@ -2155,9 +2413,7 @@ function CollapsedItem({ title, summary, badge, children }) {
                 mode === 'external' ? h('span', { style: S.ok }, 'Активен режим: через внешний плагин') : null,
               )
             : null,
-
-          // --- проверка окружения: Node, git, папка и репозиторий ------------
-          h(
+            h(
             Card,
             {
               title: t('sectionChecks'),
@@ -2186,31 +2442,7 @@ function CollapsedItem({ title, summary, badge, children }) {
               ? h('span', { style: S.note }, checks.filter((check) => !check.ok).map((check) => check.hint).join(' '))
               : null,
           ),
-
-          // --- сессии: режим «локальная / облачная», фильтр и массово -------
-          h(
-            Card,
-            {
-              title: 'Сессии и режим синхронизации',
-              hint: 'Локальная сессия остаётся только на этом устройстве: не отправляется, не принимается и не удаляется отметкой с другого компьютера.',
-              // Счётчик групп в шапке карточки: «групп: N, субагентов: M».
-              meta: h(SessionGroupsCounter, null),
-            },
-            h(SessionModesSection, null),
-          ),
-
-          // --- удалённые: карантин зеркала и восстановление ------------------
-          h(
-            Card,
-            {
-              title: t('sectionDeleted'),
-              hint: t('deletedHint'),
-            },
-            h(DeletedSection, { t }),
-          ),
-
-          // --- профиль: план приёма, применение и рабочие пространства -------
-          h(
+            h(
             Card,
             {
               title: 'Профиль',
@@ -2218,13 +2450,11 @@ function CollapsedItem({ title, summary, badge, children }) {
             },
             h(ProfileLayerSection, null),
           ),
-
-          // --- обслуживание: версия плагина и обновление ---------------------
-          h(
+            h(
             Card,
             { title: t('sectionMaintenance'), hint: 'Проверка версии плагина и служебные действия.' },
-            // Заголовок плашки обновления называет плагин: без него непонятно,
-            // чьё это обновление. Виден только когда обновление доступно.
+            
+            
             update?.status === 'behind'
               ? h('span', { style: { ...S.label, fontWeight: 600 } }, `${t('title')}: доступно обновление`)
               : null,
@@ -2233,9 +2463,9 @@ function CollapsedItem({ title, summary, badge, children }) {
               { style: S.hint },
               update === null
                 ? 'Проверяем версию…'
-                // «Доступно обновление» собираем здесь: строка должна называть
-                // плагин, а не только версии. Остальные статусы host-часть отдаёт
-                // готовой подписью — версия и короткий коммит.
+                
+                
+                
                 : update.status === 'behind'
                   ? `плагин «${t('title')}»: ${update.version ? `v${update.version} ` : ''}${shortSha(update.installed)} → ${shortSha(update.latest)} — установится автоматически.`
                   : typeof update.description === 'string' && update.description !== ''
@@ -2258,9 +2488,7 @@ function CollapsedItem({ title, summary, badge, children }) {
             updateNote !== '' ? h('span', { style: S.note }, updateNote) : null,
             h('span', { style: S.hint }, 'Проверка обновлений идёт раз в 6 часов; установленная версия применяется при следующем запуске DSH.'),
           ),
-
-          // --- панель действий: сохранить, создать репозиторий, диагностика --
-          h(
+            h(
             'div',
             { className: 'dshs-sync-actions', style: S.actions },
             h(
@@ -2280,8 +2508,8 @@ function CollapsedItem({ title, summary, badge, children }) {
                   style: S.primary,
                   disabled: busy || data === null,
                   onClick: () => {
-                    // Сохраняем только на загруженных настройках: иначе пустые
-                    // значения по умолчанию затирают уже настроенное хранилище.
+                    
+                    
                     if (data === null) {
                       publish({ error: 'Настройки ещё загружаются — подождите пару секунд.' });
                       return;
@@ -2315,12 +2543,136 @@ function CollapsedItem({ title, summary, badge, children }) {
               ),
             ),
           ),
-          h(
+            h(
             'span',
             { style: S.hint },
             'Репозиторий создаётся приватным через токен GitHub из хранилища DSH. Если токена нет — создайте репозиторий вручную и вставьте его HTTPS-адрес выше.',
           ),
+          ),
+
+          // --- аккордеон 2: «Опасная зона» (свёрнут, красный акцент) -------
+          h(
+            SectionAccordion,
+            {
+              title: 'Опасная зона',
+              summary: 'Удаления, карантин и восстановление — только по подтверждению',
+              danger: true,
+              badge: (plan?.deletionCount ?? 0) > 0 ? String(plan.deletionCount) : undefined,
+            },
+            h(
+            Card,
+            {
+              title: t('sectionDeleted'),
+              hint: t('deletedHint'),
+            },
+            h(DeletedSection, { t }),
+          ),
+            plan !== null && plan !== undefined && (plan.deletionCount ?? 0) > 0
+              ? h(
+                  'div',
+                  { className: 'dshs-danger-block' },
+                  h('span', { style: S.error }, `Было бы удалено из зеркала: ${plan.deletionCount}. Это только список — нажмите «Применить удаления», чтобы перенести их в карантин на 30 дней.`),
+                  (plan.requireConfirmation?.subagents ?? 0) > 0
+                    ? h('span', { style: S.note }, `Вместе с родителем уйдут субагенты: ${plan.requireConfirmation.subagents} — их тоже можно будет восстановить.`)
+                    : null,
+                  plan.requireConfirmation?.overCount === true
+                    ? h('span', { style: S.note }, `Больше ${plan.requireConfirmation.maxCount ?? 5} сессий: убедитесь, что это не сбой доступа к диску.`)
+                    : null,
+                  h(
+                    CollapsedItem,
+                    {
+                      title: 'Удаления',
+                      summary: `${plan.deletionCount} · в карантин на 30 дней`,
+                      badge: String(plan.deletionCount),
+                    },
+                    h(
+                      'div',
+                      { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, maxHeight: 200, overflowY: 'auto', overscrollBehavior: 'contain' } },
+                      ...(plan.deletions ?? []).slice(0, 50).map((item) => h(
+                        'span',
+                        {
+                          key: item.id,
+                          title: String(item.shortId ?? shortSessionId(item.id)),
+                          style: { fontSize: 11.5, overflowWrap: 'anywhere' },
+                        },
+                        `${item.title !== undefined && item.title !== '' ? item.title : 'Без названия'} (${item.humanReason ?? item.reason})`,
+                      )),
+                      (plan.deletions?.length ?? 0) > 50
+                        ? h('span', { style: { fontSize: 11, opacity: 0.6 } }, `… ещё ${plan.deletions.length - 50}`)
+                        : null,
+                    ),
+                  ),
+                  confirmDeletions
+                    ? h(
+                        'div',
+                        { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
+                        h('span', { style: S.hint }, `Подтвердите: ${plan.deletionCount} сессий уйдут из зеркала в карантин на 30 дней. Локальные сессии не изменятся.`),
+                        h(
+                          'div',
+                          { style: S.buttons },
+                          h(
+                            'button',
+                            { type: 'button', style: S.danger, disabled: busy, onClick: () => void applyPlanDeletions() },
+                            state.busy === 'prune' ? 'Применяю…' : `Подтвердить удаление (${plan.deletionCount})`,
+                          ),
+                          h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => setConfirmDeletions(false) }, 'Отмена'),
+                        ),
+                      )
+                    : h(
+                        'div',
+                        { style: S.buttons },
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            style: S.danger,
+                            disabled: busy,
+                            title: 'Перенести эти сессии из зеркала в карантин на 30 дней',
+                            onClick: () => setConfirmDeletions(true),
+                          },
+                          `Применить удаления (${plan.deletionCount})`,
+                        ),
+                      ),
+                )
+              : h('span', { style: { fontSize: 12, opacity: 0.75 } }, 'Удалений нет: удалять из зеркала нечего.'),
+            duplicateGroups.length > 0
+              ? (confirmDuplicates
+                ? h(
+                    'div',
+                    { className: 'dshs-duplicates-actions' },
+                    h('span', { style: S.hint }, `Подтвердите: ${duplicates.duplicates ?? duplicateLoserIds().length} лишних копий уйдут в карантин на 30 дней. Канонические копии останутся.`),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        style: S.danger,
+                        disabled: busy,
+                        onClick: () => void applyDuplicateQuarantine(),
+                      },
+                      state.busy === 'duplicates-quarantine' ? 'Убираю…' : `Подтвердить карантин (${duplicates.duplicates ?? duplicateLoserIds().length})`,
+                    ),
+                    h('button', { type: 'button', style: S.button, disabled: busy, onClick: () => setConfirmDuplicates(false) }, 'Отмена'),
+                  )
+                : h(
+                    'div',
+                    { className: 'dshs-duplicates-actions' },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        style: S.danger,
+                        disabled: busy,
+                        title: 'Перенести лишние копии в карантин на 30 дней; канонические останутся',
+                        onClick: () => setConfirmDuplicates(true),
+                      },
+                      `Убрать дубли в карантин (${duplicates.duplicates ?? duplicateLoserIds().length})`,
+                    ),
+                    h('span', { style: S.hint }, 'Копии не удаляются безвозвратно: их можно вернуть в карточке «Удалённые».'),
+                  ))
+              : null,
+          ),
         );
+
       }
 
       /**
@@ -3981,6 +4333,9 @@ function CollapsedItem({ title, summary, badge, children }) {
       // Группы: субагенты свёрнуты под родителем, раскрытие — по клику на «+N».
       // В наборе — id родителей, чьи дети показаны.
       const [expanded, setExpanded] = React.useState(() => new Set());
+      // Поиск по названию/id и «Показать ещё»: список длинный, показываем по 50.
+      const [query, setQuery] = React.useState('');
+      const [visibleLimit, setVisibleLimit] = React.useState(50);
       const toggleExpanded = (id) => {
         setExpanded((current) => {
           const next = new Set(current);
@@ -3993,15 +4348,23 @@ function CollapsedItem({ title, summary, badge, children }) {
       const migrationCount = Number(localOnlyInfo?.migration?.count ?? 0);
       const declaredCount = Number(localOnlyInfo?.count ?? 0);
 
+      const normalizedQuery = query.trim().toLowerCase();
       const visible = sessions.filter((session) => {
         if (filter === 'cloud') return session.mode !== 'local';
         if (filter === 'local') return session.mode === 'local';
         if (filter === 'attention') return session.mode !== 'local' && session.badge !== 'synced';
         return true;
+      }).filter((session) => {
+        if (normalizedQuery === '') return true;
+        const title = String(session.title ?? '').toLowerCase();
+        const id = String(session.id ?? '').toLowerCase();
+        return title.includes(normalizedQuery) || id.includes(normalizedQuery);
       });
       // Строки с вложенностью: субагенты идут под родителем, сирота — верхним
       // уровнем (родителя нет в списке этого устройства).
       const rows = sessionGroupRows(visible, expanded);
+      // «Показать ещё»: в DOM держим не больше 50 строк, остальные — по кнопке.
+      const shownRows = rows.slice(0, visibleLimit);
       const groupSummary = sessionGroupSummary(sessions, data?.groups);
 
       const toggleSelected = (id) => {
@@ -4115,6 +4478,37 @@ function CollapsedItem({ title, summary, badge, children }) {
       return h(
         'div',
         { style: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 } },
+        // Поиск по списку: название или id; сброс возвращает полный список.
+        h(
+          'div',
+          { className: 'dshs-sessions-search' },
+          h('input', {
+            type: 'search',
+            value: query,
+            placeholder: 'Поиск по названию или id',
+            'aria-label': 'Поиск по названию или id',
+            style: { ...S.input, height: 32 },
+            onChange: (event) => {
+              setQuery(event.target.value);
+              setVisibleLimit(50);
+            },
+          }),
+          normalizedQuery !== ''
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  style: S.buttonSmall,
+                  onClick: () => {
+                    setQuery('');
+                    setVisibleLimit(50);
+                  },
+                },
+                'Сбросить',
+              )
+            : null,
+          h('span', { style: S.meta }, normalizedQuery === '' ? `всего: ${rows.length}` : `найдено: ${rows.length}`),
+        ),
         h(
           'div',
           { style: { ...S.cardActions, gap: 6 } },
@@ -4140,7 +4534,10 @@ function CollapsedItem({ title, summary, badge, children }) {
                       }
                     : {}),
                 },
-                onClick: () => setFilter(key),
+                onClick: () => {
+                  setFilter(key);
+                  setVisibleLimit(50);
+                },
               },
               label,
             ),
@@ -4269,11 +4666,11 @@ function CollapsedItem({ title, summary, badge, children }) {
           : null,
         note !== '' ? h('span', { style: S.note }, note) : null,
         rows.length === 0
-          ? h('span', { style: S.hint }, sessions.length === 0 ? 'Сессии появятся здесь после первого запуска синхронизации или настройки проекта.' : 'Под фильтр ничего не попало.')
+          ? h('span', { style: S.hint }, sessions.length === 0 ? 'Сессии появятся здесь после первого запуска синхронизации или настройки проекта.' : (normalizedQuery !== '' ? 'По запросу ничего не найдено.' : 'Под фильтр ничего не попало.'))
           : h(
               'div',
               { className: 'dshs-modes-list' },
-              rows.map((row) => {
+              shownRows.map((row) => {
                 const session = row.session;
                 const badge = badgeOf(session.badge);
                 const label = sessionLabel(session);
@@ -4434,6 +4831,23 @@ function CollapsedItem({ title, summary, badge, children }) {
                 );
               }),
             ),
+        // «Показать ещё»: остальные строки списка, чтобы DOM не разрастался.
+        rows.length > shownRows.length
+          ? h(
+              'div',
+              { className: 'dshs-sessions-more' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: S.buttonSmall,
+                  onClick: () => setVisibleLimit((value) => value + 50),
+                },
+                `Показать ещё ${Math.min(50, rows.length - shownRows.length)}`,
+              ),
+              h('span', { style: S.meta }, `показано ${shownRows.length} из ${rows.length}`),
+            )
+          : null,
         // Подсказка под списком: сколько всего групп и как раскрыть субагентов.
         rows.length === 0
           ? null
@@ -6052,6 +6466,24 @@ function CollapsedItem({ title, summary, badge, children }) {
         for (const listener of listeners) listener();
       },
       readHostState: () => snapshot.data,
+      // Черновик настроек для headless-тестов перестроенной страницы: бейдж
+      // «есть изменения» и кнопка «Сохранить» рядом с полями.
+      setDraft: (patch) => {
+        draftOverride = { ...(draftOverride ?? {}), ...(patch ?? {}) };
+        touchedOverride = true;
+        for (const listener of listeners) listener();
+      },
+      resetDraft: () => {
+        draftOverride = null;
+        touchedOverride = false;
+        for (const listener of listeners) listener();
+      },
+      readDraftOverride: () => draftOverride,
+      // Статусы резервного канала и человеческие тексты ошибок сверки.
+      reserveStatusOf,
+      reserveErrorText,
+      reserveStatusLabel: (payload) => reserveStatusOf(payload).label,
+      storageDirtyOf,
       // План «Проверить» для тестов карточки: в живом интерфейсе его приносит
       // маршрут /api/dsh-sync/plan по кнопке.
       setPlan: (value) => {

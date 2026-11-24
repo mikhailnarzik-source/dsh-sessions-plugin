@@ -113,7 +113,7 @@ assert.ok(panel.children.length >= 1, 'внутри страницы есть к
 // Глубокий разбор дерева: рендерим и вложенные компоненты, чтобы поймать
 // ошибки в новых секциях (список сессий, профиль, рабочие пространства).
 const deepExpand = (node, depth = 0) => {
-  if (depth > 16) return '<max-depth>'
+  if (depth > 30) return '<max-depth>'
   if (Array.isArray(node)) return node.map((child) => deepExpand(child, depth + 1))
   if (node === null || node === undefined) return null
   if (typeof node !== 'object') return node
@@ -129,7 +129,7 @@ const deepExpand = (node, depth = 0) => {
   return { type, props, children: deepExpand(node.children, depth + 1) }
 }
 const pageTree = JSON.stringify(deepExpand(mainEntries[0].component({})))
-assert.match(pageTree, /Сессии и режим синхронизации/, 'секция режимов сессий на странице')
+assert.match(pageTree, /Сессии и режим/, 'секция режимов сессий на странице')
 assert.match(pageTree, /Профиль/, 'секция профиля и рабочих пространств')
 assert.match(pageTree, /Синхронизирована|Локальная сессия|Сессии появятся/, 'у секции режимов есть содержимое')
 

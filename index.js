@@ -46,6 +46,7 @@ import { buildSessionGroups, descendantsOf, rootOf } from './lib/session-groups.
 import { pullReplicated, pushReplicated, secondaryConfig } from './lib/replica.mjs'
 import {
   initializeSecondaryChannel,
+  probeSecondaryChannel,
   readSecondaryState,
   readSecondaryStatus,
   resetSecondaryInitialization,
@@ -113,6 +114,9 @@ const DUPLICATES_PATH = '/api/dsh-sync/duplicates'
 const DUPLICATES_QUARANTINE_PATH = '/api/dsh-sync/duplicates/quarantine'
 // Сверка резервного канала: сравнить локальное с облаком и разрешить выгрузку.
 const SECONDARY_INIT_PATH = '/api/dsh-sync/secondary-init'
+// Лёгкая сверка резерва: только PROPFIND корня и profile/manifest.json,
+// без скачивания логов (timeout 10–30 с). «Сверить» в карточке резерва.
+const SECONDARY_PROBE_PATH = '/api/dsh-sync/secondary-probe'
 
 // --- уведомления -----------------------------------------------------------
 // Кольцевой буфер: клиент забирает всё, что появилось после его курсора, и
@@ -618,6 +622,37 @@ export function tombstoneGroup({ tombstones, id } = {}) {
   }
 }
 
+/**
+ * Человеческий совет к ошибке лёгкой сверки резерва: что именно сделать.
+ *
+ * Коды и тексты приходят от бэкенда (`reserve/unauthorized`, `reserve/timeout`,
+ * `reserve/unsupported`) или из сетевого исключения (401/403, TLS). Панель
+ * показывает не «HTTP 403», а действие: проверить пароль приложения, повторить
+ * позже, включить полную сверку.
+ */
+export function reserveHint(result) {
+  const code = String(result?.code ?? '')
+  const message = String(result?.message ?? '')
+  const both = `${code} ${message}`
+  if (/secondary\/not-configured/.test(code)) {
+    return 'Резерв не включён: выберите режим в карточке «Резервный канал» и нажмите «Сохранить».'
+  }
+  if (/reserve\/unsupported/.test(code) || result?.skipped === true) {
+    return 'Этот канал не умеет лёгкую сверку (только PROPFIND и манифест). Нажмите «Синхронизировать резерв» — она выполнит полную сверку с загрузкой.'
+  }
+  if (/reserve\/unauthorized|\b401\b|\b403\b|не принял логин|пароль приложения/i.test(both)) {
+    return 'Логин или пароль приложения не принят (401/403). Проверьте логин Яндекс.Диска и пароль приложения «Файлы», затем сохраните настройки и повторите «Сверить».'
+  }
+  if (/reserve\/timeout|Timeout|уложилась|истекло/i.test(both)) {
+    return 'Облако не ответило за отведённое время (10–30 с). Проверьте интернет и повторите «Сверить»; для крупного облака используйте «Синхронизировать резерв».'
+  }
+  if (/TLS|SSL|certificate|schannel|EPROTO|сертификат/i.test(both)) {
+    return 'Соединение TLS не установлено: проверьте системные сертификаты и время на компьютере, затем повторите «Сверить».'
+  }
+  if (result?.ok === true) return ''
+  return 'Сверка резерва не удалась: проверьте путь/логин резерва и повторите. Полная сверка — кнопка «Синхронизировать резерв».'
+}
+
 /** Текущее состояние: окружение, настройки, счётчики и последний запуск. */
 async function readState(ctx) {
   const home = dshHome()
@@ -984,6 +1019,10 @@ async function saveSettings(ctx, payload) {
     if (wpath !== '') config.webdavPath = wpath
   } else if (remote !== '') {
     config.remote = remote
+  }
+  // Ветка git-репозитория: в карточке «Хранилище» рядом с адресом.
+  if (typeof payload.branch === 'string' && payload.branch.trim() !== '') {
+    config.branch = payload.branch.trim().replace(/\s+/g, '').slice(0, 120)
   }
   config.attachments = payload.attachments === true
   config.autoUpdate = payload.autoUpdate === true
@@ -3786,7 +3825,9 @@ export function apply(ctx) {
   route('secondary-init', SECONDARY_INIT_PATH, async () => {
     try {
       const home = dshHome()
-      const config = await loadConfig(home)
+      // Пароль WebDAV резерва хранится в сейфе профиля, а не в настройках:
+      // подставляем его перед созданием бэкенда.
+      const config = await applySecret(ctx, await loadConfig(home))
       const result = await initializeSecondaryChannel({
         home,
         config,
@@ -3813,6 +3854,73 @@ export function apply(ctx) {
       return json(result)
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
+    }
+  })
+
+  // «Сверить» резервного канала — лёгкая сверка (U3): PROPFIND корня и чтение
+  // profile/manifest.json, без скачивания логов и блобов. Таймаут 10–30 с
+  // задаёт бэкенд (`lightProbeTimeoutMs`, по умолчанию 20 с). Ничего не
+  // принимает и не отправляет: только показывает расхождения и пишет статус.
+  route('secondary-probe', SECONDARY_PROBE_PATH, async () => {
+    try {
+      const home = dshHome()
+      // Логин/пароль резерва: пароль приложения лежит в сейфе профиля —
+      // applySecret кладёт его в окружение, откуда его берёт WebDAV-бэкенд.
+      const config = await applySecret(ctx, await loadConfig(home))
+      const secondary = secondaryConfig(config)
+      if (secondary === undefined) {
+        const notConfigured = {
+          ok: false,
+          code: 'secondary/not-configured',
+          backend: 'none',
+          skipped: false,
+          local: { count: 0, ids: [] },
+          cloud: { count: 0, ids: [] },
+          onlyLocal: 0,
+          onlyCloud: 0,
+          differ: 0,
+          message: 'резервный канал не настроен',
+          at: new Date().toISOString(),
+        }
+        return json({ ...notConfigured, hint: reserveHint(notConfigured) })
+      }
+      const result = await probeSecondaryChannel({ home, config, secondary })
+      const compare = {
+        ok: result?.ok === true,
+        code: result?.code ?? 'reserve/ok',
+        backend: result?.backend ?? secondary.backend,
+        skipped: result?.skipped === true,
+        local: {
+          count: Number(result?.local?.count ?? 0),
+          ids: Array.isArray(result?.local?.ids) ? result.local.ids : [],
+        },
+        cloud: {
+          count: Number(result?.cloud?.count ?? 0),
+          ids: Array.isArray(result?.cloud?.ids) ? result.cloud.ids : [],
+        },
+        onlyLocal: Number(result?.onlyLocal ?? 0),
+        onlyCloud: Number(result?.onlyCloud ?? 0),
+        differ: Number(result?.differ ?? 0),
+        timeoutMs: Number(result?.timeoutMs ?? 0),
+        durationMs: Number(result?.durationMs ?? 0),
+        manifest: result?.manifest,
+        message: typeof result?.message === 'string' ? result.message : '',
+        at: new Date().toISOString(),
+      }
+      compare.hint = reserveHint(compare)
+      return json(compare)
+    } catch (error) {
+      const failed = {
+        ok: false,
+        code: 'secondary/probe-failed',
+        message: `лёгкая сверка резерва не удалась: ${error instanceof Error ? error.message : String(error)}`,
+        local: { count: 0, ids: [] },
+        cloud: { count: 0, ids: [] },
+        onlyLocal: 0,
+        onlyCloud: 0,
+        differ: 0,
+      }
+      return json({ ...failed, hint: reserveHint(failed) }, 500)
     }
   })
 

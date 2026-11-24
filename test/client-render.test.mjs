@@ -244,7 +244,9 @@ test('шапка: иконка в круге, заголовок, подзаго
 })
 
 test('секции-карточки с заголовками и единым оформлением', () => {
-  const titles = ['Синхронизация', 'Проверка', 'Подключение', 'Дополнительно', 'Резервный канал', 'Проверка окружения', 'Обслуживание', 'Удалённые']
+  // M3: страница перестроена из 12 карточек в 4 основных + 2 аккордеона;
+  // служебные секции остались вложенными карточками внутри «Дополнительно».
+  const titles = ['Хранилище', 'План и синхронизация', 'Сессии и режим', 'Резервный канал', 'Дополнительно', 'Опасная зона', 'Проверка окружения', 'Обслуживание', 'Удалённые', 'Профиль']
   for (const title of titles) {
     const heading = nodes.find((node) => node.type === 'h2' && textOf(node).trim() === title)
     assert.ok(heading, `секция «${title}» есть на странице`)
@@ -387,7 +389,7 @@ test('кнопки страницы: 36/32, радиус 10, мягкая зал
 })
 
 test('секции режимов сессий и профиля: фильтр, список, рабочие пространства', () => {
-  const modesSection = nodes.find((node) => node.type === 'section' && textOf(node).includes('Сессии и режим синхронизации'))
+  const modesSection = nodes.find((node) => node.type === 'section' && textOf(node).includes('Сессии и режим'))
   assert.ok(modesSection, 'секция «Сессии и режим синхронизации» есть')
   assert.match(textOf(modesSection), /Все \(\d+\)/, 'фильтр «Все» с количеством')
   assert.match(textOf(modesSection), /Облачные \(\d+\)/, 'фильтр «Облачные»')
@@ -403,7 +405,7 @@ test('секции режимов сессий и профиля: фильтр, 
 })
 
 test('новые элементы: кнопки 32 px, список сессий со скроллом, пункт меню сессии', () => {
-  const modesSection = nodes.find((node) => node.type === 'section' && textOf(node).includes('Сессии и режим синхронизации'))
+  const modesSection = nodes.find((node) => node.type === 'section' && textOf(node).includes('Сессии и режим'))
   const chips = walk(modesSection).filter((node) => String(node.props?.className ?? '').includes('dshs-modes-chip'))
   assert.equal(chips.length, 4, 'четыре чипа фильтра')
   for (const chip of chips) {
