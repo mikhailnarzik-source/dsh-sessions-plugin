@@ -18,22 +18,23 @@ import { PLACEHOLDER, WEBDAV_SECRET, hasSecret, readSecret, writeSecret } from '
 import { mkdtemp, open, rm } from 'node:fs/promises'
 import { readFile as readFileText } from 'node:fs/promises'
 
-import { defaultConfig, loadConfig, saveConfig, canonicalCwd } from './lib/config.mjs'
+import { CONFIG_FILE, defaultConfig, loadConfig, saveConfig, canonicalCwd } from './lib/config.mjs'
 import { encodeSegment, projectKey, samePath } from './lib/format.mjs'
 import { collectDiagnostics } from './lib/diagnostics.mjs'
-import { readHistory, localSkipStats, recordRun, removalDetails, subagentStats } from './lib/history.mjs'
-import { readLedger, sessionState } from './lib/ledger.mjs'
+import { HISTORY_FILE, readHistory, localSkipStats, recordRun, removalDetails, subagentStats } from './lib/history.mjs'
+import { LEDGER_FILE, readLedger, sessionState } from './lib/ledger.mjs'
 import { probeYandex } from './lib/yandex.mjs'
 import { classifyReserveError, probeWebdav } from './lib/webdav.mjs'
 import { sameFolder } from './lib/folder.mjs'
-import { backupProgress } from './lib/progress.mjs'
+import { backupProgress, uploadProgressPath } from './lib/progress.mjs'
 import { apply as applyDeletePlugin } from './delete/index.js'
 import { matchProjectPath } from './lib/mirror-meta.mjs'
-import { listLocalSessions, listMirrorSessions, localSessionDir, remapTo, sessionsOfProject, splitLog } from './lib/store.mjs'
+import { listLocalSessions, listMirrorSessionsCached, localSessionDir, remapTo, sessionsOfProject, splitLog } from './lib/store.mjs'
 import { canonicalRestoreId, chooseCanonical, findQuarantineProject, quarantineSupersededCopy, rankCandidates, resolveTombstoneIds, restoredFromOf } from './lib/deletions.mjs'
 import { resolveSessionTitle, resolveTombstoneTitle } from './lib/titles.mjs'
 import { collectDuplicateGroups, quarantineDuplicates, quarantineSessionCopies } from './lib/sync.mjs'
 import {
+  OUTBOX_FILE,
   classifyBackendFailure,
   backendSupports,
   enqueueOutbox,
@@ -53,10 +54,13 @@ import {
   readSecondaryStatus,
   resetSecondaryInitialization,
   secondaryInitSnapshot,
+  SECONDARY_STATUS_FILE,
 } from './lib/secondary-init.mjs'
 import { applyUpdate, checkForUpdate, describeUpdate, updateState } from './lib/update.js'
 import {
+  LOCAL_ONLY_FILE,
   MODE_LOCAL,
+  MODES_FILE,
   applyWorkspaceDefaults,
   normalizeSessionId,
   readSessionModes,
@@ -84,9 +88,9 @@ import {
   setSessionRule,
   writeRulesProfile,
 } from './lib/session-rules.mjs'
-import { clearWorkspacePending, planWorkspace, readLocalWorkspaces, readWorkspacePending } from './lib/workspace.mjs'
+import { WORKSPACE_STORE, clearWorkspacePending, planWorkspace, readLocalWorkspaces, readWorkspacePending } from './lib/workspace.mjs'
 import { applyPendingProfile, clearPendingBrowserSettings, discardProfilePlan, readJournal, readPendingBrowserSettings, readProfileStatus, refreshProfilePlan, writeBrowserSettings } from './lib/profile.mjs'
-import { QUARANTINE_DAYS, isActiveTombstone, listTombstones, readTombstones, restoreTombstones, writeTombstones } from './lib/tombstones.mjs'
+import { QUARANTINE_DAYS, TOMBSTONES_FILE, isActiveTombstone, listTombstones, readTombstones, restoreTombstones, writeTombstones } from './lib/tombstones.mjs'
 import {
   cloudCopyPath,
   deleteCloudCopy,
@@ -100,6 +104,8 @@ import {
 import { createRemote } from './lib/remote.mjs'
 import { hasChanges } from './lib/git.mjs'
 import { collectOnboarding } from './lib/onboarding.mjs'
+import { SNAPSHOT_TTL_MS, createStateSnapshot, fileSignature } from './lib/state-snapshot.mjs'
+import { STATE_FILE } from './lib/sync-state.mjs'
 
 export const name = 'dsh-sync'
 // sessionPersistence даёт список сессий с путями к логам: обходим каталог
@@ -878,23 +884,21 @@ async function readState(ctx) {
     const mine = located.sessions
     local = mine.length
     if (projectId && existsSync(config.repoDir)) {
-      const mirrored = await listMirrorSessions(config.repoDir, projectId)
+      // Метаданные зеркала без чтения логов целиком: заголовки берутся из
+      // кэша стора по path+mtime+size (lib/store.mjs).
+      const mirrored = await listMirrorSessionsCached(config.repoDir, projectId)
       mirror = mirrored.length
       const localIds = new Set(mine.map(session => session.id))
       const mirrorIds = new Set(mirrored.map(session => session.id))
       onlyLocal = mine.filter(session => !mirrorIds.has(session.id)).length
       onlyMirror = mirrored.filter(session => !localIds.has(session.id)).length
       // Субагенты: сессии с родителем в заголовке. «Доступны» — те, что уже
-      // лежат локально.
+      // лежат локально. Заголовок уже разобран при чтении списка — байты лога
+      // для этого не нужны.
       subagents = 0
       subagentsAvailable = 0
       for (const item of mirrored) {
-        let parent
-        try {
-          parent = splitLog(item.bytes).header.parentSession
-        } catch {
-          parent = undefined
-        }
+        const parent = item.header?.parentSession
         if (typeof parent === 'string' && parent !== '') {
           subagents += 1
           if (localIds.has(item.id)) subagentsAvailable += 1
@@ -1321,6 +1325,9 @@ async function saveSettings(ctx, payload) {
   if (JSON.stringify(config.secondary ?? null) !== previousSecondaryJson) {
     await resetSecondaryInitialization(home, 'настройки резервного канала изменились')
   }
+  // Настройки изменились — снапшот /state и /sessions устарел. Ответ маршрута
+  // собирается напрямую (readState), а следующий опрос панели увидит новое.
+  invalidateStateSnapshot()
   return readState(ctx)
 }
 
@@ -2460,10 +2467,13 @@ async function createRepository(ctx) {
  * зеркалом, оранжевый — есть неотправленные изменения, красный — ещё не
  * уезжала, серый — локальная (не синхронизируется). Дополнительно панель
  * получает режим, признак привязки к рабочему пространству и сведения о
- * последнем запуске. Результат кэшируется на несколько секунд: список
- * перерисовывается часто.
+ * последнем запуске.
+ *
+ * Собственный TTL у функции больше не нужен: `/sessions` отдаётся из общего
+ * снапшота состояния (lib/state-snapshot.mjs), где кэш, single-flight и
+ * инвалидация уже учтены — иначе внутренний кэш отдавал бы устаревшие данные
+ * раньше, чем общий снапшот успевает пересобраться.
  */
-let sessionStatesCache = { at: 0, value: undefined }
 
 /** Все сессии, привязанные к рабочим пространствам (или undefined без реестра). */
 function workspaceAttachedIds(ctx) {
@@ -2552,10 +2562,6 @@ async function readLastRunInfo(home) {
 }
 
 async function sessionStates(ctx) {
-  if (sessionStatesCache.value !== undefined && Date.now() - sessionStatesCache.at < 5_000) {
-    return sessionStatesCache.value
-  }
-
   const home = dshHome()
   const config = await loadConfig(home)
   const ledger = await readLedger(home)
@@ -2758,13 +2764,15 @@ async function sessionStates(ctx) {
     // H6: счётчик очереди невыполненных операций — «в очереди: N».
     outbox: await outboxSummary(home),
   }
-  sessionStatesCache = { at: Date.now(), value }
   return value
 }
 
-/** Сбросить кеш состояний: после смены режима значки должны обновиться сразу. */
+/**
+ * Сбросить снапшот состояния: после смены режима и других операций значки и
+ * счётчики должны обновиться сразу, не дожидаясь TTL.
+ */
 export function invalidateSessionStates() {
-  sessionStatesCache = { at: 0, value: undefined }
+  invalidateStateSnapshot()
 }
 
 // --- правила сессий (M6): сводки и маршруты для UI ---------------------------
@@ -4360,6 +4368,87 @@ function startUpdateWatch(ctx) {
   }, 'dsh-sync: update watch')
 }
 
+// --- M9-A: единый снапшот состояния панели ----------------------------------
+//
+// `/state` и `/sessions` раньше собирались независимо и каждый раз заново:
+// /state читал все логи зеркала, /sessions — свой набор файлов. Теперь один
+// расчёт готовит оба ответа, а повторные опросы получают снапшот из памяти.
+// Сам механизм — в lib/state-snapshot.mjs; здесь только источники и файлы,
+// изменение которых делает снапшот устаревшим.
+
+/** TTL снапшота: из окружения (тесты) или значение по умолчанию. */
+function stateSnapshotTtlMs() {
+  const raw = Number(process.env.DSH_SYNC_STATE_SNAPSHOT_TTL_MS)
+  return Number.isFinite(raw) && raw >= 0 ? raw : SNAPSHOT_TTL_MS
+}
+
+/** Файлы, изменение которых делает снапшот состояния устаревшим. */
+function stateSnapshotFiles(home, config) {
+  const files = [
+    join(home, CONFIG_FILE),
+    join(home, 'dsh-sync', LEDGER_FILE),
+    join(home, 'dsh-sync', LAST_RUN_FILE),
+    join(home, 'dsh-sync', HISTORY_FILE),
+    join(home, 'dsh-sync', OUTBOX_FILE),
+    join(home, 'dsh-sync', MODES_FILE),
+    join(home, 'dsh-sync', LOCAL_ONLY_FILE),
+    join(home, 'dsh-sync', STATE_FILE),
+    join(home, 'dsh-sync', SECONDARY_STATUS_FILE),
+    join(home, WORKSPACE_STORE),
+  ]
+  const repoDir = typeof config?.repoDir === 'string' ? config.repoDir : ''
+  if (repoDir !== '') {
+    // Надгробия и прогресс выгрузки лежат рядом с зеркалом.
+    files.push(join(repoDir, TOMBSTONES_FILE))
+    files.push(uploadProgressPath(repoDir))
+  }
+  return files
+}
+
+/**
+ * Подпись источников состояния: mtime+size файлов плюс метаданные логов.
+ * Логи зеркала берутся только как метаданные (id/mtime/size из кэша стора):
+ * подпись не должна возвращать чтение сотен мегабайт на каждый опрос.
+ */
+async function stateSignature(ctx) {
+  const home = dshHome()
+  let config
+  try {
+    config = await loadConfig(home)
+  } catch {
+    config = { projects: {}, repoDir: '' }
+  }
+  const parts = [await fileSignature(stateSnapshotFiles(home, config))]
+  const repoDir = typeof config?.repoDir === 'string' ? config.repoDir : ''
+  if (repoDir !== '') {
+    for (const projectId of Object.keys(config.projects ?? {})) {
+      try {
+        const mirrored = await listMirrorSessionsCached(repoDir, projectId)
+        parts.push(mirrored.map(item => `${item.id}:${item.mtimeMs}:${item.size}`).join(','))
+      } catch {
+        parts.push(`mirror-error:${projectId}`)
+      }
+    }
+  }
+  // Локальные сессии: id и объём из сервиса сессий (как в computeFingerprint).
+  parts.push(await computeFingerprint(ctx))
+  return parts.join('|')
+}
+
+/** Живые снапшоты: apply может вызываться несколько раз (перезагрузка плагина). */
+const stateSnapshots = new Set()
+
+/** Сбросить снапшот состояния: после операций панель видит результат сразу. */
+export function invalidateStateSnapshot() {
+  for (const snapshot of stateSnapshots) snapshot.invalidate('operation')
+}
+
+/** Счётчики последнего созданного снапшота — для тестов и диагностики. */
+export function stateSnapshotStats() {
+  const list = [...stateSnapshots]
+  return list.length === 0 ? null : list[list.length - 1].stats()
+}
+
 export function apply(ctx) {
   void migrateSecret(ctx)
 
@@ -4376,6 +4465,34 @@ export function apply(ctx) {
 
   const failures = []
 
+  // M9-A: один снапшот на оба маршрута. Сборка кладёт сразу и state, и sessions;
+  // ошибки запоминаем отдельно, чтобы падение одного ответа не ломало другой
+  // (формат ответов и коды ошибок прежние).
+  const stateSnapshot = createStateSnapshot({
+    ttlMs: stateSnapshotTtlMs(),
+    collect: async () => {
+      const value = { state: null, sessions: null, stateError: '', sessionsError: '' }
+      try {
+        value.state = await readState(ctx)
+      } catch (error) {
+        value.stateError = error instanceof Error ? error.message : String(error)
+      }
+      try {
+        value.sessions = await sessionStates(ctx)
+      } catch (error) {
+        value.sessionsError = error instanceof Error ? error.message : String(error)
+      }
+      return value
+    },
+    signature: () => stateSignature(ctx),
+  })
+  stateSnapshots.add(stateSnapshot)
+  try {
+    ctx.effect(() => () => stateSnapshots.delete(stateSnapshot), 'dsh-sync: state snapshot')
+  } catch {
+    // эффект недоступен (тестовый ctx) — снапшот живёт до перезагрузки плагина
+  }
+
   const route = (label, path, handler, methods = ['POST']) => {
     try {
       ctx.effect(() => ctx.connection.fetch.register({
@@ -4389,7 +4506,12 @@ export function apply(ctx) {
     }
   }
 
-  route('state', STATE_PATH, async () => json(await readState(ctx)))
+  route('state', STATE_PATH, async () => {
+    // Ответ — из общего снапшота: /sessions не собирает те же данные заново.
+    const { value } = await stateSnapshot.get()
+    if (value.stateError !== '') throw new Error(value.stateError)
+    return json(value.state)
+  })
 
   // M4: онбординг нового устройства. Только чтение; GET — по кнопке «Проверить».
   // Ответ не содержит значений секретов: только «есть/нет» и сводки.
@@ -4655,7 +4777,10 @@ export function apply(ctx) {
 
   route('sessions', SESSIONS_PATH, async () => {
     try {
-      return json(await sessionStates(ctx))
+      // Тот же снапшот, что у /state: один расчёт на оба ответа.
+      const { value } = await stateSnapshot.get()
+      if (value.sessionsError !== '') throw new Error(value.sessionsError)
+      return json(value.sessions)
     } catch (error) {
       return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 500)
     }
