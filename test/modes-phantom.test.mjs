@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyLocalOnlyModes, existingSessionIds, publishLocalOnly, readSessionModes } from '../lib/session-modes.mjs'
+import { applyLocalOnlyModes, existingSessionIds, pruneSessionModes, publishLocalOnly, readSessionModes } from '../lib/session-modes.mjs'
 import { makeSessionLocal } from '../lib/cloud-copy.mjs'
 import { writeFile } from 'node:fs/promises'
 
@@ -18,6 +18,22 @@ test('домашний снимок объявлений сильнее уста
     await writeFile(join(repoDir, 'local-only.json'), JSON.stringify({ version: 1, updatedAt: '2026-11-01T00:00:00.000Z', sessions: { 'session-real': { declaredBy: 'd', at: '2026-11-01T00:00:00.000Z', reason: 'owner' }, 'session-phantom': { declaredBy: 'd', at: '2026-11-01T00:00:00.000Z', reason: 'owner' } } }))
     const result = await publishLocalOnly({ home, repoDir })
     assert.deepEqual(Object.keys(result.data.sessions), ['session-real'], 'фантом из старого зеркала снят')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('pruneSessionModes убирает режимы несуществующих сессий', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-modes-prune-'))
+  try {
+    await mkdir(join(home, 'sessions', '--project--', 'session-real'), { recursive: true })
+    await mkdir(join(home, 'dsh-sync'), { recursive: true })
+    await writeFile(join(home, 'dsh-sync', 'session-modes.json'), JSON.stringify({ version: 2, sessions: { 'session-real': 'local', 'session-ghost': 'local' }, workspaces: {} }))
+    const result = await pruneSessionModes(home)
+    assert.deepEqual(result.removed, ['session-ghost'])
+    const modes = await readSessionModes(home)
+    assert.equal(modes.sessions['session-ghost'], undefined)
+    assert.equal(modes.sessions['session-real'], 'local')
   } finally {
     await rm(home, { recursive: true, force: true })
   }
