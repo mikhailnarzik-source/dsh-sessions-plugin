@@ -6969,6 +6969,11 @@ function CollapsedItem({ title, summary, badge, children }) {
             const pending = result?.pending?.settings ?? {};
             if (alive && pending !== null && typeof pending === 'object' && Object.keys(pending).length > 0) {
               applyBrowserSettings(pending);
+              // После применения отправляем актуальный снимок: host хранит его
+              // в browser-settings.json и сверяет профиль. Иначе план профиля
+              // бесконечно показывает «2 файла ждут применения», хотя панели
+              // уже перестроены в localStorage.
+              await post(BROWSER_SETTINGS_PATH, { current: readBrowserSettingsSnapshot() });
               await post(BROWSER_SETTINGS_PATH, { applied: true });
             }
           } catch {
