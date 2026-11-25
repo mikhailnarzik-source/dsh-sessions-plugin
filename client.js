@@ -50,6 +50,10 @@ window.__ModuleLoader__.load({
     const SECONDARY_PROBE_PATH = '/api/dsh-sync/secondary-probe';
     // M4: онбординг нового устройства. GET — только чтение, без секретов.
     const ONBOARDING_PATH = '/api/dsh-sync/onboarding';
+    // M6: правила сессий. GET — сводка и разбор по сессиям, POST — правка.
+    const SESSION_RULES_PATH = '/api/dsh-sync/session-rules';
+    // «Проверить правила»: только чтение — корзины, источники, конфликты.
+    const SESSION_RULES_VERIFY_PATH = '/api/dsh-sync/session-rules/verify';
     const shortSha = (value) => (value === null || value === undefined || value === '' ? '?' : String(value).slice(0, 7));
 
     // Подписи страницы «Синхронизация сессий». Только тексты интерфейса:
@@ -766,6 +770,61 @@ window.__ModuleLoader__.load({
             '.dshs-onboarding-command code{flex:1 1 220px;min-width:0;overflow-wrap:anywhere;font-size:11.5px;line-height:1.45;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(0,0,0,0.18)}',
             '.dshs-secret-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;font-size:12px;line-height:1.5}',
             '@media (max-width:640px){.dshs-onboarding-step{flex-wrap:wrap}.dshs-onboarding-step .dshs-onboarding-badge{order:-1}.dshs-onboarding-steps{max-height:none}.dshs-onboarding-chip{height:32px;font-size:11px;padding:0 10px}}',
+            // --- M6: правила сессий ------------------------------------------
+            // Карточка «Правила» внутри «Сессии и режим»: шапка, фильтры, список
+            // с прокруткой (max-height 320), бейджи пресета/владельца/лимита и
+            // отчёт «Проверить правила» корзинами. Радиус 14, границы из токенов.
+            '.dshs-rules-card{display:flex;flex-direction:column;gap:10px;min-width:0;padding:14px 16px;border-radius:14px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,0.045))}',
+            '.dshs-rules-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
+            '.dshs-rules-title{margin:0;display:flex;align-items:center;gap:8px;min-width:0;font-size:13.5px;line-height:1.35;font-weight:600;color:var(--dsw-alias-label-primary,inherit)}',
+            '.dshs-rules-accent{width:3px;height:16px;border-radius:2px;background:var(--dsw-alias-brand-primary,rgba(80,120,200,0.75));flex:0 0 auto}',
+            '.dshs-rules-summary{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;min-height:24px;padding:0 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.06);font-size:11.5px;font-weight:600;line-height:1.2;white-space:nowrap;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}',
+            '.dshs-rules-filters{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}',
+            '.dshs-rules-list{display:flex;flex-direction:column;gap:4px;min-width:0;max-height:320px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}',
+            '.dshs-rules-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;padding:7px 10px;border-radius:10px;border:1px solid transparent}',
+            '.dshs-rules-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.1));border-color:var(--dsw-alias-border-l2,rgba(128,128,128,0.22))}',
+            '.dshs-rules-row-text{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 180px}',
+            '.dshs-rules-row-title{font-size:12.5px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+            '.dshs-rules-shield{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;color:var(--dsw-alias-state-success-primary,#2f9e44)}',
+            '.dshs-rules-shield[data-protected="false"]{color:var(--dsw-alias-label-tertiary,rgba(128,128,128,0.8))}',
+            '.dshs-rules-badge{box-sizing:border-box;display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:7px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,0.35));background:rgba(128,128,128,0.1);font-size:11px;font-weight:600;line-height:1;white-space:nowrap;flex:0 0 auto}',
+            '.dshs-rules-badge[data-tone="preset"]{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 12%,transparent)}',
+            '.dshs-rules-badge[data-tone="warn"]{border-color:rgba(247,190,76,0.6);background:rgba(247,190,76,0.14)}',
+            '.dshs-rules-badge[data-tone="owner"]{border-color:rgba(112,72,232,0.45);background:rgba(112,72,232,0.12)}',
+            '.dshs-rules-badge[data-tone="limit"]{border-color:rgba(209,36,47,0.5);background:rgba(209,36,47,0.12);color:var(--dsw-alias-state-error-primary,#d1242f)}',
+            '.dshs-rules-notice{display:flex;flex-direction:column;gap:4px;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid rgba(247,190,76,0.45);background:rgba(247,190,76,0.1);font-size:11.5px;line-height:1.5;text-align:justify;hyphens:auto}',
+            '.dshs-rules-grow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid rgba(247,190,76,0.5);background:rgba(247,190,76,0.1)}',
+            '.dshs-rules-grow-text{flex:1 1 240px;min-width:0;font-size:12px;line-height:1.5;overflow-wrap:anywhere}',
+            '.dshs-rules-report{display:flex;flex-direction:column;gap:6px;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.05)}',
+            '.dshs-rules-buckets{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;min-width:0}',
+            '.dshs-rules-bucket{display:flex;flex-direction:column;gap:2px;min-width:0;padding:7px 9px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.22));background:rgba(128,128,128,0.04)}',
+            '.dshs-rules-bucket-label{font-size:11px;font-weight:600;line-height:1.3;opacity:.85}',
+            '.dshs-rules-bucket-value{font-size:12.5px;font-weight:600;line-height:1.3}',
+            '.dshs-rules-bucket-items{font-size:11px;line-height:1.45;opacity:.8;overflow-wrap:anywhere}',
+            // Модалка «Правила сессии…»: портал в body, чипы пресетов (32 px),
+            // поля, «Сохранить» рядом с «Проверить правила» (36 px).
+            '.dshs-rules-layer{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:32px 16px;background:rgba(0,0,0,0.42)}',
+            '.dshs-rules-dialog{display:flex;flex-direction:column;gap:12px;box-sizing:border-box;width:min(560px,calc(100vw - 24px));min-width:0;max-height:min(86vh,720px);overflow-y:auto;overscroll-behavior:contain;padding:16px 18px;border-radius:14px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.28));background:var(--dsw-alias-bg-base,#22242a);color:var(--dsw-alias-label-primary,inherit);box-shadow:0 18px 50px rgba(0,0,0,0.45)}',
+            '.dshs-rules-dialog-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}',
+            '.dshs-rules-dialog-title{flex:1 1 auto;min-width:0;font-size:14px;font-weight:600;line-height:1.35}',
+            '.dshs-rules-dialog-text{font-size:12px;line-height:1.5;text-align:justify;hyphens:auto;overflow-wrap:normal;word-break:normal;color:var(--dsw-alias-label-secondary,rgba(128,128,128,0.95))}',
+            '.dshs-rules-fields{display:flex;flex-direction:column;gap:8px;min-width:0}',
+            '.dshs-rules-field{display:flex;align-items:center;gap:9px;flex-wrap:wrap;min-width:0;font-size:12.5px;line-height:1.45}',
+            '.dshs-rules-field input[type="checkbox"]{margin:0;flex:0 0 auto;accent-color:var(--dsw-alias-brand-primary,#4a7dcc)}',
+            '.dshs-rules-field input[type="number"]{width:120px;flex:0 0 auto}',
+            '.dshs-rules-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}',
+            '.dshs-rules-actions button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 14px;border-radius:10px;border:1px solid var(--dsw-alias-border-l4,rgba(128,128,128,0.35));background:transparent;color:inherit;font:inherit;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer;min-width:0;max-width:100%}',
+            '.dshs-rules-actions button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16))}',
+            '.dshs-rules-actions button:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:2px}',
+            '.dshs-rules-actions button[data-variant="primary"]{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 18%,transparent);color:var(--dsw-alias-brand-primary,#4a7dcc)}',
+            '.dshs-rules-actions button:disabled{opacity:.55;cursor:default}',
+            '.dshs-rules-chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}',
+            '.dshs-rules-chip{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,0.35));background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;min-width:0;max-width:100%}',
+            '.dshs-rules-chip[data-active="true"]{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 16%,transparent);border-color:var(--dsw-alias-brand-primary,#4a7dcc)}',
+            '.dshs-rules-chip:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.16))}',
+            '.dshs-rules-chip:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4a7dcc) 55%,transparent);outline-offset:2px}',
+            '.dshs-rules-menu-icon{display:inline-flex;align-items:center;color:inherit;flex:0 0 auto}',
+            '@media (max-width:640px){.dshs-rules-card{padding:12px}.dshs-rules-layer{padding:12px 8px}.dshs-rules-dialog{max-height:calc(100vh - 24px);padding:14px 14px}.dshs-rules-list{max-height:none}.dshs-rules-actions button{flex:1 1 auto}.dshs-rules-field input[type="number"]{width:100%;flex:1 1 120px}}',
           ].join('\n');
           document.head.appendChild(style);
           return () => style.remove();
@@ -2805,6 +2864,9 @@ function CollapsedItem({ title, summary, badge, children }) {
               ),
             },
             h(SessionModesSection, null),
+            // M6: карточка «Правила» — внутри «Сессии и режим», чтобы четыре
+            // основные карточки страницы остались как в M3.
+            h(SessionRulesPanel, null),
           ),
 
           // --- 3b. «Это новое устройство»: онбординг нового компьютера ------
@@ -3864,6 +3926,9 @@ function CollapsedItem({ title, summary, badge, children }) {
             },
           }),
           h(SyncToasts, null),
+          // Модалка правил живёт здесь: меню сессии закрывается после клика, а
+          // иконка в левой панели смонтирована всегда.
+          h(SessionRulesDialogHost, null),
         );
       }
 
@@ -3903,13 +3968,14 @@ function CollapsedItem({ title, summary, badge, children }) {
         console.error('[dsh-sync] индикатор в списке сессий недоступен:', error);
       }
 
-      // Пункт в меню сессии: переключить «локальная / облачная».
+      // Пункт в меню сессии: «локальная / облачная» и «Правила сессии…».
+      // Два действия — один компонент: слот списка, но регистраций не больше.
       try {
         ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
           name: 'sidebar.workspaces.session.menu.item',
           id: 'dsh-sync.session-mode',
           order: 55,
-        }, SessionSyncMenuItem));
+        }, SessionMenuItems));
       } catch (error) {
         console.error('[dsh-sync] пункт меню сессии недоступен:', error);
       }
@@ -4982,9 +5048,749 @@ function CollapsedItem({ title, summary, badge, children }) {
       ]);
     }
 
+    // --- M6: правила сессий ---------------------------------------------------
+    // Хранилище правил живёт в host-части (~/.dsh/dsh-sync/session-rules.json),
+    // копия — в зеркале профиля. Клиент читает сводку GET /session-rules и
+    // показывает: карточку «Правила», щиты и лимиты в списке сессий, пункт
+    // «Правила сессии…» в меню сессии и модалку с пресетами и полями.
+    const RULE_PRESETS = {
+      control: {
+        label: 'Контрольная',
+        hint: 'не удалять, лимит 15 МБ, запрет развилки, уведомлять',
+        fields: { protect: true, maxMb: 15, forbidFork: true, notifyForeignAppend: true },
+      },
+      keep: { label: 'Неприкосновенная', hint: 'не удалять из зеркала', fields: { protect: true } },
+      archive: { label: 'Архив', hint: 'локальная навсегда и не удалять', fields: { syncMode: 'local', protect: true } },
+      none: { label: 'Обычная', hint: 'снять правило: сессия как все', fields: {} },
+    };
+    const RULE_PRESET_ORDER = ['control', 'keep', 'archive', 'none'];
+    const RULE_SOURCE_LABELS = {
+      session: 'правило сессии',
+      parent: 'унаследовано от родителя',
+      match: 'правило по шаблону',
+      default: 'без правила',
+    };
+    const RULE_FILTERS = [
+      ['all', 'Все'],
+      ['protected', 'Защищённые'],
+      ['control', 'Контрольные'],
+      ['archive', 'Архив'],
+    ];
+    const RULES_VERIFY_BUCKETS = [
+      ['protected', 'Защищены от чистки'],
+      ['ownerBlocked', 'Только владелец (push пропустит)'],
+      ['overLimit', 'Переросли лимит'],
+      ['localOnly', 'Объявлены локальными'],
+      ['forbidFork', 'Запрещена развилка'],
+      ['notify', 'Уведомлять о дополнении'],
+    ];
+
+    // Один общий запрос правил на всю страницу и меню: сводка меняется редко,
+    // кэш 20 секунд, как у снимка сессий.
+    const RULES_REPORT_TTL_MS = 20_000;
+    const rulesState = { data: null, at: 0, loading: false, listeners: new Set() };
+    const rulesVerify = { data: null, at: 0, busy: false, error: '' };
+
+    async function refreshSessionRules(force) {
+      if (!force && Date.now() - rulesState.at < RULES_REPORT_TTL_MS) return rulesState.data;
+      if (rulesState.loading) return rulesState.data;
+      rulesState.loading = true;
+      try {
+        const report = await get(SESSION_RULES_PATH);
+        rulesState.data = report ?? null;
+        rulesState.at = Date.now();
+        return report;
+      } catch {
+        // без правил панель и меню работают как раньше
+        return rulesState.data;
+      } finally {
+        rulesState.loading = false;
+        for (const listener of rulesState.listeners) listener();
+      }
+    }
+
+    function useSessionRules() {
+      const [, bump] = React.useState(0);
+      React.useEffect(() => {
+        const listener = () => bump((value) => value + 1);
+        rulesState.listeners.add(listener);
+        void refreshSessionRules(false);
+        return () => rulesState.listeners.delete(listener);
+      }, []);
+      return rulesState.data;
+    }
+
+    function useRulesVerify() {
+      const [, bump] = React.useState(0);
+      React.useEffect(() => {
+        const listener = () => bump((value) => value + 1);
+        rulesState.listeners.add(listener);
+        return () => rulesState.listeners.delete(listener);
+      }, []);
+      return { data: rulesVerify.data, busy: rulesVerify.busy, error: rulesVerify.error };
+    }
+
+    /** «Проверить правила»: только чтение — корзины, источники, конфликты. */
+    async function verifyRules() {
+      if (rulesVerify.busy) return rulesVerify.data;
+      rulesVerify.busy = true;
+      rulesVerify.error = '';
+      for (const listener of rulesState.listeners) listener();
+      try {
+        const report = await get(SESSION_RULES_VERIFY_PATH);
+        rulesVerify.data = report ?? null;
+        rulesVerify.at = Date.now();
+        return report;
+      } catch (error) {
+        rulesVerify.error = `Проверка правил не удалась: ${explain(error)}`;
+        return null;
+      } finally {
+        rulesVerify.busy = false;
+        for (const listener of rulesState.listeners) listener();
+      }
+    }
+
+    /** Мегабайты для подписи: 15 → «15», 18.42 → «18,4», 0.012 → «0,012». */
+    function formatMbValue(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return '—';
+      const rounded = number >= 1 ? Math.round(number * 10) / 10 : Math.round(number * 1000) / 1000;
+      return String(rounded).replace('.', ',');
+    }
+
+    /** Правило сессии из сводки: по id, с нормализацией префикса `session-`. */
+    function rulesRowOf(report, sessionId) {
+      const rows = Array.isArray(report?.sessions) ? report.sessions : [];
+      const wanted = String(sessionId ?? '');
+      if (wanted === '') return undefined;
+      return rows.find((row) => String(row?.id ?? '') === wanted)
+        ?? rows.find((row) => String(row?.id ?? '').replace(/^session-/, '') === wanted.replace(/^session-/, ''));
+    }
+
+    /** Список id из последнего запуска: что правило удержало. */
+    function rulesIdsOf(report, key) {
+      const list = report?.lastRun !== null && typeof report?.lastRun === 'object' ? report.lastRun[key] : undefined;
+      return new Set((Array.isArray(list) ? list : []).map((id) => String(id)));
+    }
+
+    /** Фильтр карточки «Правила»: все / защищённые / контрольные / архив. */
+    function rulesFilterRows(rows, filter) {
+      const list = Array.isArray(rows) ? rows : [];
+      if (filter === 'protected') return list.filter((row) => row?.protect === true);
+      if (filter === 'control') return list.filter((row) => row?.preset === 'control');
+      if (filter === 'archive') return list.filter((row) => row?.preset === 'archive' || row?.syncMode === 'local');
+      return list;
+    }
+
+    /** Сессии, у которых есть что показать в карточке «Правила». */
+    function rulesVisibleRows(report) {
+      const rows = Array.isArray(report?.sessions) ? report.sessions : [];
+      return rows.filter((row) => row?.hasRule === true || row?.overLimit === true || row?.ownerBlocked === true);
+    }
+
+    /** Название сессии для строки правил: без пустых подписей. */
+    function rulesRowTitle(row) {
+      const title = String(row?.title ?? '').replace(/\s+/g, ' ').trim();
+      if (title !== '') return title.slice(0, 80);
+      const shortId = String(row?.shortId ?? '').replace(/\s+/g, ' ').trim();
+      return shortId !== '' ? shortId : 'Без названия';
+    }
+
+    /** Щит: «защищена правилом». Рисуется currentColor, читается на 14–24 px. */
+    function ShieldIcon({ size = 14, protectedByRule = true }) {
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          'aria-hidden': 'true',
+          focusable: 'false',
+          style: { flex: '0 0 auto' },
+        },
+        h('path', {
+          d: 'M12 3.2 5.5 5.9v5.2c0 3.9 2.7 6.9 6.5 8.7 3.8-1.8 6.5-4.8 6.5-8.7V5.9L12 3.2Z',
+          stroke: 'currentColor',
+          strokeWidth: 1.7,
+          strokeLinejoin: 'round',
+        }),
+        protectedByRule === true
+          ? h('path', {
+              d: 'm9.2 11.6 2 2 3.7-4',
+              stroke: 'currentColor',
+              strokeWidth: 1.7,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+            })
+          : null,
+      );
+    }
+
+    /** Бейдж правила: пресет, владелец, лимит, чужое изменение. */
+    function RuleBadge({ tone = 'preset', title = '', children }) {
+      return h('span', { className: 'dshs-rules-badge', 'data-tone': tone, title }, children);
+    }
+
+    // --- карточка «Правила» в панели ---------------------------------------
+    /**
+     * Карточка «Правила»: список сессий с правилом, фильтр, щиты и бейджи,
+     * «Проверить правила» и отчёт корзинами. Живёт внутри карточки «Сессии и
+     * режим», чтобы не ломать четыре основные карточки страницы (M3).
+     */
+    function SessionRulesPanel() {
+      const report = useSessionRules();
+      const verify = useRulesVerify();
+      const [filter, setFilter] = React.useState('all');
+      const rows = rulesVisibleRows(report);
+      const filtered = rulesFilterRows(rows, filter);
+      const counts = report?.counts !== null && typeof report?.counts === 'object' ? report.counts : {};
+      const foreignIds = rulesIdsOf(report, 'foreignChangeIds');
+      const messages = Array.isArray(report?.lastRun?.messages) ? report.lastRun.messages.filter((line) => typeof line === 'string' && line !== '') : [];
+      const verifyData = verify.data;
+      const conflicts = Array.isArray(verifyData?.conflicts) ? verifyData.conflicts : [];
+
+      const chips = RULE_FILTERS.map(([key, label]) => {
+        const count = rulesFilterRows(rows, key).length;
+        return h(
+          'button',
+          {
+            key,
+            type: 'button',
+            className: 'dshs-rules-chip',
+            'data-filter': key,
+            'data-active': filter === key ? 'true' : 'false',
+            'aria-pressed': filter === key ? 'true' : 'false',
+            style: {
+              ...S.buttonSmall,
+              ...(filter === key
+                ? {
+                    background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #4a7dcc) 16%, transparent)',
+                    borderColor: 'var(--dsw-alias-brand-primary, #4a7dcc)',
+                  }
+                : {}),
+            },
+            onClick: () => setFilter(key),
+          },
+          `${label} (${count})`,
+        );
+      });
+
+      return h(
+        'section',
+        { className: 'dshs-rules-card', 'aria-labelledby': 'dshs-rules-title', 'data-rules': String(rows.length) },
+        h(
+          'div',
+          { className: 'dshs-rules-head' },
+          h('span', { className: 'dshs-rules-accent', 'aria-hidden': 'true' }),
+          h(
+            'h3',
+            { id: 'dshs-rules-title', className: 'dshs-rules-title' },
+            h(ShieldIcon, { size: 15 }),
+            'Правила',
+          ),
+          h(
+            'span',
+            { className: 'dshs-rules-summary' },
+            `правил: ${counts.sessions ?? 0} · защищено: ${counts.protected ?? 0}${(counts.overLimit ?? 0) > 0 ? ` · лимит: ${counts.overLimit}` : ''}`,
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              style: { ...S.buttonSmall, marginLeft: 'auto' },
+              disabled: verify.busy === true,
+              onClick: () => void verifyRules(),
+            },
+            verify.busy === true ? 'Проверяем…' : 'Проверить правила',
+          ),
+        ),
+        h(
+          'span',
+          { style: S.hint },
+          'Правило защищает сессию от чистки, отправляет её только с устройства-владельца и следит за размером лога. Задаётся в меню сессии «Правила сессии…».',
+        ),
+        messages.length > 0
+          ? h(
+              'div',
+              { className: 'dshs-rules-notice' },
+              messages.slice(0, 5).map((line, index) => h('span', { key: `notice-${index}` }, line)),
+            )
+          : null,
+        h('div', { className: 'dshs-rules-filters' }, chips),
+        filtered.length === 0
+          ? h(
+              'span',
+              { style: S.hint },
+              rows.length === 0
+                ? 'Правил пока нет: откройте меню сессии и выберите «Правила сессии…».'
+                : 'Под фильтр ничего не попало.',
+            )
+          : h(
+              'div',
+              { className: 'dshs-rules-list' },
+              filtered.map((row) => h(
+                'div',
+                {
+                  key: row.id,
+                  className: 'dshs-rules-row',
+                  'data-source': row.ruleSource ?? 'default',
+                  'data-over-limit': row.overLimit === true ? 'true' : undefined,
+                  title: `${row.shortId || row.id}${row.inheritedFrom ? ` · унаследовано от ${row.inheritedFrom}` : ''}`,
+                },
+                h(
+                  'span',
+                  {
+                    className: 'dshs-rules-shield',
+                    'data-protected': row.protect === true ? 'true' : 'false',
+                    title: row.protect === true ? 'Сессия защищена правилом' : 'Правило без защиты',
+                  },
+                  h(ShieldIcon, { size: 15, protectedByRule: row.protect === true }),
+                ),
+                h(
+                  'span',
+                  { className: 'dshs-rules-row-text' },
+                  h('span', { className: 'dshs-rules-row-title' }, rulesRowTitle(row)),
+                  h(
+                    'span',
+                    { style: S.meta },
+                    `${row.presetLabel !== '' && row.presetLabel !== undefined ? `пресет: ${row.presetLabel}` : 'своё правило'} · ${RULE_SOURCE_LABELS[row.ruleSource] ?? 'правило'}`,
+                  ),
+                ),
+                row.presetLabel !== '' && row.presetLabel !== undefined
+                  ? h(RuleBadge, { key: 'preset', tone: 'preset' }, row.presetLabel)
+                  : null,
+                row.ownerBlocked === true
+                  ? h(RuleBadge, { key: 'owner', tone: 'owner', title: row.message ?? '' }, 'правило: только владелец')
+                  : null,
+                foreignIds.has(String(row.id))
+                  ? h(RuleBadge, { key: 'foreign', tone: 'warn', title: 'Лог изменён другим устройством: изменение не применено' }, 'изменено не владельцем')
+                  : null,
+                row.overLimit === true
+                  ? h(
+                      RuleBadge,
+                      { key: 'limit', tone: 'limit', title: row.message ?? '' },
+                      `лимит: ${formatMbValue(row.mb)}/${formatMbValue(row.maxMb ?? row.limitMb)} МБ`,
+                    )
+                  : null,
+              )),
+            ),
+        verify.error !== ''
+          ? h('span', { style: S.error }, verify.error)
+          : null,
+        verifyData !== null && verifyData !== undefined
+          ? h(
+              'div',
+              { className: 'dshs-rules-report' },
+              h('span', { style: S.label }, verifyData.note ?? 'Проверка ничего не изменила.'),
+              h(
+                'div',
+                { className: 'dshs-rules-buckets' },
+                RULES_VERIFY_BUCKETS.map(([key, label]) => {
+                  const items = Array.isArray(verifyData.buckets?.[key]) ? verifyData.buckets[key] : [];
+                  return h(
+                    'div',
+                    { key, className: 'dshs-rules-bucket', 'data-bucket': key },
+                    h('span', { className: 'dshs-rules-bucket-label' }, label),
+                    h('span', { className: 'dshs-rules-bucket-value' }, String(items.length)),
+                    h('span', { className: 'dshs-rules-bucket-items' }, items.slice(0, 3).map((item) => rulesRowTitle(item)).join(', ')),
+                  );
+                }),
+              ),
+              conflicts.length > 0
+                ? h(
+                    'span',
+                    { className: 'dshs-rules-bucket-items' },
+                    `конфликтов слияния: ${conflicts.length}. Побеждает правило с более свежим updatedAt; конфликт записан в rules-history.`,
+                  )
+                : null,
+            )
+          : null,
+      );
+    }
+
+    // --- модалка «Правила сессии…» ------------------------------------------
+    /** Пустой черновик правила: «Обычная» сессия без правила. */
+    function emptyRuleDraft() {
+      return { preset: '', owner: false, protect: false, maxMb: '', forbidFork: false, notify: false, syncMode: 'cloud' };
+    }
+
+    /** Черновик из текущего правила сессии: пресет, владелец, поля. */
+    function draftFromRule(rule, deviceId) {
+      if (rule === undefined || rule === null || rule.hasRule !== true) return emptyRuleDraft();
+      return {
+        preset: typeof rule.preset === 'string' ? rule.preset : '',
+        owner: typeof rule.ownerDevice === 'string' && rule.ownerDevice !== ''
+          && typeof deviceId === 'string' && rule.ownerDevice === deviceId,
+        protect: rule.protect === true,
+        maxMb: Number.isFinite(rule.maxMb) ? String(rule.maxMb) : '',
+        forbidFork: rule.forbidFork === true,
+        notify: rule.notifyForeignAppend === true,
+        syncMode: rule.syncMode === 'local' ? 'local' : 'cloud',
+      };
+    }
+
+    /**
+     * Тело POST /session-rules из черновика. «Обычная» без включённых полей —
+     * это снятие правила (`clear`), иначе — пресет и явные поля.
+     */
+    function buildRulePayload({ sessionId, draft, deviceId }) {
+      const preset = typeof draft?.preset === 'string' && draft.preset !== '' ? draft.preset : '';
+      const patch = {
+        protect: draft?.protect === true,
+        forbidFork: draft?.forbidFork === true,
+        notifyForeignAppend: draft?.notify === true,
+        syncMode: draft?.syncMode === 'local' ? 'local' : 'cloud',
+      };
+      if (draft?.owner === true && typeof deviceId === 'string' && deviceId !== '') patch.ownerDevice = deviceId;
+      const maxText = String(draft?.maxMb ?? '').replace(',', '.').trim();
+      if (maxText !== '') {
+        const value = Number.parseFloat(maxText);
+        if (Number.isFinite(value) && value > 0) patch.maxMb = value;
+      }
+      const neutral = preset === ''
+        && patch.protect !== true
+        && patch.forbidFork !== true
+        && patch.notifyForeignAppend !== true
+        && patch.syncMode !== 'local'
+        && patch.maxMb === undefined
+        && patch.ownerDevice === undefined;
+      if (neutral) return { id: sessionId, clear: true };
+      const payload = { id: sessionId, patch };
+      if (preset !== '') payload.preset = preset;
+      return payload;
+    }
+
+    /** Модалка правила: чипы пресетов, поля, «Сохранить» и «Проверить правила». */
+    function SessionRulesDialog({ sessionId, onClose }) {
+      const report = useSessionRules();
+      const verify = useRulesVerify();
+      const deviceId = typeof report?.deviceId === 'string' ? report.deviceId : '';
+      const rule = rulesRowOf(report, sessionId);
+      const [draft, setDraft] = React.useState(() => draftFromRule(rule, deviceId));
+      // Пока пользователь не менял поля, черновик догоняет загрузку сводки:
+      // модалка может открыться раньше, чем пришёл GET /session-rules.
+      const [touched, setTouched] = React.useState(false);
+      const [busy, setBusy] = React.useState('');
+      const [error, setError] = React.useState('');
+      const [notice, setNotice] = React.useState('');
+      React.useEffect(() => {
+        void refreshSessionRules(false);
+      }, []);
+      React.useEffect(() => {
+        if (touched) return;
+        setDraft(draftFromRule(rule, deviceId));
+      }, [rule?.id, rule?.updatedAt, deviceId, touched]);
+      const set = (patch) => {
+        setTouched(true);
+        setDraft((current) => ({ ...current, ...patch }));
+      };
+
+      // Пресет раскладывается в поля сразу: до сохранения видно, что попадёт в
+      // правило, а «Обычная» снимает все галочки.
+      const applyPreset = (name) => {
+        const fields = name !== 'none' ? (RULE_PRESETS[name]?.fields ?? {}) : {};
+        set({
+          preset: name === 'none' ? '' : name,
+          owner: typeof fields.ownerDevice === 'string' && fields.ownerDevice !== '',
+          protect: fields.protect === true,
+          maxMb: Number.isFinite(fields.maxMb) ? String(fields.maxMb) : '',
+          forbidFork: fields.forbidFork === true,
+          notify: fields.notifyForeignAppend === true,
+          syncMode: fields.syncMode === 'local' ? 'local' : 'cloud',
+        });
+      };
+
+      const save = async () => {
+        if (busy !== '') return;
+        setBusy('save');
+        setError('');
+        setNotice('');
+        try {
+          const result = await post(SESSION_RULES_PATH, buildRulePayload({ sessionId, draft, deviceId }));
+          if (result?.ok !== true) {
+            setError(result?.message ?? 'Правило не сохранено.');
+            return;
+          }
+          setNotice(result.action === 'clear' ? 'Правило снято: сессия обычная.' : 'Правило сохранено.');
+          const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+          if (warnings.length > 0) setError(String(warnings[0]?.message ?? ''));
+          await refreshSessionRules(true);
+        } catch (saveError) {
+          setError(`Правило не сохранено: ${explain(saveError)}`);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const chips = RULE_PRESET_ORDER.map((name) => h(
+        'button',
+        {
+          key: name,
+          type: 'button',
+          className: 'dshs-rules-chip',
+          'data-preset': name,
+          'data-active': (name === 'none' ? draft.preset === '' && draft.protect !== true && draft.maxMb === '' : draft.preset === name) ? 'true' : 'false',
+          'aria-pressed': (name === 'none' ? draft.preset === '' : draft.preset === name) ? 'true' : 'false',
+          title: RULE_PRESETS[name]?.hint ?? '',
+          style: {
+            ...S.buttonSmall,
+            ...(draft.preset === name || (name === 'none' && draft.preset === '' && draft.protect !== true && draft.maxMb === '')
+              ? {
+                  background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #4a7dcc) 16%, transparent)',
+                  borderColor: 'var(--dsw-alias-brand-primary, #4a7dcc)',
+                }
+              : {}),
+          },
+          onClick: () => applyPreset(name),
+        },
+        RULE_PRESETS[name]?.label ?? name,
+      ));
+
+      const verifyData = verify.data;
+      return portalToBody(h(
+        'div',
+        { className: 'dshs-rules-layer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Правила сессии' },
+        h(
+          'div',
+          { className: 'dshs-rules-dialog' },
+          h(
+            'div',
+            { className: 'dshs-rules-dialog-head' },
+            h(ShieldIcon, { size: 18, protectedByRule: rule?.protect === true }),
+            h('span', { className: 'dshs-rules-dialog-title' }, 'Правила сессии'),
+            h('span', { style: S.meta }, rule?.title !== undefined && rule?.title !== '' ? rulesRowTitle(rule) : shortSessionId(sessionId)),
+            h(
+              'button',
+              { type: 'button', style: { ...S.buttonSmall, marginLeft: 'auto' }, onClick: () => (typeof onClose === 'function' ? onClose() : undefined) },
+              'Закрыть',
+            ),
+          ),
+          h(
+            'span',
+            { className: 'dshs-rules-dialog-text' },
+            'Правило действует на этом и на других устройствах: защищает сессию от чистки, ограничивает отправку владельцем и следит за размером лога. Субагент наследует правило родителя; своё правило сильнее.',
+          ),
+          h('div', { className: 'dshs-rules-chips' }, chips),
+          h(
+            'div',
+            { className: 'dshs-rules-fields' },
+            h(
+              'label',
+              { className: 'dshs-rules-field' },
+              h('input', {
+                type: 'checkbox',
+                checked: draft.owner === true,
+                onChange: (event) => set({ owner: event.target.checked }),
+              }),
+              h('span', null, `Владелец — этот компьютер${deviceId !== '' ? ` (${deviceId})` : ''}: отправлять сессию может только он`),
+            ),
+            h(
+              'label',
+              { className: 'dshs-rules-field' },
+              h('input', {
+                type: 'checkbox',
+                checked: draft.protect === true,
+                onChange: (event) => set({ protect: event.target.checked }),
+              }),
+              h('span', null, 'Защита: не удалять из зеркала при чистке'),
+            ),
+            h(
+              'label',
+              { className: 'dshs-rules-field' },
+              h('span', null, 'Лимит лога, МБ'),
+              h('input', {
+                type: 'number',
+                min: '0',
+                step: '0.1',
+                value: draft.maxMb,
+                placeholder: 'например, 15',
+                style: { ...S.input, height: 36 },
+                onChange: (event) => set({ maxMb: event.target.value }),
+              }),
+              h('span', { style: S.meta }, 'при превышении — предложение перевести в локальные'),
+            ),
+            h(
+              'label',
+              { className: 'dshs-rules-field' },
+              h('input', {
+                type: 'checkbox',
+                checked: draft.forbidFork === true,
+                onChange: (event) => set({ forbidFork: event.target.checked }),
+              }),
+              h('span', null, 'Запрет развилки: не создавать копию при расхождении'),
+            ),
+            h(
+              'label',
+              { className: 'dshs-rules-field' },
+              h('input', {
+                type: 'checkbox',
+                checked: draft.notify === true,
+                onChange: (event) => set({ notify: event.target.checked }),
+              }),
+              h('span', null, 'Уведомлять, если лог дополнило другое устройство'),
+            ),
+            h(
+              'label',
+              { className: 'dshs-rules-field' },
+              h('input', {
+                type: 'checkbox',
+                checked: draft.syncMode === 'local',
+                onChange: (event) => set({ syncMode: event.target.checked ? 'local' : 'cloud' }),
+              }),
+              h('span', null, 'Только локальная: не отправлять в зеркало (архив)'),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'dshs-rules-actions' },
+            h(
+              'button',
+              {
+                type: 'button',
+                'data-variant': 'primary',
+                style: { ...S.primary },
+                disabled: busy !== '',
+                onClick: () => void save(),
+              },
+              busy === 'save' ? 'Сохраняем…' : 'Сохранить',
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                style: { ...S.button },
+                disabled: verify.busy === true,
+                onClick: () => void verifyRules(),
+              },
+              verify.busy === true ? 'Проверяем…' : 'Проверить правила',
+            ),
+            busy !== ''
+              ? h('span', { style: S.meta }, 'Сохраняем правило…')
+              : null,
+          ),
+          error !== '' ? h('span', { style: S.error }, error) : null,
+          notice !== '' ? h('span', { style: S.ok }, notice) : null,
+          verify.error !== '' ? h('span', { style: S.error }, verify.error) : null,
+          verifyData !== null && verifyData !== undefined
+            ? h(
+                'div',
+                { className: 'dshs-rules-report' },
+                h('span', { style: S.label }, verifyData.note ?? 'Проверка ничего не изменила.'),
+                h(
+                  'span',
+                  { className: 'dshs-rules-bucket-items' },
+                  (Array.isArray(verifyData.lines) ? verifyData.lines : []).join(' · '),
+                ),
+                verifyData.sources !== null && typeof verifyData.sources === 'object'
+                  ? h(
+                      'span',
+                      { className: 'dshs-rules-bucket-items' },
+                      `источник правила — сессия: ${verifyData.sources.session ?? 0}, родитель: ${verifyData.sources.parent ?? 0}, шаблон: ${verifyData.sources.match ?? 0}`,
+                    )
+                  : null,
+              )
+            : null,
+        ),
+      ));
+    }
+
+    /**
+     * Общее состояние модалки правил. Меню сессии закрывается после клика и его
+     * компонент размонтируется — поэтому модалка живёт в постоянном Host'е
+     * (иконка плагина в левой панели), а не внутри пункта меню.
+     */
+    const rulesDialog = { sessionId: '', open: false, listeners: new Set() };
+
+    function setRulesDialog(next) {
+      rulesDialog.sessionId = typeof next?.sessionId === 'string' ? next.sessionId : rulesDialog.sessionId;
+      rulesDialog.open = next?.open === true;
+      for (const listener of rulesDialog.listeners) listener();
+    }
+
+    function openRulesDialog(sessionId) {
+      setRulesDialog({ sessionId: String(sessionId ?? ''), open: true });
+    }
+
+    function closeRulesDialog() {
+      setRulesDialog({ open: false });
+    }
+
+    function useRulesDialogState() {
+      const [, bump] = React.useState(0);
+      React.useEffect(() => {
+        const listener = () => bump((value) => value + 1);
+        rulesDialog.listeners.add(listener);
+        return () => rulesDialog.listeners.delete(listener);
+      }, []);
+      return { sessionId: rulesDialog.sessionId, open: rulesDialog.open };
+    }
+
+    /** Постоянное место модалки правил: рисуется из иконки в левой панели. */
+    function SessionRulesDialogHost() {
+      const state = useRulesDialogState();
+      if (state.open !== true || state.sessionId === '') return null;
+      return h(SessionRulesDialog, { sessionId: state.sessionId, onClose: closeRulesDialog });
+    }
+
+    /** Пункт меню сессии «Правила сессии…»: открывает модалку правила. */
+    function SessionRulesMenuItem(props) {
+      const sessionId = props?.sessionId;
+      const [, setMenuOpen] = typeof props?.useMenuOpenState === 'function'
+        ? props.useMenuOpenState()
+        : [false, () => {}];
+      const report = useSessionRules();
+      const rule = rulesRowOf(report, sessionId);
+      React.useEffect(() => {
+        void refreshSessionRules(false);
+      }, []);
+      const title = rule?.hasRule === true
+        ? `Правило: ${rule.presetLabel || 'своё'}`
+        : 'Правил пока нет';
+      return h('div', { style: { minWidth: 0 } }, [
+        h('div', { key: 'separator', className: 'dshs-menu-separator', role: 'separator' }),
+        h(
+          'button',
+          {
+            key: 'item',
+            type: 'button',
+            role: 'menuitem',
+            className: 'dshs-menu-item',
+            title,
+            'data-rule': rule?.hasRule === true ? 'true' : 'false',
+            onClick: () => {
+              // Меню закрывается, модалку рисует SessionRulesDialogHost.
+              setMenuOpen(false);
+              openRulesDialog(sessionId);
+            },
+          },
+          [
+            h('span', { key: 'icon', className: 'dshs-rules-menu-icon' }, h(ShieldIcon, { size: 14, protectedByRule: rule?.protect === true })),
+            h('span', { key: 'label' }, 'Правила сессии…'),
+            rule?.hasRule === true
+              ? h('span', { key: 'badge', style: { ...S.meta, marginLeft: 'auto' } }, rule.presetLabel || 'правило')
+              : null,
+          ],
+        ),
+      ]);
+    }
+
+    /**
+     * Оба пункта меню сессии одним компонентом: слот — список, отдельная
+     * регистрация увеличила бы их число и сломала дымовой тест.
+     */
+    function SessionMenuItems(props) {
+      return h('div', { className: 'dshs-session-menu', style: { display: 'contents' } }, [
+        h(SessionSyncMenuItem, { key: 'mode', ...props }),
+        h(SessionRulesMenuItem, { key: 'rules', ...props }),
+      ]);
+    }
+
     /** Секция панели: список сессий, режимы, фильтр и массовое переключение. */
     function SessionModesSection() {
       const data = useSessionStates();
+      // M6: правила сессий — щит, лимит и бейджи прямо в строках списка.
+      const rulesReport = useSessionRules();
       const sessions = data?.sessions ?? [];
       const workspaces = Array.isArray(data?.workspaces) ? data.workspaces : [];
       const [filter, setFilter] = React.useState('all');
@@ -5032,6 +5838,16 @@ function CollapsedItem({ title, summary, badge, children }) {
       // «Показать ещё»: в DOM держим не больше 50 строк, остальные — по кнопке.
       const shownRows = rows.slice(0, visibleLimit);
       const groupSummary = sessionGroupSummary(sessions, data?.groups);
+      // M6: правило по каждой сессии + след последнего запуска (что удержано).
+      const ruleRows = Array.isArray(rulesReport?.sessions) ? rulesReport.sessions : [];
+      const ruleById = new Map(ruleRows.map((row) => [String(row?.id ?? ''), row]));
+      const foreignChangedIds = rulesIdsOf(rulesReport, 'foreignChangeIds');
+      const ownerBlockedIds = rulesIdsOf(rulesReport, 'ownerBlockedIds');
+      // Сессии, переросшие maxMb: с autoLocal правило уже перевело их само —
+      // такие не спрашиваем, остальные показываем баннером с кнопкой.
+      const overLimitRows = ruleRows.filter((row) => row?.overLimit === true);
+      const overLimitAsk = overLimitRows.filter((row) => row?.autoLocal !== true);
+      const overLimitAuto = overLimitRows.filter((row) => row?.autoLocal === true);
 
       const toggleSelected = (id) => {
         setSelected((current) => {
@@ -5331,6 +6147,39 @@ function CollapsedItem({ title, summary, badge, children }) {
             )
           : null,
         note !== '' ? h('span', { style: S.note }, note) : null,
+        // M6: «Сессия выросла до X МБ — перевести в локальные?». Баннер только
+        // там, где правило не включает autoLocal (иначе всё уже сделано само).
+        overLimitAsk.length > 0
+          ? h(
+              'div',
+              { className: 'dshs-rules-grow', role: 'status' },
+              h(
+                'span',
+                { className: 'dshs-rules-grow-text' },
+                `Сессия выросла до ${formatMbValue(overLimitAsk[0]?.mb)} МБ — перевести в локальные?`
+                  + (overLimitAsk.length > 1 ? ` (и ещё ${overLimitAsk.length - 1})` : '')
+                  + ` Лимит правила — ${formatMbValue(overLimitAsk[0]?.maxMb ?? overLimitAsk[0]?.limitMb)} МБ.`,
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: S.buttonSmall,
+                  disabled: busy !== '',
+                  'data-action': 'rule-make-local',
+                  onClick: () => void applyMode('local', overLimitAsk.map((row) => row.id)),
+                },
+                'Перевести в локальные',
+              ),
+            )
+          : null,
+        overLimitAuto.length > 0
+          ? h(
+              'span',
+              { style: S.hint },
+              `Правило autoLocal: переведено в локальные автоматически — ${overLimitAuto.length}. Лимит: ${formatMbValue(overLimitAuto[0]?.maxMb ?? overLimitAuto[0]?.limitMb)} МБ.`,
+            )
+          : null,
         rows.length === 0
           ? h('span', { style: S.hint }, sessions.length === 0 ? 'Сессии появятся здесь после первого запуска синхронизации или настройки проекта.' : (normalizedQuery !== '' ? 'По запросу ничего не найдено.' : 'Под фильтр ничего не попало.'))
           : h(
@@ -5344,6 +6193,8 @@ function CollapsedItem({ title, summary, badge, children }) {
                 const childrenCount = Number(session.childrenCount ?? row.children.length ?? 0) || 0;
                 const missingCount = Number(session.childrenMissingCount ?? 0) || 0;
                 const groupSize = Number(session.groupSize ?? 1) || 1;
+                // M6: правило этой сессии (щит, лимит, владелец, чужое изменение).
+                const rule = ruleById.get(String(session.id));
                 return h(
                   'div',
                   {
@@ -5467,6 +6318,53 @@ function CollapsedItem({ title, summary, badge, children }) {
                           title: 'Родитель этой сессии не найден на этом устройстве: субагент показывается отдельно и защищён от удаления',
                         },
                         'сирота',
+                      )
+                    : null,
+                  // M6: щит у сессий с правилом и бейдж превышения лимита.
+                  rule?.hasRule === true
+                    ? h(
+                        'span',
+                        {
+                          key: 'rule-shield',
+                          className: 'dshs-rules-shield',
+                          'data-protected': rule.protect === true ? 'true' : 'false',
+                          title: rule.protect === true
+                            ? `Защищена правилом${rule.presetLabel ? `: ${rule.presetLabel}` : ''}${rule.ruleSource === 'parent' ? ` (от ${rule.inheritedFrom})` : ''}`
+                            : `Правило сессии${rule.presetLabel ? `: ${rule.presetLabel}` : ''}`,
+                          'aria-label': rule.protect === true ? 'защищена правилом' : 'есть правило',
+                        },
+                        h(ShieldIcon, { size: 15, protectedByRule: rule.protect === true }),
+                      )
+                    : null,
+                  rule?.overLimit === true
+                    ? h(
+                        'span',
+                        { key: 'rule-limit', className: 'dshs-rules-badge', 'data-tone': 'limit', title: rule.message ?? '' },
+                        `лимит: ${formatMbValue(rule.mb)}/${formatMbValue(rule.maxMb ?? rule.limitMb)} МБ`,
+                      )
+                    : null,
+                  rule?.ownerBlocked === true || ownerBlockedIds.has(String(session.id))
+                    ? h(
+                        'span',
+                        {
+                          key: 'rule-owner',
+                          className: 'dshs-rules-badge',
+                          'data-tone': 'owner',
+                          title: rule?.ownerDevice ? `Сессия принадлежит ${rule.ownerDevice}: отправляет только владелец` : 'правило: только владелец',
+                        },
+                        'правило: только владелец',
+                      )
+                    : null,
+                  foreignChangedIds.has(String(session.id))
+                    ? h(
+                        'span',
+                        {
+                          key: 'rule-foreign',
+                          className: 'dshs-rules-badge',
+                          'data-tone': 'warn',
+                          title: 'Лог в зеркале изменён другим устройством: изменение не применено молча',
+                        },
+                        'изменено не владельцем',
                       )
                     : null,
                   h(
@@ -7238,6 +8136,43 @@ function CollapsedItem({ title, summary, badge, children }) {
       sessionGroupSummary,
       sessionGroupRows,
       SessionGroupsCounter,
+      // M6: правила сессий — данные сводки и проверки, компоненты и чистые
+      // помощники для headless-тестов рендера и тела POST.
+      setSessionRules: (value) => {
+        rulesState.data = value ?? null;
+        rulesState.at = Date.now();
+        for (const listener of rulesState.listeners) listener();
+      },
+      readSessionRules: () => rulesState.data,
+      setRulesVerify: (value) => {
+        rulesVerify.data = value ?? null;
+        rulesVerify.at = Date.now();
+        for (const listener of rulesState.listeners) listener();
+      },
+      readRulesVerify: () => rulesVerify.data,
+      verifyRules,
+      SessionRulesPanel,
+      SessionRulesDialog,
+      SessionRulesDialogHost,
+      SessionRulesMenuItem,
+      SessionMenuItems,
+      openRulesDialog,
+      closeRulesDialog,
+      ShieldIcon,
+      RULE_PRESETS,
+      RULE_PRESET_ORDER,
+      RULE_FILTERS,
+      RULE_SOURCE_LABELS,
+      RULES_VERIFY_BUCKETS,
+      formatMbValue,
+      rulesRowOf,
+      rulesIdsOf,
+      rulesFilterRows,
+      rulesVisibleRows,
+      rulesRowTitle,
+      emptyRuleDraft,
+      draftFromRule,
+      buildRulePayload,
       deleteDialog: deleteClient.__test,
     };
     return module.exports;

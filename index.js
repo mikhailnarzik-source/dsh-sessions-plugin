@@ -66,6 +66,24 @@ import {
   setWorkspaceDefaultMode,
   workspaceDefaultMode,
 } from './lib/session-modes.mjs'
+import {
+  OWNER_RULE_MESSAGE,
+  PRESET_NAMES,
+  clearSessionRule,
+  isoTime,
+  mergeRulesFromProfile,
+  mergeSessionRules,
+  normalizeRuleId,
+  readRulesHistory,
+  readRulesProfile,
+  readSessionRules,
+  resolveRulesForSession,
+  ruleFields,
+  rulesCounts,
+  rulesHistoryPath,
+  setSessionRule,
+  writeRulesProfile,
+} from './lib/session-rules.mjs'
 import { clearWorkspacePending, planWorkspace, readLocalWorkspaces, readWorkspacePending } from './lib/workspace.mjs'
 import { applyPendingProfile, clearPendingBrowserSettings, discardProfilePlan, readJournal, readPendingBrowserSettings, readProfileStatus, refreshProfilePlan, writeBrowserSettings } from './lib/profile.mjs'
 import { QUARANTINE_DAYS, isActiveTombstone, listTombstones, readTombstones, restoreTombstones, writeTombstones } from './lib/tombstones.mjs'
@@ -102,6 +120,10 @@ const NOTIFICATIONS_PATH = '/api/dsh-sync/notifications'
 const ACK_UPDATE_PATH = '/api/dsh-sync/ack-update'
 const YANDEX_CHECK_PATH = '/api/dsh-sync/yandex-check'
 const SESSION_MODE_PATH = '/api/dsh-sync/session-mode'
+// M6: правила сессий. GET — сводка и разбор, POST — правка/снятие правила.
+const SESSION_RULES_PATH = '/api/dsh-sync/session-rules'
+// «Проверить правила»: только чтение, ответ — корзины и конфликты.
+const SESSION_RULES_VERIFY_PATH = '/api/dsh-sync/session-rules/verify'
 // Удаление только облачной копии локальной сессии (локальная остаётся).
 const SESSION_CLOUD_COPY_PATH = '/api/dsh-sync/session-cloud-copy'
 // «Убрать облачные копии локальных сессий»: миграция режима «локальная навсегда».
@@ -2745,6 +2767,404 @@ export function invalidateSessionStates() {
   sessionStatesCache = { at: 0, value: undefined }
 }
 
+// --- правила сессий (M6): сводки и маршруты для UI ---------------------------
+
+/** Подписи встроенных пресетов: имена полей остаются в файле правил. */
+const RULE_PRESET_LABELS = { control: 'Контрольная', keep: 'Неприкосновенная', archive: 'Архив' }
+
+/** Группы «родитель + субагенты» по локальным сессиям: для наследования правил. */
+function ruleGroupsOf(sessions) {
+  const list = Array.isArray(sessions) ? sessions : []
+  return buildSessionGroups(list.map((session) => ({
+    id: session.id,
+    header: typeof session.parentSession === 'string' && session.parentSession !== ''
+      ? { id: session.id, parentSession: session.parentSession }
+      : undefined,
+  })))
+}
+
+/**
+ * Конфиг без записи в файл: «Проверить правила» и чтение сводки не должны
+ * создавать `dsh-sync.json` — проверка обязана ничего не менять.
+ */
+async function readConfigQuiet(home) {
+  try {
+    const parsed = JSON.parse(await readFile(join(home, 'dsh-sync.json'), 'utf8'))
+    if (parsed !== null && typeof parsed === 'object') {
+      return { ...parsed, projects: parsed.projects !== null && typeof parsed.projects === 'object' ? parsed.projects : {} }
+    }
+  } catch {
+    // настроек ещё нет — работаем с пустыми значениями
+  }
+  return { projects: {}, repoDir: '', deviceId: '' }
+}
+
+/**
+ * Поля правила для одной сессии: сессия + правило, уже разложенное по
+ * источникам (session/parent/match/default) и по лимиту размера.
+ */
+function ruleRowOf({ rules, session, groups, deviceId }) {
+  const id = normalizeRuleId(session?.id)
+  if (id === '') return undefined
+  const resolved = resolveRulesForSession({
+    rules,
+    session,
+    groups,
+    workspaceId: typeof session?.workspaceId === 'string' && session.workspaceId !== ''
+      ? session.workspaceId
+      : typeof session?.projectId === 'string' ? session.projectId : undefined,
+    deviceId,
+    bytes: Number.isFinite(session?.bytes) ? session.bytes : undefined,
+  })
+  const fields = ruleFields(resolved, {
+    bytes: Number.isFinite(session?.bytes) ? session.bytes : undefined,
+    deviceId,
+  })
+  return {
+    id: session.id,
+    title: typeof session.title === 'string' ? session.title : '',
+    shortId: typeof session.shortId === 'string' ? session.shortId : '',
+    projectId: session.projectId ?? '',
+    workspaceId: session.workspaceId ?? '',
+    mode: session.mode ?? 'cloud',
+    parentSession: session.parentSession ?? '',
+    bytes: Number.isFinite(session.bytes) ? session.bytes : undefined,
+    preset: fields.preset,
+    presetLabel: fields.preset === undefined ? '' : (RULE_PRESET_LABELS[fields.preset] ?? fields.preset),
+    protect: fields.protected,
+    ownerDevice: fields.ownerDevice ?? '',
+    ownerBlocked: fields.ownerBlocked,
+    overLimit: fields.overLimit,
+    maxMb: fields.maxMb,
+    limitMb: fields.limitMb,
+    mb: fields.mb,
+    syncMode: fields.syncMode,
+    forbidFork: fields.forbidFork,
+    notifyForeignAppend: fields.notifyForeignAppend,
+    autoLocal: resolved.autoLocal === true,
+    ruleSource: fields.ruleSource,
+    inheritedFrom: fields.inheritedFrom ?? '',
+    reason: fields.reason,
+    message: fields.message,
+    suggestion: fields.suggestion,
+    updatedAt: resolved.updatedAt ?? '',
+    hasRule: fields.ruleSource !== 'default',
+  }
+}
+
+/** Строки правил по всем локальным сессиям проекта: `resolveRulesForSession` на каждую. */
+function ruleRowsOf({ rules, sessions, deviceId }) {
+  const list = Array.isArray(sessions) ? sessions : []
+  const groups = ruleGroupsOf(list)
+  const rows = []
+  for (const session of list) {
+    const row = ruleRowOf({ rules, session, groups, deviceId })
+    if (row !== undefined) rows.push(row)
+  }
+  return rows
+}
+
+/** Счётчики правил для панели: хранилище + разбор по локальным сессиям. */
+function ruleCountsOf(rows, rules) {
+  const list = Array.isArray(rows) ? rows : []
+  const count = (predicate) => list.filter(predicate).length
+  return {
+    ...rulesCounts(rules),
+    rows: list.length,
+    withRule: count((row) => row.hasRule === true),
+    protected: count((row) => row.protect === true),
+    ownerBlocked: count((row) => row.ownerBlocked === true),
+    overLimit: count((row) => row.overLimit === true),
+    forbidFork: count((row) => row.forbidFork === true),
+    notify: count((row) => row.notifyForeignAppend === true),
+    control: count((row) => row.preset === 'control'),
+    keep: count((row) => row.preset === 'keep'),
+    archive: count((row) => row.preset === 'archive'),
+    custom: count((row) => row.hasRule === true && row.preset === undefined),
+    sources: {
+      session: count((row) => row.ruleSource === 'session'),
+      parent: count((row) => row.ruleSource === 'parent'),
+      match: count((row) => row.ruleSource === 'match'),
+      default: count((row) => row.ruleSource === 'default'),
+    },
+  }
+}
+
+/** Что правило удержало в последнем запуске: бейджи и сообщения для панели. */
+function ruleLastRunOf(lastRun) {
+  const rules = lastRun?.rules !== null && typeof lastRun?.rules === 'object' ? lastRun.rules : {}
+  const details = Array.isArray(lastRun?.conflictDetails) ? lastRun.conflictDetails : []
+  const messages = []
+  for (const message of Array.isArray(rules.notifications) ? rules.notifications : []) {
+    if (typeof message === 'string' && message !== '' && !messages.includes(message)) messages.push(message)
+  }
+  // «Изменено не владельцем»: приём записал это как конфликт kind=rule-owner.
+  for (const detail of details) {
+    if (detail?.kind !== 'rule-owner') continue
+    const message = typeof detail.message === 'string' ? detail.message : ''
+    if (message !== '' && !messages.includes(message)) messages.push(message)
+  }
+  // «Только владелец»: push мог пропустить сессию без отдельного уведомления —
+  // подписываем правило одной строкой, чтобы панель показала причину.
+  const ownerBlockedCount = Number(rules.ownerBlocked ?? 0) || 0
+  if (ownerBlockedCount > 0 && !messages.includes(OWNER_RULE_MESSAGE)) messages.push(OWNER_RULE_MESSAGE)
+  const ids = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string') : [])
+  return {
+    at: typeof lastRun?.at === 'string' ? lastRun.at : null,
+    action: typeof lastRun?.action === 'string' ? lastRun.action : '',
+    protected: Number(rules.protected ?? 0) || 0,
+    protectedIds: ids(rules.protectedIds),
+    ownerBlocked: Number(rules.ownerBlocked ?? 0) || 0,
+    ownerBlockedIds: ids(rules.ownerBlockedIds),
+    overLimit: Number(rules.overLimit ?? 0) || 0,
+    overLimitIds: ids(rules.overLimitIds),
+    foreignChanges: Number(rules.foreignChanges ?? 0) || 0,
+    foreignChangeIds: ids(rules.foreignChangeIds),
+    notified: Number(rules.notified ?? 0) || 0,
+    autoLocal: Number(rules.autoLocal ?? 0) || 0,
+    localSkipped: Number(rules.localSkipped ?? 0) || 0,
+    forbidFork: Number(rules.forbidFork ?? 0) || 0,
+    messages: messages.slice(0, 20),
+  }
+}
+
+/** Дописать строки аудита правки правил в `rules-history.jsonl`. */
+async function appendRulesAudit(home, entries) {
+  const list = Array.isArray(entries) ? entries : []
+  if (list.length === 0 || typeof home !== 'string' || home === '') return 0
+  await mkdir(join(home, 'dsh-sync'), { recursive: true })
+  const lines = list.map((entry) => JSON.stringify(entry))
+  await appendFile(rulesHistoryPath(home), `${lines.join('\n')}\n`, 'utf8')
+  return lines.length
+}
+
+/**
+ * Сводка правил для GET /api/dsh-sync/session-rules: хранилище правил, разбор
+ * по локальным сессиям, счётчики, журнал и след последнего запуска. Копию из
+ * зеркала профиля при чтении вливаем так же, как это делает приём.
+ */
+async function sessionRulesReport(ctx) {
+  const home = dshHome()
+  const config = await readConfigQuiet(home)
+  let profileResult
+  if (config.profile?.enabled !== false && typeof config.repoDir === 'string' && config.repoDir !== '') {
+    try {
+      profileResult = await mergeRulesFromProfile({ home, repoDir: config.repoDir })
+    } catch {
+      profileResult = undefined
+    }
+  }
+  const rules = profileResult?.rules ?? await readSessionRules(home)
+  const [states, history, lastRun] = await Promise.all([
+    sessionStates(ctx).catch(() => ({ sessions: [] })),
+    readRulesHistory(home, 50),
+    readLastRunInfo(home),
+  ])
+  const sessions = Array.isArray(states?.sessions) ? states.sessions : []
+  const deviceId = typeof config.deviceId === 'string' ? config.deviceId : ''
+  const rows = ruleRowsOf({ rules, sessions, deviceId })
+  return {
+    ok: true,
+    generatedAt: isoTime(),
+    deviceId,
+    rules,
+    counts: ruleCountsOf(rows, rules),
+    sessions: rows,
+    history,
+    lastRun: ruleLastRunOf(lastRun),
+    profile: {
+      present: profileResult?.present === true,
+      merged: profileResult?.merged === true,
+      conflicts: Array.isArray(profileResult?.conflicts) ? profileResult.conflicts.length : 0,
+    },
+  }
+}
+
+/**
+ * «Проверить правила» (GET /session-rules/verify): только чтение.
+ * Отвечает, кто защищён от чистки, кого не пропустит push (ownerBlocked), кто
+ * перерос maxMb, что объявлено локальным, откуда правило и какие конфликты
+ * нашлись при слиянии копии из зеркала профиля.
+ */
+async function verifySessionRules(ctx) {
+  const home = dshHome()
+  const config = await readConfigQuiet(home)
+  const deviceId = typeof config.deviceId === 'string' ? config.deviceId : ''
+  const localRules = await readSessionRules(home)
+  const incoming = typeof config.repoDir === 'string' && config.repoDir !== ''
+    ? await readRulesProfile({ repoDir: config.repoDir })
+    : undefined
+  // Слияние в памяти: проверка не пишет ни локальный файл, ни профиль.
+  const merged = incoming === undefined
+    ? { rules: localRules, conflicts: [] }
+    : mergeSessionRules(localRules, incoming)
+  const [states, history, lastRun] = await Promise.all([
+    sessionStates(ctx).catch(() => ({ sessions: [] })),
+    readRulesHistory(home, 50),
+    readLastRunInfo(home),
+  ])
+  const sessions = Array.isArray(states?.sessions) ? states.sessions : []
+  const rows = ruleRowsOf({ rules: merged.rules, sessions, deviceId })
+  const pick = (row) => ({
+    id: row.id,
+    title: row.title,
+    shortId: row.shortId,
+    preset: row.preset,
+    presetLabel: row.presetLabel,
+    ruleSource: row.ruleSource,
+    inheritedFrom: row.inheritedFrom,
+    ownerDevice: row.ownerDevice,
+    ownerBlocked: row.ownerBlocked,
+    overLimit: row.overLimit,
+    mb: row.mb,
+    maxMb: row.maxMb ?? row.limitMb,
+    message: row.message,
+  })
+  const buckets = {
+    protected: rows.filter((row) => row.protect === true).map(pick),
+    ownerBlocked: rows.filter((row) => row.ownerBlocked === true).map(pick),
+    overLimit: rows.filter((row) => row.overLimit === true).map(pick),
+    localOnly: rows.filter((row) => row.syncMode === 'local').map(pick),
+    forbidFork: rows.filter((row) => row.forbidFork === true).map(pick),
+    notify: rows.filter((row) => row.notifyForeignAppend === true).map(pick),
+  }
+  const conflicts = merged.conflicts.map((conflict) => ({
+    kind: conflict.kind,
+    id: conflict.id,
+    winner: conflict.winner,
+    reason: conflict.reason,
+    localUpdatedAt: conflict.localUpdatedAt ?? '',
+    incomingUpdatedAt: conflict.incomingUpdatedAt ?? '',
+  }))
+  const counts = ruleCountsOf(rows, merged.rules)
+  return {
+    ok: true,
+    generatedAt: isoTime(),
+    deviceId,
+    // Проверка не меняет правила: подпись «ничего не изменено» и флаг для UI.
+    changes: false,
+    note: 'Проверка ничего не изменила: правила только прочитаны.',
+    profile: { present: incoming !== undefined, conflicts: conflicts.length },
+    counts,
+    sources: counts.sources,
+    buckets,
+    bucketsCounts: Object.fromEntries(Object.entries(buckets).map(([key, list]) => [key, list.length])),
+    conflicts: conflicts.slice(0, 20),
+    // В журнале — только конфликты слияния: аудит правок (session-rule-set/clear)
+    // проверке не нужен, его видно в истории изменений.
+    history: history
+      .filter((entry) => entry?.kind !== 'session-rule-set' && entry?.kind !== 'session-rule-clear')
+      .slice(-20),
+    lastRun: ruleLastRunOf(lastRun),
+    lines: [
+      `правил в файле: ${counts.sessions}`,
+      `сессий с правилом: ${counts.withRule}`,
+      `защищено от чистки: ${buckets.protected.length}`,
+      `только владелец (push пропустит): ${buckets.ownerBlocked.length}`,
+      `переросли лимит: ${buckets.overLimit.length}`,
+      `объявлены локальными: ${buckets.localOnly.length}`,
+      `запрещена развилка: ${buckets.forbidFork.length}`,
+    ],
+  }
+}
+
+/** Допустимые поля правила из UI: остальные ключи запроса отбрасываются. */
+function normalizeRulePatch(raw) {
+  if (raw === null || typeof raw !== 'object') return {}
+  const patch = {}
+  for (const key of ['protect', 'forbidFork', 'notifyForeignAppend', 'autoLocal']) {
+    if (typeof raw[key] === 'boolean') patch[key] = raw[key]
+  }
+  if (typeof raw.maxMb === 'string' && raw.maxMb.trim() !== '') {
+    const parsed = Number.parseFloat(raw.maxMb.replace(',', '.'))
+    if (Number.isFinite(parsed) && parsed > 0) patch.maxMb = parsed
+  } else if (Number.isFinite(raw.maxMb) && raw.maxMb > 0) {
+    patch.maxMb = raw.maxMb
+  }
+  if (typeof raw.ownerDevice === 'string' && raw.ownerDevice.trim() !== '') patch.ownerDevice = raw.ownerDevice.trim()
+  if (raw.syncMode === 'local' || raw.syncMode === 'cloud') patch.syncMode = raw.syncMode
+  return patch
+}
+
+/**
+ * POST /api/dsh-sync/session-rules: пресет раскладывается в поля сразу,
+ * собственное правило субагента даёт предупреждение (не блок), `{clear:true}`
+ * снимает правило. Правка пишется в журнал и в копию профиля зеркала.
+ */
+async function saveSessionRulesAction(ctx, payload) {
+  const home = dshHome()
+  const config = await readConfigQuiet(home)
+  const rawIds = Array.isArray(payload?.ids)
+    ? payload.ids
+    : payload?.id !== undefined ? [payload.id] : []
+  const ids = []
+  for (const raw of rawIds) {
+    const id = normalizeRuleId(raw)
+    if (id !== '' && !ids.includes(id)) ids.push(id)
+  }
+  if (ids.length === 0) return { ok: false, message: 'не задан идентификатор сессии для правила' }
+  const clear = payload?.clear === true
+  const requestedPreset = typeof payload?.preset === 'string' ? payload.preset.trim() : ''
+  // «Обычная» (none) в запросе — это снятие правила, а не пустой пресет.
+  const preset = requestedPreset !== '' && requestedPreset !== 'none' ? requestedPreset : ''
+  const patch = normalizeRulePatch(payload?.patch)
+  if (!clear && preset === '' && Object.keys(patch).length === 0) {
+    return { ok: false, message: 'нечего сохранять: укажите пресет или поля правила' }
+  }
+  const states = await sessionStates(ctx).catch(() => ({ sessions: [] }))
+  const sessions = Array.isArray(states?.sessions) ? states.sessions : []
+  const groups = ruleGroupsOf(sessions)
+  const warnings = []
+  const updated = []
+  for (const id of ids) {
+    if (clear) {
+      const result = await clearSessionRule({ home, id })
+      updated.push({ id, cleared: result.removed === true, preset: '' })
+      continue
+    }
+    const result = await setSessionRule({ home, id, preset: preset !== '' ? preset : undefined, patch, groups })
+    if (typeof result.warning === 'string' && result.warning !== '') {
+      warnings.push({ id, message: result.warning })
+    }
+    updated.push({ id, cleared: false, preset: result.entry?.preset ?? '' })
+  }
+  const saved = await readSessionRules(home)
+  // Аудит правки — в журнал правил: конфликты слияния отличаются полем kind.
+  try {
+    await appendRulesAudit(home, updated.map((row) => ({
+      at: isoTime(),
+      type: 'session-rules',
+      kind: clear ? 'session-rule-clear' : 'session-rule-set',
+      id: row.id,
+      preset: row.preset !== '' ? row.preset : (clear ? null : preset || null),
+      winner: 'local',
+      reason: 'ui',
+    })))
+  } catch {
+    // журнал вспомогательный: правило уже сохранено
+  }
+  let profileWritten = false
+  if (config.profile?.enabled !== false && typeof config.repoDir === 'string' && config.repoDir !== '') {
+    try {
+      await writeRulesProfile({ repoDir: config.repoDir, rules: saved })
+      profileWritten = true
+    } catch {
+      // профильный слой может быть недоступен — правило остаётся локальным
+    }
+  }
+  invalidateSessionStates()
+  return {
+    ok: true,
+    action: clear ? 'clear' : 'set',
+    updated: updated.length,
+    ids: updated.map((row) => row.id),
+    preset: preset !== '' ? preset : (PRESET_NAMES.includes(requestedPreset) ? requestedPreset : ''),
+    warnings,
+    warning: warnings[0]?.message,
+    profileWritten,
+  }
+}
+
 /**
  * Применить очередь привязки из workspace.json через реестр DSH.
  * Очередь строится в `lib/workspace.mjs` при приёме зеркала.
@@ -4381,6 +4801,33 @@ export function apply(ctx) {
       return json({ ok: false, message, queued: true }, 500)
     }
   })
+
+  // M6: правила сессий. GET — сводка хранилища и разбор по сессиям (только
+  // чтение; копия из зеркала профиля вливается как при приёме). POST —
+  // создать/изменить правило пресетом или полями; {clear:true} — снять правило.
+  route('session-rules', SESSION_RULES_PATH, async (request) => {
+    try {
+      const method = String(request?.method ?? 'POST').toUpperCase()
+      if (method === 'GET') return json(await sessionRulesReport(ctx))
+      const result = await saveSessionRulesAction(ctx, await body(request))
+      return json(result, result.ok === false ? 400 : 200)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return json({ ok: false, message: `Правила сессий не сохранены: ${message}` }, 500)
+    }
+  }, ['GET', 'POST'])
+
+  // «Проверить правила»: только чтение — кто защищён от чистки, кого не
+  // пропустит push (только владелец), кто перерос maxMb, откуда правило
+  // (session/parent/match) и какие конфликты нашлись при слиянии с профилем.
+  route('session-rules-verify', SESSION_RULES_VERIFY_PATH, async () => {
+    try {
+      return json(await verifySessionRules(ctx))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return json({ ok: false, message: `Проверка правил не удалась: ${message}` }, 500)
+    }
+  }, ['GET'])
 
   // «Убрать облачные копии локальных сессий»: миграция режима «локальная
   // навсегда». Без confirm:true — 409 и список найденного, с confirm — карантин.
