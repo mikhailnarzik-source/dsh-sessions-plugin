@@ -103,6 +103,7 @@ import {
 } from './lib/cloud-copy.mjs'
 import { createRemote } from './lib/remote.mjs'
 import { hasChanges } from './lib/git.mjs'
+import { MIRROR_BUSY_CODE, mirrorLockBusy, withMirrorLock } from './lib/mirror-write.mjs'
 import { collectOnboarding } from './lib/onboarding.mjs'
 import { SNAPSHOT_TTL_MS, createStateSnapshot, fileSignature } from './lib/state-snapshot.mjs'
 import { STATE_FILE } from './lib/sync-state.mjs'
@@ -322,6 +323,29 @@ async function discoverExternal(ctx) {
 function dshHome() {
   if (process.env.DSH_HOME && process.env.DSH_HOME.trim() !== '') return process.env.DSH_HOME.trim()
   return join(homedir(), '.dsh')
+}
+
+/**
+ * Запись в зеркало под единым межпроцессным локом (M9-B).
+ *
+ * Все писатели зеркала идут через эту обёртку: лок один и тот же, что у
+ * дочернего процесса синхронизации (`lib/mirror-write.mjs`). Занятый лок
+ * ждём до 30 с, затем возвращаем `{ ok:false, busy:true, code:'mirror/busy',
+ * message }` — действие не выполняется, ошибка не бросается.
+ */
+function mirrorWrite(action, fn, options = {}) {
+  return withMirrorLock(dshHome(), action, fn, options)
+}
+
+/** Тело ответа «зеркало занято»: маршруты отдают 409 и понятный текст. */
+function mirrorBusyBody(result, extra = {}) {
+  return {
+    ok: false,
+    busy: true,
+    code: MIRROR_BUSY_CODE,
+    ...extra,
+    message: result?.message ?? 'зеркало занято другой операцией — повторите через минуту',
+  }
 }
 
 /**
@@ -1568,6 +1592,22 @@ async function runSync(ctx, action, options = {}) {
     return runViaExternal(external, action)
   }
 
+  // M9-B: лок — источник истины. Если зеркало уже пишет другой процесс (child
+  // синхронизации, восстановление, режимы), второй child не запускаем: он всё
+  // равно подождёт лок и вернёт skipped, а панель сразу получит понятный ответ.
+  const busyLock = await mirrorLockBusy(home)
+  if (busyLock !== undefined) {
+    return {
+      ok: true,
+      skipped: true,
+      busy: true,
+      action,
+      mode: 'host',
+      message: `синхронизация уже выполняется: ${busyLock.owner === '' ? 'другая операция' : `операция ${busyLock.owner}`} — повторите позже`,
+      durationMs: 0,
+    }
+  }
+
   // Основной путь — отдельный процесс: в host-процессе DSH файловый обход и
   // разбор логов могут вести себя иначе, чем в обычном Node.
   // До запуска публикуем объявления «локальная навсегда»: дочерний процесс
@@ -1648,6 +1688,24 @@ async function runSync(ctx, action, options = {}) {
     return viaChild
   }
 
+  // Host-путь (дочернего Node нет) пишет в зеркало сам — только под общим
+  // локом: ждём до 30 с, затем busy вместо выполнения.
+  const hostResult = await mirrorWrite('sync-host', () => runSyncInHost({ ctx, home, config, action, confirmPrune }))
+  if (hostResult?.busy === true) {
+    return {
+      ...mirrorBusyBody(hostResult, { action, at: new Date().toISOString(), mode: 'host' }),
+      durationMs: Number(hostResult.waitedMs ?? 0) || 0,
+    }
+  }
+  return hostResult
+}
+
+/**
+ * Обмен pull → push в самом host-процессе: запасной путь, когда подходящего
+ * дочернего Node нет. Пишет в зеркало, поэтому вызывается только внутри
+ * `mirrorWrite('sync-host')` — лок берёт обёртка.
+ */
+async function runSyncInHost({ ctx, home, config, action, confirmPrune }) {
   const started = Date.now()
   const result = { pull: null, push: null }
   const messages = []
@@ -1906,6 +1964,19 @@ async function runPlan(ctx) {
   }
   const githubToken = await resolveGitHubToken(ctx)
   if (githubToken !== '') process.env.GITHUB_TOKEN = githubToken
+  // Лок занят записью (child синхронизации, восстановление и т. п.): второй
+  // процесс не запускаем и не ждём 30 с — сразу говорим, что зеркало занято.
+  const busyLock = await mirrorLockBusy(home)
+  if (busyLock !== undefined) {
+    return {
+      ok: false,
+      busy: true,
+      skipped: true,
+      code: MIRROR_BUSY_CODE,
+      action: 'plan',
+      message: `синхронизация уже выполняется: ${busyLock.owner === '' ? 'другая операция' : `операция ${busyLock.owner}`} — повторите проверку`,
+    }
+  }
   const viaChild = await runViaChild(
     'plan',
     githubToken === '' ? {} : { GITHUB_TOKEN: githubToken },
@@ -1959,6 +2030,19 @@ async function runPrune(ctx, payload = {}) {
   const ids = Array.isArray(payload.ids)
     ? payload.ids.filter(id => typeof id === 'string' && id.trim() !== '').map(id => id.trim())
     : undefined
+  // Лок — источник истины: если зеркало уже пишет другой процесс, второй child
+  // не запускаем (он всё равно подождёт и вернёт skipped).
+  const busyLock = await mirrorLockBusy(home)
+  if (busyLock !== undefined) {
+    return {
+      ok: false,
+      busy: true,
+      skipped: true,
+      code: MIRROR_BUSY_CODE,
+      action: 'prune',
+      message: `зеркало занято: ${busyLock.owner === '' ? 'другая операция' : `операция ${busyLock.owner}`} выполняется — повторите позже`,
+    }
+  }
   const viaChild = await runViaChild(
     'prune',
     githubToken === '' ? {} : { GITHUB_TOKEN: githubToken },
@@ -1974,8 +2058,22 @@ async function runPrune(ctx, payload = {}) {
 
   const started = Date.now()
   try {
-    const { applyDeletions } = await import('./lib/sync.mjs')
-    const summary = await applyDeletions({ home, config, confirm: true, ids, dshVersion: await hostDshVersion() })
+    // Host-путь (дочерний Node не найден): подтверждённое удаление пишет в
+    // зеркало — только под общим локом.
+    const outcome = await mirrorWrite('prune', async () => {
+      const { applyDeletions } = await import('./lib/sync.mjs')
+      return applyDeletions({ home, config, confirm: true, ids, dshVersion: await hostDshVersion() })
+    })
+    if (outcome?.busy === true) {
+      return {
+        ...mirrorBusyBody(outcome, { action: 'prune' }),
+        skipped: true,
+        at: new Date().toISOString(),
+        mode: 'host',
+        durationMs: Date.now() - started,
+      }
+    }
+    const summary = outcome
     const record = {
       ok: true,
       at: new Date().toISOString(),
@@ -2250,8 +2348,13 @@ async function autoTick(ctx) {
     if (pullDue) {
       const record = await runSync(ctx, 'pull')
       automation.lastPullAt = Date.now()
-      automation.lastPullOk = record?.ok === true
-      if (record?.ok !== true) automation.lastError = String(record?.message ?? '')
+      if (record?.busy === true) {
+        // Лок занят другой операцией — такт пропущен, это не ошибка.
+        automation.lastPullOk = true
+      } else {
+        automation.lastPullOk = record?.ok === true
+        if (record?.ok !== true) automation.lastError = String(record?.message ?? '')
+      }
     } else if (automation.lastPullAt === 0) {
       automation.lastPullAt = Date.now()
     }
@@ -2270,9 +2373,14 @@ async function autoTick(ctx) {
       if ((changed && pushDue) || shrunk) {
         const record = await runSync(ctx, 'push')
         automation.lastPushAt = Date.now()
-        automation.lastPushOk = record?.ok === true
-        automation.lastError = record?.ok === true ? '' : String(record?.message ?? '')
-        if (record?.ok === true) automation.fingerprint = fingerprint
+        if (record?.busy === true) {
+          // Другая запись держит зеркало — отправим на следующем такте.
+          automation.lastPushOk = true
+        } else {
+          automation.lastPushOk = record?.ok === true
+          automation.lastError = record?.ok === true ? '' : String(record?.message ?? '')
+          if (record?.ok === true) automation.fingerprint = fingerprint
+        }
       }
     }
   } catch (error) {
@@ -3154,8 +3262,9 @@ async function saveSessionRulesAction(ctx, payload) {
   let profileWritten = false
   if (config.profile?.enabled !== false && typeof config.repoDir === 'string' && config.repoDir !== '') {
     try {
-      await writeRulesProfile({ repoDir: config.repoDir, rules: saved })
-      profileWritten = true
+      // Правила уезжают в профильный слой зеркала: короткая запись под локом.
+      const written = await mirrorWrite('profile', () => writeRulesProfile({ repoDir: config.repoDir, rules: saved }))
+      profileWritten = written?.busy !== true
     } catch {
       // профильный слой может быть недоступен — правило остаётся локальным
     }
@@ -3462,6 +3571,16 @@ async function runDuplicatesScan(ctx, payload = {}) {
  */
 async function runDuplicatesQuarantine(ctx, payload = {}) {
   const home = dshHome()
+  // Карантин лишних копий пишет в зеркало и коммитит — под общим локом.
+  const outcome = await mirrorWrite('duplicates', () => runDuplicatesQuarantineUnlocked(ctx, payload, home))
+  if (outcome?.busy === true) {
+    return { status: 409, body: mirrorBusyBody(outcome, { action: 'duplicates' }) }
+  }
+  return outcome
+}
+
+/** Тело `runDuplicatesQuarantine` под уже взятым локом зеркала. */
+async function runDuplicatesQuarantineUnlocked(ctx, payload = {}, home = dshHome()) {
   const config = await applySecret(ctx, await loadConfig(home))
   if (Object.keys(config.projects ?? {}).length === 0) {
     return { status: 400, body: { ok: false, action: 'duplicates', message: 'Сначала укажите проект в настройках плагина.' } }
@@ -3584,6 +3703,17 @@ async function runDuplicatesQuarantine(ctx, payload = {}) {
  */
 async function restoreSessions(ctx, payload = {}) {
   const home = dshHome()
+  // Восстановление пишет в зеркало (надгробия, карантин, коммит) — под локом,
+  // одним для всех писателей. Занято — 409 busy, действие не выполняется.
+  const outcome = await mirrorWrite('restore', () => restoreSessionsUnlocked(ctx, payload, home))
+  if (outcome?.busy === true) {
+    return { status: 409, body: mirrorBusyBody(outcome, { action: 'restore' }) }
+  }
+  return outcome
+}
+
+/** Тело `restoreSessions` под уже взятым локом зеркала. */
+async function restoreSessionsUnlocked(ctx, payload = {}, home = dshHome()) {
   const config = await loadConfig(home)
   const all = payload.all === true
   const requestedRaw = Array.isArray(payload.ids)
@@ -3871,8 +4001,18 @@ async function restoreSessions(ctx, payload = {}) {
  * @returns {{ status: number, body: object }}
  */
 async function deleteCloudCopyAction(ctx, payload = {}) {
-  const id = typeof payload.id === 'string' ? payload.id.trim() : ''
   const home = dshHome()
+  // Удаление облачной копии меняет зеркало (карантин + коммит) — под локом.
+  const outcome = await mirrorWrite('cloud-copy', () => deleteCloudCopyActionUnlocked(ctx, payload, home))
+  if (outcome?.busy === true) {
+    return { status: 409, body: mirrorBusyBody(outcome, { action: 'cloud-copy-delete' }) }
+  }
+  return outcome
+}
+
+/** Тело `deleteCloudCopyAction` под уже взятым локом зеркала. */
+async function deleteCloudCopyActionUnlocked(ctx, payload = {}, home = dshHome()) {
+  const id = typeof payload.id === 'string' ? payload.id.trim() : ''
   const config = await loadConfig(home)
   const modes = await readSessionModes(home)
   if (payload.confirm !== true) {
@@ -4006,11 +4146,15 @@ function localOnlySummary(result) {
  * (движок читает `session-modes.json` и метку `made-local`).
  */
 async function prepareLocalOnlyState(home, config) {
-  try {
-    return await enforceLocalOnly({ home, config })
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) }
-  }
+  // Объявления «локальная навсегда» пишутся в зеркало (ручной архив + метка):
+  // через общий лок, чтобы не пересечься с child-синхронизацией.
+  return mirrorWrite('local-only', async () => {
+    try {
+      return await enforceLocalOnly({ home, config })
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  })
 }
 
 /**
@@ -4019,6 +4163,13 @@ async function prepareLocalOnlyState(home, config) {
  * без объявлений ничего не пишет.
  */
 async function reconcileLocalOnlyState(ctx, home, config) {
+  // Проверка и карантин копий + коммит — запись в зеркало: только под локом.
+  // Вложенный вызов из уже залоченной операции лок второй раз не берёт.
+  return mirrorWrite('local-only', () => reconcileLocalOnlyStateUnlocked(ctx, home, config))
+}
+
+/** Тело `reconcileLocalOnlyState` под уже взятым локом. */
+async function reconcileLocalOnlyStateUnlocked(ctx, home, config) {
   const result = await prepareLocalOnlyState(home, config)
   if (result.ok !== true) return result
   if (result.changed === true) {
@@ -4069,41 +4220,53 @@ async function switchSessionMode(ctx, payload = {}) {
       ? { id: session.id, parentSession: session.parent }
       : undefined,
   })))
-  const result = await setSessionMode(home, ids, mode, { groups })
   const config = await loadConfig(home)
-  const affected = Array.isArray(result.ids) ? result.ids : []
-  let declared = 0
-  let undeclared = 0
-  let quarantined = 0
-  const removedIds = []
-  for (const id of affected) {
-    if (mode === MODE_LOCAL) {
-      const local = await makeSessionLocal({ home, config, sessionId: id, options: { declaredBy: config.deviceId } })
-      if (local.declared === true) declared += 1
-      if (local.quarantined === true) {
-        quarantined += 1
-        removedIds.push(normalizeSessionId(id))
+  // Смена режима пишет в зеркало: режим, объявление «локальная навсегда»,
+  // карантин копии и коммит — всё под общим локом.
+  const outcome = await mirrorWrite('mode', async () => {
+    const result = await setSessionMode(home, ids, mode, { groups })
+    const affected = Array.isArray(result.ids) ? result.ids : []
+    let declared = 0
+    let undeclared = 0
+    let quarantined = 0
+    const removedIds = []
+    for (const id of affected) {
+      if (mode === MODE_LOCAL) {
+        const local = await makeSessionLocal({ home, config, sessionId: id, options: { declaredBy: config.deviceId } })
+        if (local.declared === true) declared += 1
+        if (local.quarantined === true) {
+          quarantined += 1
+          removedIds.push(normalizeSessionId(id))
+        }
+      } else {
+        const cloud = await makeSessionCloud({ home, config, sessionId: id })
+        if (cloud.undeclared === true || cloud.tombstoneDropped === true) undeclared += 1
       }
-    } else {
-      const cloud = await makeSessionCloud({ home, config, sessionId: id })
-      if (cloud.undeclared === true || cloud.tombstoneDropped === true) undeclared += 1
     }
-  }
-  let committed = false
-  let warning = ''
-  if (affected.length > 0) {
-    const commit = await commitMirrorChanges(config, `dsh-sync: session mode ${mode} (${config.deviceId})`)
-    committed = commit.committed
-    warning = commit.warning
-    if (warning !== '') {
-      await queueFailedOperation(home, {
-        type: 'mode',
-        payload: { ids: affected, mode, declare: mode === MODE_LOCAL },
-        error: warning,
-      })
+    let committed = false
+    let warning = ''
+    if (affected.length > 0) {
+      const commit = await commitMirrorChanges(config, `dsh-sync: session mode ${mode} (${config.deviceId})`)
+      committed = commit.committed
+      warning = commit.warning
+      if (warning !== '') {
+        await queueFailedOperation(home, {
+          type: 'mode',
+          payload: { ids: affected, mode, declare: mode === MODE_LOCAL },
+          error: warning,
+        })
+      }
     }
+    return { result, affected, declared, undeclared, quarantined, removedIds, committed, warning }
+  })
+  if (outcome?.busy === true) {
+    return mirrorBusyBody(outcome, { action: 'session-mode' })
   }
+  const { result, affected, declared, undeclared, quarantined, removedIds } = outcome
+  const committed = outcome.committed === true
+  let warning = typeof outcome.warning === 'string' ? outcome.warning : ''
   // «Сделать облачной» отправляет сессию сразу, не дожидаясь автопушка.
+  // Уже вне лока: child-синхронизация берёт лок сама, а нам ждать её не нужно.
   if (mode !== MODE_LOCAL && payload.push === true && affected.length > 0) {
     try {
       const record = await runSync(ctx, 'push')
@@ -4147,6 +4310,16 @@ async function switchSessionMode(ctx, payload = {}) {
  */
 async function runLocalOnlyMigration(ctx, payload = {}) {
   const home = dshHome()
+  // Миграция убирает облачные копии: карантин, метки и коммит — под общим локом.
+  const outcome = await mirrorWrite('local-only', () => runLocalOnlyMigrationUnlocked(ctx, payload, home))
+  if (outcome?.busy === true) {
+    return { status: 409, body: mirrorBusyBody(outcome, { action: 'local-only-migration' }) }
+  }
+  return outcome
+}
+
+/** Тело `runLocalOnlyMigration` под уже взятым локом зеркала. */
+async function runLocalOnlyMigrationUnlocked(ctx, payload = {}, home = dshHome()) {
   const config = await loadConfig(home)
   const inspected = await localOnlyMigrationCandidates({ home, config })
   if (payload.confirm !== true) {
@@ -5051,7 +5224,13 @@ export function apply(ctx) {
       if (action === 'plan') {
         return json(await refreshProfilePlan({ home, config, neutralizer }))
       }
-      const result = await applyPendingProfile({ home, config, neutralizer })
+      // Применение профиля пишет локальные файлы по данным зеркала: под общим
+      // локом, чтобы не пересечься с приёмом/отправкой в child-процессе.
+      const appliedProfile = await mirrorWrite('profile', () => applyPendingProfile({ home, config, neutralizer }))
+      if (appliedProfile?.busy === true) {
+        return json(mirrorBusyBody(appliedProfile, { action: 'profile-apply' }), 409)
+      }
+      const result = appliedProfile
       if (result.ok === true && (result.applied ?? 0) > 0) {
         pushNotice('sync', `Профиль обновлён: применено файлов ${result.applied}`)
         invalidateSessionStates()
